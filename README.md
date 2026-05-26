@@ -5,7 +5,7 @@ Mini vim-buffer TUI editor with AI completions, split layouts, Brief mode, and d
 **Tech:** Rust 2021 · Ratatui + Crossterm · Codeium + Llama.cpp LLM · Vim-like Modal Sequences · Brief Mode (Always-Insert) · Tokio Async
 
 ---
-![image](./ce001.png)
+![image](./ce002.png)
 
 
 ## 📦 Module Architecture
