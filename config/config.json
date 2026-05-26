@@ -1,0 +1,59 @@
+{
+  "api_key": "sk-your-api-key",
+  "api_url": "https://server.codeium.com",
+  "portal_url": "https://codeium.com",
+
+  "llm_url": "127.0.0.1",
+  "llm_port": 11838,
+  "llm_system_prompt": "You are a helpful coding assistant. Be concise. Use code examples when relevant. If unsure, say so.",
+  "llm_api_key": "your-apikey-here",
+
+  "max_tokens": 256,
+  "editor_language": "rust",
+  "codeium_enabled": false,
+  "popup_enabled": false,
+  "init_mode": "vim",
+  "keybindings": {
+    "normal": {
+      "L": "prevhunk",
+      "k": "rgundercursor",
+      "f9": "tig",
+      "<tab>": "focusnext",
+      "l": "nexthunk",
+      "<leader> q q": "Quit",
+      "<space>": "",
+      "b": "word_backward"
+    },
+    "insert": {
+      "<ctrl> p": "completion_prev",
+      "<ctrl> n": "completion_next",
+      "f9": "tig"
+    },
+    "brief": {
+      "f10": "shortcuts"
+    },
+    "command": {},
+    "visual": {},
+    "global": {
+      "<alt> e": "filepicker",
+      "<alt> =": "buffernext",
+      "<alt> x": "bufferclose",
+      "<ctrl> b": "mru",
+      "f8": "funlist",
+      "<alt> b": "bufferlist",
+      "<alt> w": "save",
+      "<alt> -": "bufferprev",
+      "<alt> q": "quitall",
+      "f4": "hunkpopup",
+      "f1": "gitstatus",
+      "f11": "lastrg"
+      
+    }
+  },
+  "leader": ",",
+  "line_numbers_enabled": true,
+  "relative_line_numbers": true,
+  "git_gutter_enabled": true,
+  "bookmarks_enabled": true,
+  "search_wrap_enabled": false
+}
