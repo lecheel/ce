@@ -1,7 +1,6 @@
 pub mod actions;
+pub mod binding_ex;
 pub mod bindings;
 
-#[allow(unused_imports)]
-pub use bindings::{
-    execute_action, get_sequence_suggestions, resolve_sequence, resolve_single_key, ResolveResult,
-};
+pub use binding_ex::get_sequence_suggestions;
+pub use bindings::{execute_action, resolve_single_key};

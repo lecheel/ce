@@ -138,6 +138,11 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, editor: &mut Editor) {
             Color::Rgb(100, 65, 45), // Soft v-line dark orange
             Color::Rgb(245, 230, 220),
         ),
+        Mode::VisualBlock => (
+            " V-BLOCK ",
+            Color::Rgb(100, 65, 45), // Soft v-line dark orange
+            Color::Rgb(245, 230, 220),
+        ),
         Mode::Search => (
             " SEARCH ",
             Color::Rgb(100, 75, 45),

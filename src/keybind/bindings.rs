@@ -10,11 +10,50 @@ use crate::ed::editor::PendingInput;
 use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::repeat::{DeleteDirection, RepeatExt, RepeatableAction};
 use crate::ed::{editing, movement};
+use crate::keybind::binding_ex::action_display_name;
+use crate::keybind::binding_ex::delete_block;
+use crate::keybind::binding_ex::find_custom_action;
+use crate::keybind::binding_ex::paste_block;
+use crate::keybind::binding_ex::yank_block;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+// ========== BRIEF MODE HOME/END TRACKERS ==========
+struct BriefHomeTracker {
+    last_press: Option<Instant>,
+    count: usize,
+}
+
+struct BriefEndTracker {
+    last_press: Option<Instant>,
+    count: usize,
+}
+
+static BRIEF_HOME_TRACKER: Mutex<BriefHomeTracker> = Mutex::new(BriefHomeTracker {
+    last_press: None,
+    count: 0,
+});
+
+static BRIEF_END_TRACKER: Mutex<BriefEndTracker> = Mutex::new(BriefEndTracker {
+    last_press: None,
+    count: 0,
+});
+
+/// Reset both trackers when any key other than Home/End is pressed or timeout occurs.
+fn reset_brief_trackers() {
+    if let Ok(mut tracker) = BRIEF_HOME_TRACKER.lock() {
+        tracker.last_press = None;
+        tracker.count = 0;
+    }
+    if let Ok(mut tracker) = BRIEF_END_TRACKER.lock() {
+        tracker.last_press = None;
+        tracker.count = 0;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Action — representation of all editor commands
@@ -35,6 +74,7 @@ pub enum Action {
     MoveToLastLine,
     PageUp,
     PageDown,
+    ScrollCenter,
 
     // Editing
     Backspace,
@@ -72,9 +112,17 @@ pub enum Action {
     CompleteCommand,
     CommandHistoryPrev,
     CommandHistoryNext,
+    CommandLineStart,
+    CommandLineEnd,
+    CommandLineLeft,
+    CommandLineRight,
+    CommandDeleteChar,
+    CommandLineKillToEnd,
+    CommandClear,
 
     // Copy / Paste Register
     YankCurrentLine,
+    YankCurrentWord,
     Paste,
 
     // Config Toggles
@@ -117,6 +165,7 @@ pub enum Action {
     CutToSystemClipboard,
     YankWordToSystemClipboard,
     PutFromSystemClipboardBelow,
+    ClipboardReplaceBuffer,
 
     // Gutter Display Toggles
     ToggleLineNumbers,
@@ -132,10 +181,28 @@ pub enum Action {
     BufferList,
     BufferClose,
     Save,
+    SaveAs,
     Quit,
     ForceQuit,
     QuitAll,
     ForceQuitAll,
+
+    // Brief ops
+    BriefSelectionToggle,
+
+    // Extend Selection (Shift+Nav)
+    ExtendSelectionLeft,
+    ExtendSelectionRight,
+    ExtendSelectionUp,
+    ExtendSelectionDown,
+    ExtendSelectionWordForward,
+    ExtendSelectionWordBackward,
+    ExtendSelectionLineStart,
+    ExtendSelectionLineEnd,
+    ExtendSelectionToFirstLine,
+    ExtendSelectionToLastLine,
+    ExtendSelectionPageUp,
+    ExtendSelectionPageDown,
 
     //-- enum Actions (anchor dont removed) --//
     EnterLlmPrompt,
@@ -152,6 +219,7 @@ pub enum Action {
     GitStatus,
     // Vim Search Actions
     EnterSearch,
+    CancelSearch,
     ExecuteSearch,
     SearchNext,
     SearchPrev,
@@ -160,6 +228,9 @@ pub enum Action {
     // Visual Selection Modes
     EnterVisual,
     EnterVisualLine,
+    EnterVisualBlock,
+    VisualBlockInsert,
+    VisualBlockAppend,
     YankSelection,
     DeleteSelection,
     ChangeSelection,
@@ -202,6 +273,7 @@ impl Action {
                 | Action::ChangeInsideBraces
                 | Action::DeleteInsideBrackets
                 | Action::ChangeInsideBrackets
+                | Action::ClipboardReplaceBuffer
         )
     }
 }
@@ -223,6 +295,7 @@ impl FromStr for Action {
             "movetolastline" | "lastline" => Ok(Action::MoveToLastLine),
             "pageup" => Ok(Action::PageUp),
             "pagedown" => Ok(Action::PageDown),
+            "scrollcenter" | "zz" => Ok(Action::ScrollCenter),
 
             "backspace" => Ok(Action::Backspace),
             "delete" | "deletecharforward" => Ok(Action::DeleteCharForward),
@@ -295,6 +368,9 @@ impl FromStr for Action {
             }
             "entervisual" | "visual" => Ok(Action::EnterVisual),
             "entervisualline" | "visualline" => Ok(Action::EnterVisualLine),
+            "entervisualblock" | "visualblock" | "altc" => Ok(Action::EnterVisualBlock),
+            "visualblockinsert" | "vblockinsert" => Ok(Action::VisualBlockInsert),
+            "visualblockappend" | "vblockappend" => Ok(Action::VisualBlockAppend),
             "yankselection" => Ok(Action::YankSelection),
             "deleteselection" => Ok(Action::DeleteSelection),
             "changeselection" => Ok(Action::ChangeSelection),
@@ -324,66 +400,41 @@ impl FromStr for Action {
             "rgundercursor" => Ok(Action::RgUnderCursor),
             "marks" => Ok(Action::BookMarks),
             "llmprompt" => Ok(Action::EnterLlmPrompt),
+            "commandlinestart" | "cmdhome" | "ctrla" => Ok(Action::CommandLineStart),
+            "commandlineend" | "cmdend" | "ctrle" => Ok(Action::CommandLineEnd),
+            "commandlineleft" | "cmdleft" | "ctrlb" => Ok(Action::CommandLineLeft),
+            "commandlineright" | "cmdright" | "ctrlf" => Ok(Action::CommandLineRight),
+            "commanddeletechar" | "cmddelete" | "ctrld" => Ok(Action::CommandDeleteChar),
+            "commandlinekilltoend" | "cmdkill" | "ctrlk" => Ok(Action::CommandLineKillToEnd),
+            "commandclear" | "cmdclear" | "altddelline" => Ok(Action::CommandClear),
+            // brief
+            "briefselectiontoggle" | "bselect" => Ok(Action::BriefSelectionToggle),
+
+            "extendselectionleft" | "selectleft" => Ok(Action::ExtendSelectionLeft),
+            "extendselectionright" | "selectright" => Ok(Action::ExtendSelectionRight),
+            "extendselectionup" | "selectup" => Ok(Action::ExtendSelectionUp),
+            "extendselectiondown" | "selectdown" => Ok(Action::ExtendSelectionDown),
+            "extendselectionwordforward" | "selectwordforward" => {
+                Ok(Action::ExtendSelectionWordForward)
+            }
+            "extendselectionwordbackward" | "selectwordbackward" => {
+                Ok(Action::ExtendSelectionWordBackward)
+            }
+            "extendselectionlinestart" | "selecthomestart" => Ok(Action::ExtendSelectionLineStart),
+            "extendselectionlineend" | "selectlineend" => Ok(Action::ExtendSelectionLineEnd),
+            "clipboardreplacebuffer" | "crb" => Ok(Action::ClipboardReplaceBuffer),
 
             //-- FromStr commands action enterbrief (anchor dont removed) --//
             "enterbrief" | "brief" => Ok(Action::EnterBrief),
             "filepicker" => Ok(Action::FilePicker),
             "save" => Ok(Action::Save),
+            "write" => Ok(Action::SaveAs),
             "quit" => Ok(Action::Quit),
             "forcequit" => Ok(Action::ForceQuit),
 
             _ => anyhow::bail!("Unknown keybind action: {}", s),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Format a key event into a string representation.
-///
-/// - `Shift+G` → `"G"`  (uppercase letter, no shift prefix)
-/// - `Ctrl+G`  → `"ctrl+g"`
-/// - `Alt+G`   → `"alt+g"`
-pub fn format_key(key: KeyEvent) -> String {
-    let mut parts = Vec::new();
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        parts.push("ctrl");
-    }
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        parts.push("alt");
-    }
-
-    let code_str = match key.code {
-        KeyCode::Esc => "esc".to_string(),
-        KeyCode::Enter => "enter".to_string(),
-        KeyCode::Backspace => "backspace".to_string(),
-        KeyCode::Tab => "tab".to_string(),
-        KeyCode::BackTab => "backtab".to_string(),
-        KeyCode::Delete => "delete".to_string(),
-        KeyCode::Insert => "insert".to_string(),
-        KeyCode::Up => "up".to_string(),
-        KeyCode::Down => "down".to_string(),
-        KeyCode::Left => "left".to_string(),
-        KeyCode::Right => "right".to_string(),
-        KeyCode::Home => "home".to_string(),
-        KeyCode::End => "end".to_string(),
-        KeyCode::PageUp => "pageup".to_string(),
-        KeyCode::PageDown => "pagedown".to_string(),
-        KeyCode::Char(' ') => "space".to_string(),
-        KeyCode::Char(c) => c.to_string(),
-        KeyCode::F(num) => format!("f{}", num),
-        _ => "".to_string(),
-    };
-
-    if code_str.is_empty() {
-        return "".to_string();
-    }
-
-    parts.push(&code_str);
-    parts.join("+")
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +465,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("g g", Action::MoveToFirstLine),
         ("pageup", Action::PageUp),
         ("pagedown", Action::PageDown),
+        ("z z", Action::ScrollCenter),
         // searching
         ("/", Action::EnterSearch),
         ("n", Action::SearchNext),
@@ -486,214 +538,10 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("c i f", Action::ChangeInsideFunction),
         ("v", Action::EnterVisual),
         ("V", Action::EnterVisualLine),
+        ("ctrl+v", Action::EnterVisualBlock),
         // Repeater Command
         (".", Action::RepeatLastChange),
     ]
-}
-
-// ---------------------------------------------------------------------------
-// KeySuggestion — richer suggestion entry used by the which-key popup
-// ---------------------------------------------------------------------------
-
-/// A single narrowed candidate shown in the which-key popup.
-#[derive(Debug, Clone)]
-pub struct KeySuggestion {
-    /// Keys still to type (e.g. `"v"` when pending is `"space p"`).
-    pub suffix: String,
-    /// Complete binding string (e.g. `"space p v"`).
-    pub full_bind: String,
-    /// Human-readable action label (e.g. `"Paste"`).
-    pub description: String,
-    /// Resolved action — used for auto-execute on last match.
-    pub action: Action,
-}
-
-// ---------------------------------------------------------------------------
-// Suggestion Engine for Which-Key Popups
-// ---------------------------------------------------------------------------
-
-pub fn get_sequence_suggestions(config: &Config, pending: &str, mode: Mode) -> Vec<KeySuggestion> {
-    // ── Translate Brief Mode F10 pending state to leader character ──
-    let mut resolved_pending = pending.to_lowercase();
-    if mode == Mode::Brief {
-        let brief_leader = config
-            .keybindings
-            .brief
-            .iter()
-            .find(|(_, action_str)| {
-                let norm = action_str.to_lowercase().replace('_', "");
-                norm == "shortcuts" || norm == "shortcutspopup"
-            })
-            .map(|(key, _)| normalize_config_key(key))
-            .unwrap_or_else(|| "f10".to_string());
-
-        if resolved_pending.starts_with(&brief_leader) {
-            resolved_pending = resolved_pending.replacen(&brief_leader, &config.leader, 1);
-        }
-    }
-
-    let prefix = format!("{} ", resolved_pending);
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-
-    // 1. Default bindings (with Leader override)
-    for (bind, action) in get_default_actions() {
-        // Dynamically replace default "space " leader with the configured leader
-        let resolved_bind = if bind.starts_with("space ") {
-            bind.replacen("space ", &format!("{} ", config.leader), 1)
-        } else {
-            bind.to_string()
-        };
-
-        let bind_lower = resolved_bind.to_lowercase();
-        if bind_lower.starts_with(&prefix) {
-            let suffix = resolved_bind[prefix.len()..].to_string();
-            if seen.insert(suffix.clone()) {
-                out.push(KeySuggestion {
-                    suffix,
-                    full_bind: resolved_bind.clone(),
-                    description: action_display_name(&action),
-                    action,
-                });
-            }
-        }
-    }
-
-    let mut check_suggestions = |map: &std::collections::HashMap<String, String>| {
-        for (bind_key, action_str) in map {
-            let normalized_bind = normalize_config_key(bind_key);
-            let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
-
-            let norm = resolved_bind.to_lowercase();
-            if norm.starts_with(&prefix) {
-                let suffix = resolved_bind[prefix.len()..].to_string();
-                if seen.insert(suffix.clone()) {
-                    if let Ok(action) = action_str.parse::<Action>() {
-                        out.push(KeySuggestion {
-                            suffix,
-                            full_bind: resolved_bind.clone(),
-                            description: action_display_name(&action),
-                            action,
-                        });
-                    }
-                }
-            }
-        }
-    };
-
-    // 2. Custom active-mode bindings
-    check_suggestions(get_active_bindings(config, mode));
-
-    // 2b. For Brief Mode: share Normal Mode leader suggestion rows
-    if mode == Mode::Brief && resolved_pending.starts_with(&config.leader) {
-        check_suggestions(&config.keybindings.normal);
-    }
-
-    // 3. Custom global bindings
-    check_suggestions(&config.keybindings.global);
-
-    out.sort_by(|a, b| a.suffix.cmp(&b.suffix));
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Resolve Key Sequences
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolveResult {
-    /// Exact match — execute immediately.
-    Action(Action),
-    /// Narrowed to exactly one reachable binding — auto-execute immediately.
-    AutoAction(Action),
-    /// Valid prefix; keep accumulating keys.
-    Pending,
-    /// No match and no valid prefix.
-    None,
-}
-
-pub fn resolve_sequence(
-    config: &Config,
-    key_seq: &str,
-    ghost_active: bool,
-    mode: Mode,
-) -> ResolveResult {
-    // Insert and Search modes never use multi-key sequences.
-    if mode == Mode::Insert || mode == Mode::Search {
-        return ResolveResult::None;
-    }
-
-    // ── Translate Brief Mode dynamic leader ───────────────────────────
-    let mut resolved_seq = key_seq.to_string();
-    if mode == Mode::Brief {
-        // Dynamically find the key mapped to "shortcuts" in your config.json brief map
-        let brief_leader = config
-            .keybindings
-            .brief
-            .iter()
-            .find(|(_, action_str)| {
-                let norm = action_str.to_lowercase().replace('_', "");
-                norm == "shortcuts"
-            })
-            .map(|(key, _)| normalize_config_key(key))
-            .unwrap_or_else(|| "f12".to_string()); // Fallback to f12 if not defined
-
-        if resolved_seq.starts_with(&brief_leader) {
-            // Map the configured brief leader prefix to standard leader character (e.g. ",")
-            resolved_seq = resolved_seq.replacen(&brief_leader, &config.leader, 1);
-        } else {
-            // Any other key combinations in Brief mode do not trigger sequence prefixes
-            return ResolveResult::None;
-        }
-    }
-
-    // ── 1. Exact match — custom config ────────────────────────────
-    if let Some(action) = find_custom_action(config, &resolved_seq, mode) {
-        return ResolveResult::Action(action);
-    }
-
-    // ── 2. Exact match — defaults (with Leader override) ──────────
-    if ghost_active && (resolved_seq == "tab" || resolved_seq == "right") {
-        return ResolveResult::Action(Action::AcceptCompletion);
-    }
-
-    for (bind, action) in get_default_actions() {
-        // Dynamically replace default "space " leader with the configured leader
-        let resolved_bind = if bind.starts_with("space ") {
-            bind.replacen("space ", &format!("{} ", config.leader), 1)
-        } else {
-            bind.to_string()
-        };
-
-        if resolved_bind == resolved_seq {
-            return ResolveResult::Action(action);
-        }
-    }
-
-    // ── 3. Prefix scan — collect all reachable terminal actions ───
-    let mut candidates = find_custom_prefix_actions(config, &resolved_seq, mode);
-
-    for (bind, action) in get_default_actions() {
-        // Dynamically replace default "space " leader with the configured leader for prefixes
-        let resolved_bind = if bind.starts_with("space ") {
-            bind.replacen("space ", &format!("{} ", config.leader), 1)
-        } else {
-            bind.to_string()
-        };
-
-        if resolved_bind.starts_with(&resolved_seq) && resolved_bind.len() > resolved_seq.len() {
-            if !candidates.contains(&action) {
-                candidates.push(action);
-            }
-        }
-    }
-
-    // Do not auto-execute on partial prefix matches
-    if candidates.is_empty() {
-        ResolveResult::None
-    } else {
-        ResolveResult::Pending
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +568,23 @@ pub fn resolve_single_key(
         }
     }
 
+    // ── 2b. Shift+Navigation for Selection (Insert / Brief) ──────
+    if mode == Mode::Insert || mode == Mode::Brief {
+        if raw_key.modifiers.contains(KeyModifiers::SHIFT) {
+            match raw_key.code {
+                KeyCode::Left => return Some(Action::ExtendSelectionLeft),
+                KeyCode::Right => return Some(Action::ExtendSelectionRight),
+                KeyCode::Up => return Some(Action::ExtendSelectionUp),
+                KeyCode::Down => return Some(Action::ExtendSelectionDown),
+                KeyCode::Home => return Some(Action::ExtendSelectionLineStart),
+                KeyCode::End => return Some(Action::ExtendSelectionLineEnd),
+                KeyCode::PageUp => return Some(Action::ExtendSelectionPageUp),
+                KeyCode::PageDown => return Some(Action::ExtendSelectionPageDown),
+                _ => {}
+            }
+        }
+    }
+
     // ── 3. Mode-specific hardcoded fallback ───────────────────────
     match mode {
         Mode::Brief => {
@@ -736,7 +601,10 @@ pub fn resolve_single_key(
                     KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::CycleCompletionNext),
                     KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::CycleCompletionPrev),
                     KeyCode::Char('s') => Some(Action::Save),
-                    KeyCode::Char('c') => Some(Action::ExitMode),
+                    KeyCode::Char('c') | KeyCode::Char('C') => Some(Action::YankCurrentLine),
+                    KeyCode::Char('x') | KeyCode::Char('X') => Some(Action::DeleteCurrentLine),
+                    KeyCode::Char('v') | KeyCode::Char('V') => Some(Action::Paste),
+                    KeyCode::Char('h') => Some(Action::ExitMode), // ← optional: Ctrl+H backspace compat
                     _ => None,
                 };
             }
@@ -843,32 +711,99 @@ pub fn resolve_single_key(
             }
         }
 
-        Mode::Command => match raw_key.code {
-            KeyCode::Esc => Some(Action::ExitMode),
-            KeyCode::Enter => Some(Action::ExecuteCommand),
-            KeyCode::Tab => Some(Action::CompleteCommand),
-            KeyCode::Backspace => Some(Action::CommandBackspace),
-            KeyCode::Char(ch) => Some(Action::CommandChar(ch)),
-            KeyCode::Up => Some(Action::CommandHistoryPrev),
-            KeyCode::Down => Some(Action::CommandHistoryNext),
-            _ => None,
-        },
+        Mode::Command => {
+            if raw_key.modifiers.contains(KeyModifiers::CONTROL) {
+                return match raw_key.code {
+                    KeyCode::Char('a') => Some(Action::CommandLineStart),
+                    KeyCode::Char('e') => Some(Action::CommandLineEnd),
+                    KeyCode::Char('b') => Some(Action::CommandLineLeft),
+                    KeyCode::Char('f') => Some(Action::CommandLineRight),
+                    KeyCode::Char('d') => Some(Action::CommandDeleteChar),
+                    KeyCode::Char('k') => Some(Action::CommandLineKillToEnd),
+                    KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::CommandHistoryNext),
+                    KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::CommandHistoryPrev),
+                    _ => None,
+                };
+            }
+            if raw_key.modifiers.contains(KeyModifiers::ALT) {
+                return match raw_key.code {
+                    KeyCode::Char('d') | KeyCode::Char('D') => Some(Action::CommandClear),
+                    _ => None,
+                };
+            }
 
-        Mode::Search => match raw_key.code {
-            KeyCode::Esc => Some(Action::ExitMode),
-            KeyCode::Enter => Some(Action::ExecuteSearch),
-            KeyCode::Backspace => Some(Action::CommandBackspace),
-            KeyCode::Char(ch) => Some(Action::CommandChar(ch)),
-            _ => None,
-        },
+            match raw_key.code {
+                KeyCode::Esc => Some(Action::ExitMode),
+                KeyCode::Enter => Some(Action::ExecuteCommand),
+                KeyCode::Tab => Some(Action::CompleteCommand),
+                KeyCode::Backspace => Some(Action::CommandBackspace),
+                KeyCode::Delete => Some(Action::CommandDeleteChar),
+                KeyCode::Left => Some(Action::CommandLineLeft),
+                KeyCode::Right => Some(Action::CommandLineRight),
+                KeyCode::Home => Some(Action::CommandLineStart),
+                KeyCode::End => Some(Action::CommandLineEnd),
+                KeyCode::Char(ch) => Some(Action::CommandChar(ch)),
+                KeyCode::Up => Some(Action::CommandHistoryPrev),
+                KeyCode::Down => Some(Action::CommandHistoryNext),
+                _ => None,
+            }
+        }
+
+        Mode::Search => {
+            if raw_key.modifiers.contains(KeyModifiers::CONTROL) {
+                return match raw_key.code {
+                    KeyCode::Char('a') => Some(Action::CommandLineStart),
+                    KeyCode::Char('e') => Some(Action::CommandLineEnd),
+                    KeyCode::Char('b') => Some(Action::CommandLineLeft),
+                    KeyCode::Char('f') => Some(Action::CommandLineRight),
+                    KeyCode::Char('d') => Some(Action::CommandDeleteChar),
+                    KeyCode::Char('k') => Some(Action::CommandLineKillToEnd),
+                    _ => None,
+                };
+            }
+            if raw_key.modifiers.contains(KeyModifiers::ALT) {
+                return match raw_key.code {
+                    KeyCode::Char('d') | KeyCode::Char('D') => Some(Action::CommandClear),
+                    _ => None,
+                };
+            }
+
+            match raw_key.code {
+                KeyCode::Esc => Some(Action::ExitMode),
+                KeyCode::Enter => Some(Action::ExecuteSearch),
+                KeyCode::Backspace => Some(Action::CommandBackspace),
+                KeyCode::Delete => Some(Action::CommandDeleteChar),
+                KeyCode::Left => Some(Action::CommandLineLeft),
+                KeyCode::Right => Some(Action::CommandLineRight),
+                KeyCode::Home => Some(Action::CommandLineStart),
+                KeyCode::End => Some(Action::CommandLineEnd),
+                KeyCode::Char(ch) => Some(Action::CommandChar(ch)),
+                _ => None,
+            }
+        }
+
         Mode::LlmPrompt => None,
         Mode::Normal => None,
 
-        Mode::Visual | Mode::VisualLine => match key_str {
-            "y" => Some(Action::YankSelection),
+        Mode::Visual | Mode::VisualLine | Mode::VisualBlock => match key_str {
+            "y" | "ctrl+c" => Some(Action::YankSelection),
             // "+" => Some(Action::YankToSystemClipboard),
-            "d" | "x" => Some(Action::DeleteSelection),
+            "d" | "x" | "delete" | "ctrl-x" => Some(Action::DeleteSelection),
             "c" => Some(Action::ChangeSelection),
+            "I" => {
+                if mode == Mode::VisualBlock {
+                    Some(Action::VisualBlockInsert) // <- Shift-I triggers column-insert
+                } else {
+                    Some(Action::EnterInsertLineStart)
+                }
+            }
+            "A" => {
+                if mode == Mode::VisualBlock {
+                    Some(Action::VisualBlockAppend) // <- Shift-A triggers column-append
+                } else {
+                    Some(Action::EnterInsertLineEnd)
+                }
+            }
             ">" => Some(Action::IndentSelection),
             "<" => Some(Action::OutdentSelection),
             "esc" => Some(Action::ExitMode),
@@ -897,7 +832,6 @@ fn resolve_insert_alt_key(key: KeyEvent) -> Option<Action> {
 
 /// Resolve an Alt+key combination in Brief mode.
 fn resolve_brief_alt_key(key: KeyEvent) -> Option<Action> {
-    // Only process Alt (no Alt+Ctrl, no Alt+Shift for letters)
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
     }
@@ -907,18 +841,25 @@ fn resolve_brief_alt_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('w') | KeyCode::Char('W') => Some(Action::Save),
         KeyCode::Char('q') | KeyCode::Char('Q') => Some(Action::Quit),
         KeyCode::Char('e') | KeyCode::Char('E') => Some(Action::FilePicker),
+        KeyCode::Char('o') | KeyCode::Char('O') => Some(Action::SaveAs),
 
         // ── Movement ────────────────────────────
         KeyCode::Char('f') | KeyCode::Char('F') => Some(Action::MoveWordForward),
+        KeyCode::Char('g') | KeyCode::Char('G') => Some(Action::EnterCommand),
+        KeyCode::Char('j') | KeyCode::Char('J') => Some(Action::BookmarkGoto),
         KeyCode::Char('<') => Some(Action::MoveToFirstLine),
         KeyCode::Char('>') => Some(Action::MoveToLastLine),
+
+        KeyCode::Char('s') | KeyCode::Char('S') => Some(Action::EnterSearch),
 
         // ── Editing ─────────────────────────────
         KeyCode::Char('d') | KeyCode::Char('D') => Some(Action::DeleteCurrentLine),
         KeyCode::Char('k') | KeyCode::Char('K') => Some(Action::DeleteToEndOfLine),
         KeyCode::Char('u') | KeyCode::Char('U') => Some(Action::Undo),
-        KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::YankCurrentLine),
-        KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::Paste),
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::YankCurrentWord),
+        KeyCode::Char('l') | KeyCode::Char('L') => Some(Action::BriefSelectionToggle),
+        KeyCode::Char('c') | KeyCode::Char('C') => Some(Action::EnterVisualBlock),
+        KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::ToggleBookmarkAtCursor),
 
         // ── Window / Buffer ─────────────────────
         KeyCode::Char('b') | KeyCode::Char('B') => Some(Action::BufferList),
@@ -927,9 +868,6 @@ fn resolve_brief_alt_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('2') => Some(Action::SwitchBuffer(1)),
         KeyCode::Char('3') => Some(Action::SwitchBuffer(2)),
         KeyCode::Char('4') => Some(Action::SwitchBuffer(3)),
-
-        // ── Mode toggle ─────────────────────────
-        KeyCode::Char('x') | KeyCode::Char('X') => Some(Action::ExitMode),
 
         _ => None,
     }
@@ -969,7 +907,67 @@ fn exits_insert_mode(action: Action) -> bool {
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
 
-    // ── SAFETY: Prevent mutating actions on read-only special buffers ──
+    // ── ① Capture insert_buffer text BEFORE the recording engine clears it.
+    //    Only needed for ExitMode / EnterNormal (the two actions that end an
+    //    insert session AND may need to replicate block-column text).
+    let pre_captured_insert: Option<String> =
+        if action == Action::ExitMode || action == Action::EnterNormal {
+            editor.insert_buffer.clone()
+        } else {
+            None
+        };
+
+    // ── Brief trackers reset ───────────────────────────────────────────────
+    if action != Action::RepeatLastChange {
+        reset_brief_trackers();
+    }
+    if action != Action::MoveLineStart && action != Action::MoveLineEnd {
+        reset_brief_trackers();
+    }
+
+    // ── Brief Mode: Cancel selection on non-navigation actions ────────────
+    if editor.mode() == Mode::Brief
+        && editor.active_window().visual_anchor.is_some()
+        && editor.visual_block_insert_state.is_none()
+    {
+        let keeps_selection = matches!(
+            action,
+            Action::MoveLeft
+                | Action::MoveRight
+                | Action::MoveUp
+                | Action::MoveDown
+                | Action::MoveWordForward
+                | Action::MoveWordBackward
+                | Action::MoveLineStart
+                | Action::MoveLineEnd
+                | Action::MoveToFirstLine
+                | Action::MoveToLastLine
+                | Action::PageUp
+                | Action::PageDown
+                | Action::BriefSelectionToggle
+                | Action::YankCurrentLine
+                | Action::YankCurrentWord
+                | Action::CycleCompletionNext
+                | Action::CycleCompletionPrev
+                | Action::ExtendSelectionLeft
+                | Action::ExtendSelectionRight
+                | Action::ExtendSelectionUp
+                | Action::ExtendSelectionDown
+                | Action::ExtendSelectionWordForward
+                | Action::ExtendSelectionWordBackward
+                | Action::ExtendSelectionLineStart
+                | Action::ExtendSelectionLineEnd
+                | Action::ExtendSelectionToFirstLine
+                | Action::ExtendSelectionToLastLine
+                | Action::ExtendSelectionPageUp
+                | Action::ExtendSelectionPageDown
+        );
+        if !keeps_selection {
+            editor.active_window_mut().visual_anchor = None;
+        }
+    }
+
+    // ── SAFETY: Prevent mutating actions on read-only special buffers ──────
     if action.modifies_buffer() && editor.buf().is_readonly() {
         editor.set_status_msg("Buffer is read-only", MessageKind::Error);
         return;
@@ -981,7 +979,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         editor.git_debounce.notify_edit(buf_id);
     }
 
-    // ── 1. Recording State Engine ──────────────────────────────────────────
+    // ── ② Recording State Engine ───────────────────────────────────────────
     if action != Action::RepeatLastChange {
         if let Some(ref mut text) = editor.insert_buffer {
             match action {
@@ -998,17 +996,19 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     text.pop();
                 }
                 Action::EnterNormal | Action::ExitMode => {
+                    // Recording engine finalises the insert session and clears
+                    // insert_buffer.  pre_captured_insert already holds a copy
+                    // so block-column replication below is unaffected.
                     let final_text = text.clone();
                     editor.record_action(RepeatableAction::Insert(final_text), 1);
                     editor.insert_buffer = None;
                 }
-                _ => {} // Ignore navigation keys during insertion
+                _ => {}
             }
         } else {
             if enters_insert_mode(action) {
                 editor.insert_buffer = Some(String::new());
             } else if action.modifies_buffer() {
-                // Record standalone normal mode buffer edits
                 match action {
                     Action::Backspace => {
                         editor.record_action(
@@ -1070,88 +1070,325 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
     }
 
-    // ── 2. Action Execution ──────────────────────────────────────────────────
+    // ── ③ Action Execution ─────────────────────────────────────────────────
+    // When inside a visual-block insert session, suppress per-keystroke undo
+    // snapshots. A single snapshot is taken during ExitMode replication.
+    let in_block_insert = editor.visual_block_insert_state.is_some();
     match action {
         Action::EnterBrief => {
             editor.enter_brief();
         }
+        Action::BriefSelectionToggle => {
+            let win = editor.active_window_mut();
+            if win.visual_anchor.is_some() {
+                win.visual_anchor = None;
+                editor.set_status_msg("Selection cancelled", MessageKind::Info);
+            } else {
+                win.visual_anchor = Some((win.row, win.col));
+                editor.set_status_msg(
+                    "Selection started. Navigate to extend, Ctrl+C to copy, Esc to cancel.",
+                    MessageKind::Info,
+                );
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Shift+Nav Selection Extenders
+        // ---------------------------------------------------------------
+        Action::ExtendSelectionLeft => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveLeft);
+        }
+        Action::ExtendSelectionRight => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveRight);
+        }
+        Action::ExtendSelectionUp => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveUp);
+        }
+        Action::ExtendSelectionDown => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveDown);
+        }
+        Action::ExtendSelectionWordForward => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveWordForward);
+        }
+        Action::ExtendSelectionWordBackward => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveWordBackward);
+        }
+        Action::ExtendSelectionLineStart => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveLineStart);
+        }
+        Action::ExtendSelectionLineEnd => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveLineEnd);
+        }
+        Action::ExtendSelectionToFirstLine => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveToFirstLine);
+        }
+        Action::ExtendSelectionToLastLine => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::MoveToLastLine);
+        }
+        Action::ExtendSelectionPageUp => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::PageUp);
+        }
+        Action::ExtendSelectionPageDown => {
+            if editor.active_window().visual_anchor.is_none() {
+                editor.active_window_mut().visual_anchor =
+                    Some((editor.active_window().row, editor.active_window().col));
+            }
+            execute_action(editor, Action::PageDown);
+        }
+
         // ---------------------------------------------------------------
         // Visual Selection Operations
         // ---------------------------------------------------------------
         Action::EnterVisual => {
             if editor.mode() == Mode::Visual {
-                editor.enter_normal();
+                editor.change_mode(Mode::Normal);
             } else {
-                editor.set_mode(Mode::Visual);
+                editor.change_mode(Mode::Visual);
             }
         }
         Action::EnterVisualLine => {
             if editor.mode() == Mode::VisualLine {
-                editor.enter_normal();
+                editor.change_mode(Mode::Normal);
             } else {
-                editor.set_mode(Mode::VisualLine);
+                editor.change_mode(Mode::VisualLine);
             }
         }
+        Action::EnterVisualBlock => {
+            if editor.mode() == Mode::VisualBlock {
+                editor.change_mode(Mode::Normal);
+            } else {
+                editor.change_mode(Mode::VisualBlock);
+                editor.set_status_msg(
+                    "Column selection started. Navigate to extend, Ctrl+C to copy, Esc to cancel.",
+                    MessageKind::Info,
+                );
+            }
+        }
+        Action::VisualBlockInsert => {
+            let anchor_opt = editor.active_window().visual_anchor;
+            if let Some(anchor) = anchor_opt {
+                let win_row = editor.active_window().row;
+                let win_col = editor.active_window().col;
+
+                let r1 = anchor.0.min(win_row);
+                let r2 = anchor.0.max(win_row);
+                let c1 = anchor.1.min(win_col);
+                let rows: Vec<usize> = (r1..=r2).collect();
+
+                editor.visual_block_insert_state =
+                    Some(crate::ed::editor::VisualBlockInsertState { rows, col: c1 });
+
+                let (win, buf) = editor.active_window_and_buf_mut();
+                win.row = r1;
+
+                // Pad active line if it is shorter than target column so alignment is correct
+                let line_len = buf.line_char_len(r1);
+                if c1 > line_len {
+                    buf.push_undo(r1, line_len);
+                    let pad = " ".repeat(c1 - line_len);
+                    let off = buf.rope.line_to_char(r1) + line_len;
+                    buf.rope.insert(off, &pad);
+                    buf.modified = true;
+                }
+                win.col = c1;
+
+                // Re-anchor to BOTTOM of block to keep highlights spanning correctly
+                win.visual_anchor = Some((r2, anchor.1));
+
+                editor.insert_buffer = Some(String::new());
+                let target_mode = if editor.prev_mode == Mode::Brief {
+                    Mode::Brief
+                } else {
+                    Mode::Insert
+                };
+                editor.change_mode(target_mode);
+            }
+        }
+
+        Action::VisualBlockAppend => {
+            let anchor_opt = editor.active_window().visual_anchor;
+            if let Some(anchor) = anchor_opt {
+                let win_row = editor.active_window().row;
+                let win_col = editor.active_window().col;
+
+                let r1 = anchor.0.min(win_row);
+                let r2 = anchor.0.max(win_row);
+                let c2 = anchor.1.max(win_col);
+
+                let rows: Vec<usize> = (r1..=r2).collect();
+                let insert_col = c2 + 1;
+
+                editor.visual_block_insert_state =
+                    Some(crate::ed::editor::VisualBlockInsertState {
+                        rows,
+                        col: insert_col,
+                    });
+
+                let (win, buf) = editor.active_window_and_buf_mut();
+                win.row = r1;
+
+                // Pad active line if it is shorter than target column so alignment is correct
+                let line_len = buf.line_char_len(r1);
+                if insert_col > line_len {
+                    buf.push_undo(r1, line_len);
+                    let pad = " ".repeat(insert_col - line_len);
+                    let off = buf.rope.line_to_char(r1) + line_len;
+                    buf.rope.insert(off, &pad);
+                    buf.modified = true;
+                }
+                win.col = insert_col;
+
+                // Re-anchor to BOTTOM of block to keep highlights spanning correctly
+                win.visual_anchor = Some((r2, anchor.1));
+
+                editor.insert_buffer = Some(String::new());
+                let target_mode = if editor.prev_mode == Mode::Brief {
+                    Mode::Brief
+                } else {
+                    Mode::Insert
+                };
+                editor.change_mode(target_mode);
+            }
+        }
+
         Action::YankSelection => {
             let mode = editor.mode();
-            let range = {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                win.get_selection_range(buf, mode)
-            };
-            if let Some((start_char, end_char)) = range {
-                let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                editor.clipboard = Some(text);
-                editor.set_status_msg("Yanked selection", MessageKind::Info);
+            if mode == Mode::VisualBlock {
+                if let Some(text) = yank_block(editor) {
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = true;
+                    editor.set_status_msg("Yanked rectangular block", MessageKind::Info);
+                }
+            } else {
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, mode)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = false;
+                    editor.set_status_msg("Yanked selection", MessageKind::Info);
+                }
             }
-            editor.enter_normal();
+            let target_mode = if editor.prev_mode == Mode::Brief {
+                Mode::Brief
+            } else {
+                Mode::Normal
+            };
+            editor.change_mode(target_mode); // Anchor is automatically cleared
         }
         Action::DeleteSelection => {
             let mode = editor.mode();
-            let range = {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                win.get_selection_range(buf, mode)
-            };
-            if let Some((start_char, end_char)) = range {
-                let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                editor.clipboard = Some(text);
-
-                // Scope the mutable borrow of window and buffer for deletion
-                let (win, buf) = editor.active_window_and_buf_mut();
-                buf.push_undo(win.row, win.col);
-                buf.rope.remove(start_char..end_char);
-                buf.modified = true;
-
-                let new_line = buf.rope.char_to_line(start_char);
-                win.row = new_line;
-                win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
-                win.clamp_cursor(buf);
-
-                buf.parse_syntax();
+            if mode == Mode::VisualBlock {
+                if let Some(text) = yank_block(editor) {
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = true;
+                }
+                delete_block(editor);
+            } else {
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, mode)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = false;
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    buf.push_undo(win.row, win.col);
+                    buf.rope.remove(start_char..end_char);
+                    buf.modified = true;
+                    let new_line = buf.rope.char_to_line(start_char);
+                    win.row = new_line;
+                    win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
+                    win.clamp_cursor(buf);
+                    buf.parse_syntax();
+                }
             }
-            editor.enter_normal();
+            let target_mode = if editor.prev_mode == Mode::Brief {
+                Mode::Brief
+            } else {
+                Mode::Normal
+            };
+            editor.change_mode(target_mode); // Anchor is automatically cleared
         }
         Action::ChangeSelection => {
             let mode = editor.mode();
-            let range = {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                win.get_selection_range(buf, mode)
-            };
-            if let Some((start_char, end_char)) = range {
-                // Scope the mutable borrow of window and buffer for deletion
-                let (win, buf) = editor.active_window_and_buf_mut();
-                buf.push_undo(win.row, win.col);
-                buf.rope.remove(start_char..end_char);
-                buf.modified = true;
-
-                let new_line = buf.rope.char_to_line(start_char);
-                win.row = new_line;
-                win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
-                win.clamp_cursor(buf);
-
-                buf.parse_syntax();
+            if mode == Mode::VisualBlock {
+                if let Some(text) = yank_block(editor) {
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = true;
+                }
+                delete_block(editor);
+            } else {
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, mode)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    buf.push_undo(win.row, win.col);
+                    buf.rope.remove(start_char..end_char);
+                    buf.modified = true;
+                    let new_line = buf.rope.char_to_line(start_char);
+                    win.row = new_line;
+                    win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
+                    win.clamp_cursor(buf);
+                    buf.parse_syntax();
+                }
             }
-            editor.enter_insert();
+            if editor.prev_mode == Mode::Brief {
+                editor.change_mode(Mode::Brief);
+            } else {
+                editor.change_mode(Mode::Insert);
+            }
         }
+
         Action::IndentSelection => {
             let (win, buf) = editor.active_window_and_buf_mut();
             if let Some(anchor) = win.visual_anchor {
@@ -1184,7 +1421,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
 
         // ---------------------------------------------------------------
-        // Movement — read-only buffer queries, cursor on Window
+        // Movement
         // ---------------------------------------------------------------
         Action::MoveLeft => {
             {
@@ -1235,18 +1472,74 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.comp.on_leave_insert();
         }
         Action::MoveLineStart => {
+            let is_brief = editor.mode() == Mode::Brief;
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_line_start(win, buf);
+                if is_brief {
+                    let now = Instant::now();
+                    let mut tracker = BRIEF_HOME_TRACKER.lock().unwrap();
+                    let is_consecutive = if let Some(last) = tracker.last_press {
+                        now.duration_since(last) < Duration::from_millis(500)
+                    } else {
+                        false
+                    };
+                    if is_consecutive {
+                        tracker.count = (tracker.count + 1) % 3;
+                    } else {
+                        tracker.count = 0;
+                    }
+                    tracker.last_press = Some(now);
+                    match tracker.count {
+                        0 => movement::move_line_start(win, buf),
+                        1 => {
+                            win.row = win.scroll_line;
+                            win.col = 0;
+                            win.clamp_cursor(buf);
+                        }
+                        _ => movement::move_to_first_line(win, buf),
+                    }
+                } else {
+                    movement::move_line_start(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveLineEnd => {
             let current_mode = editor.mode();
+            let is_brief = current_mode == Mode::Brief;
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_line_end(win, buf, current_mode);
+                if is_brief {
+                    let now = Instant::now();
+                    let mut tracker = BRIEF_END_TRACKER.lock().unwrap();
+                    let is_consecutive = if let Some(last) = tracker.last_press {
+                        now.duration_since(last) < Duration::from_millis(500)
+                    } else {
+                        false
+                    };
+                    if is_consecutive {
+                        tracker.count = (tracker.count + 1) % 3;
+                    } else {
+                        tracker.count = 0;
+                    }
+                    tracker.last_press = Some(now);
+                    match tracker.count {
+                        0 => movement::move_line_end(win, buf, current_mode),
+                        1 => {
+                            let last_visible = (win.scroll_line
+                                + win.position.height.saturating_sub(1))
+                            .min(buf.len_lines().saturating_sub(1));
+                            win.row = last_visible;
+                            win.col = buf.line_char_len(win.row).saturating_sub(1);
+                            win.desired_col = win.col;
+                            win.clamp_cursor(buf);
+                        }
+                        _ => movement::move_to_last_line(win, buf),
+                    }
+                } else {
+                    movement::move_line_end(win, buf, current_mode);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1285,6 +1578,39 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
+        Action::ScrollCenter => {
+            editor.center_viewport_on_cursor();
+        }
+        Action::CommandLineStart => {
+            editor.set_command_cursor(0);
+        }
+        Action::CommandLineEnd => {
+            editor.set_command_cursor(editor.command().len());
+        }
+        Action::CommandLineLeft => {
+            if editor.command_cursor > 0 {
+                editor.command_cursor -= 1;
+            }
+        }
+        Action::CommandLineRight => {
+            if editor.command_cursor < editor.command().len() {
+                editor.command_cursor += 1;
+            }
+        }
+        Action::CommandDeleteChar => {
+            if editor.command_cursor < editor.command().len() {
+                editor.command.remove(editor.command_cursor);
+            }
+        }
+        Action::CommandLineKillToEnd => {
+            if editor.command_cursor < editor.command().len() {
+                editor.command.truncate(editor.command_cursor);
+            }
+        }
+        Action::CommandClear => {
+            editor.clear_command();
+        }
+
         // ---------------------------------------------------------------
         // Text Objects
         // ---------------------------------------------------------------
@@ -1371,7 +1697,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
 
         // ---------------------------------------------------------------
-        // Editing — incremental parsing triggered inside helper operations
+        // Editing
         // ---------------------------------------------------------------
         Action::Backspace => {
             let (win, buf) = editor.active_window_and_buf_mut();
@@ -1424,8 +1750,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             if let Some(snap) = buf.pop_undo() {
                 buf.rope = snap.rope;
                 buf.modified = snap.modified;
-                buf.parse_syntax(); // Way 1: Full Parse
-
+                buf.parse_syntax();
                 win.row = snap.cursor_row;
                 win.col = snap.cursor_col;
             }
@@ -1445,7 +1770,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editing::outdent_line(win, buf);
             editor.comp.on_edit();
         }
-
         Action::InsertChar(ch) => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
@@ -1500,6 +1824,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.enter_command();
         }
         Action::EnterNormal => {
+            editor.finalize_visual_block_insert(pre_captured_insert.clone());
             if editor.mode() == Mode::Insert || editor.mode() == Mode::Brief {
                 let (row, col) = {
                     let win = editor.active_window();
@@ -1511,7 +1836,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 win.col = new_col.min(max_col);
                 win.desired_col = win.col;
             }
-            editor.enter_normal();
+            editor.change_mode(Mode::Normal);
             editor.clear_status_msg();
         }
         Action::FilePicker => {
@@ -1522,19 +1847,27 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             editor.popup.open_file_picker(&initial, false);
         }
+
         // ---------------------------------------------------------------
         // Vim Search Operations
         // ---------------------------------------------------------------
         Action::EnterSearch => {
+            if editor.mode() != Mode::Search {
+                editor.prev_mode = editor.mode();
+            }
             editor.set_mode(Mode::Search);
         }
+        Action::CancelSearch => {
+            let target_mode = editor.prev_mode;
+            editor.set_mode(target_mode);
+        }
         Action::SearchCurrentWord => {
+            if editor.mode() != Mode::Search {
+                editor.prev_mode = editor.mode();
+            }
             if let Some(word) = editor.get_word_under_cursor() {
-                // Set search query and feedback message
                 editor.last_search_query = Some(word.clone());
                 editor.set_status_msg(&format!("/{}", word), MessageKind::Info);
-
-                // Immediately delegate execution to SearchNext to jump forward
                 execute_action(editor, Action::SearchNext);
             } else {
                 editor.set_status_msg("No word under cursor", MessageKind::Error);
@@ -1542,36 +1875,30 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::ExecuteSearch => {
             let query = editor.command().to_string();
-            editor.set_mode(Mode::Normal);
-
+            let target_mode = editor.prev_mode;
+            editor.set_mode(target_mode);
             if !query.is_empty() {
                 editor.last_search_query = Some(query.clone());
-
                 let (start_char, text) = {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     (win.cursor_char_offset(buf), buf.rope.to_string())
                 };
-
                 let start_byte = text
                     .char_indices()
                     .nth(start_char)
                     .map(|(b, _)| b)
                     .unwrap_or(text.len());
-
                 let mut found_char = text[start_byte..].find(&query).map(|rel_byte| {
                     let abs_byte = start_byte + rel_byte;
                     text[..abs_byte].chars().count()
                 });
-
                 let mut wrapped = false;
                 if found_char.is_none() && editor.config.search_wrap_enabled {
-                    // Wrap-around to the beginning of the file
                     found_char = text
                         .find(&query)
                         .map(|abs_byte| text[..abs_byte].chars().count());
                     wrapped = true;
                 }
-
                 if let Some(pos) = found_char {
                     if wrapped {
                         editor.set_status_msg(
@@ -1607,22 +1934,18 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                         .min(buf.rope.len_chars());
                     (start, buf.rope.to_string())
                 };
-
                 let start_byte = text
                     .char_indices()
                     .nth(start_char)
                     .map(|(b, _)| b)
                     .unwrap_or(text.len());
-
                 let mut found_char = text[start_byte..].find(&query).map(|rel_byte| {
                     let abs_byte = start_byte + rel_byte;
                     text[..abs_byte].chars().count()
                 });
-
                 let mut wrapped = false;
                 if found_char.is_none() {
                     if editor.config.search_wrap_enabled {
-                        // Wrap-around back to top (wrapscan on)
                         found_char = text
                             .find(&query)
                             .map(|abs_byte| text[..abs_byte].chars().count());
@@ -1634,7 +1957,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                         );
                     }
                 }
-
                 if let Some(pos) = found_char {
                     if wrapped {
                         editor.set_status_msg(
@@ -1660,26 +1982,20 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let start = win.cursor_char_offset(buf).saturating_sub(1);
                     (start, buf.rope.to_string())
                 };
-
-                // FIX: Convert char offset to byte offset before slicing
                 let start_byte = text
                     .char_indices()
                     .nth(start_char)
                     .map(|(b, _)| b)
                     .unwrap_or(text.len());
-
                 let mut found_char = text[..start_byte]
                     .rfind(&query)
                     .map(|abs_byte| text[..abs_byte].chars().count());
-
                 let mut wrapped = false;
                 if found_char.is_none() {
                     if editor.config.search_wrap_enabled {
-                        // Wrap-around back to bottom (wrapscan on)
-                        found_char = text[start_byte..].rfind(&query).map(|rel_byte| {
-                            let abs_byte = start_byte + rel_byte;
-                            text[..abs_byte].chars().count()
-                        });
+                        found_char = text
+                            .rfind(&query)
+                            .map(|abs_byte| text[..abs_byte].chars().count());
                         wrapped = true;
                     } else {
                         editor.set_status_msg(
@@ -1688,7 +2004,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                         );
                     }
                 }
-
                 if let Some(pos) = found_char {
                     if wrapped {
                         editor.set_status_msg(
@@ -1710,9 +2025,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::Mru => {
             editor.open_mru_popup();
         }
-
         Action::FunctionList => {
-            // Update namespace targets
             let entries = crate::popup::function_list::extract_functions(editor.buf());
             editor.popup.function_list =
                 Some(crate::popup::function_list::FunctionListPopup::new(entries));
@@ -1751,26 +2064,18 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.close_buffer();
         }
         Action::ForceQuitAll => {
-            editor.force_quit(); // <-- ForceQuit already handles positional saves and exits
+            editor.force_quit();
         }
-
         Action::BookmarkSet => {
             editor.pending_input = PendingInput::SetBookmark;
             editor.set_status_msg("Mark: press a letter (a-z)", MessageKind::Info);
         }
-
         Action::BookmarkGoto => {
-            editor.pending_input = PendingInput::GotoBookmark;
-            editor.set_status_msg(
-                "Jump: press a letter or ` for last position",
-                MessageKind::Info,
-            );
+            editor.open_marks_popup();
         }
-
         Action::JumpLastPosition => {
             editor.jump_last_position();
         }
-
         Action::EnterLlmPrompt => {
             editor.set_mode(Mode::LlmPrompt);
             editor.llm.prompt.clear();
@@ -1779,39 +2084,163 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::GitStatus => {
             editor.open_git_status();
         }
-        // ── System clipboard ───────────────────────────────────────
+
+        // ---------------------------------------------------------------------------
+        // Action::YankToSystemClipboard  (read-only, no cursor change needed)
+        // ---------------------------------------------------------------------------
         Action::YankToSystemClipboard => {
             editor.yank_to_system_clipboard();
         }
+
+        // ---------------------------------------------------------------------------
+        // Action::PasteFromSystemClipboard
+        // ---------------------------------------------------------------------------
         Action::PasteFromSystemClipboard => {
+            let bid = editor.buf().id;
+            let (start_row, start_col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
+
             editor.paste_from_system_clipboard();
+
+            // Clamp first (fixes the 20 000-col bug), then snap viewport.
+            clamp_cursor_after_paste(editor);
+            editor.buf_mut().parse_syntax();
+            editor.snap_cursor_to_viewport();
+            editor.git_debounce.notify_edit(bid);
+            let _ = (start_row, start_col); // no longer needed; kept to avoid refactor noise
         }
+
+        // ---------------------------------------------------------------------------
+        // Action::CutToSystemClipboard
+        // ---------------------------------------------------------------------------
         Action::CutToSystemClipboard => {
+            let bid = editor.buf().id;
             editor.cut_to_system_clipboard();
+            clamp_cursor_after_paste(editor);
+            editor.buf_mut().parse_syntax();
+            editor.snap_cursor_to_viewport();
+            editor.git_debounce.notify_edit(bid);
         }
+
+        // ---------------------------------------------------------------------------
+        // Action::YankWordToSystemClipboard  (read-only)
+        // ---------------------------------------------------------------------------
         Action::YankWordToSystemClipboard => {
             editor.yank_word_to_system_clipboard();
         }
+
+        // ---------------------------------------------------------------------------
+        // Action::PutFromSystemClipboardBelow
+        // ---------------------------------------------------------------------------
         Action::PutFromSystemClipboardBelow => {
+            let bid = editor.buf().id;
             editor.put_from_system_clipboard_below();
+
+            // Clamp, then position the cursor at the start of the inserted line.
+            clamp_cursor_after_paste(editor);
+            {
+                let win = editor.active_window_mut();
+                win.col = 0;
+                win.desired_col = 0;
+            }
+            editor.buf_mut().parse_syntax();
+            editor.snap_cursor_to_viewport();
+            editor.git_debounce.notify_edit(bid);
+        }
+
+        // ---------------------------------------------------------------------------
+        // Action::ClipboardReplaceBuffer
+        // ---------------------------------------------------------------------------
+        Action::ClipboardReplaceBuffer => {
+            let bid = editor.buf().id;
+            {
+                let (win, buf) = editor.active_window_and_buf_mut();
+                buf.push_undo(win.row, win.col);
+                let total_chars = buf.rope.len_chars();
+                if total_chars > 0 {
+                    buf.rope.remove(0..total_chars);
+                }
+                win.row = 0;
+                win.col = 0;
+                win.desired_col = 0;
+                buf.modified = true;
+            }
+
+            editor.paste_from_system_clipboard();
+
+            // Reset to top, clamp, parse once.
+            {
+                let win = editor.active_window_mut();
+                win.row = 0;
+                win.col = 0;
+                win.desired_col = 0;
+            }
+            clamp_cursor_after_paste(editor);
+            editor.buf_mut().parse_syntax();
+            editor.snap_cursor_to_viewport();
+            editor.git_debounce.notify_edit(bid);
         }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();
 
-            if current_mode == Mode::Command {
-                // Returning from Command mode → go back to where we came from
+            // ── ④ Block-column replication on exit from insert session ─────
+            // pre_captured_insert was grabbed at the very top of this function,
+            // BEFORE the recording engine cleared insert_buffer.  It is safe to
+            // use here regardless of what the recording engine did above.
+            if let Some(state) = editor.visual_block_insert_state.take() {
+                // Clear the selection anchor so that the ghost box does not persist
+                // when entering visual block mode again.
+                editor.active_window_mut().visual_anchor = None;
+
+                if let Some(typed_text) = pre_captured_insert {
+                    if !typed_text.is_empty() {
+                        let cursor_row = editor.active_window().row;
+                        let (win_row, win_col) = {
+                            let win = editor.active_window();
+                            (win.row, win.col)
+                        };
+                        editor.buf_mut().push_undo(win_row, win_col);
+                        let buf = editor.buf_mut();
+                        for &r in &state.rows {
+                            if r == cursor_row {
+                                continue; // already inserted on this line normally
+                            }
+                            if r >= buf.len_lines() {
+                                continue;
+                            }
+                            let line_len = buf.line_char_len(r);
+                            let col = state.col;
+                            if col > line_len {
+                                let pad = " ".repeat(col - line_len);
+                                let off = buf.rope.line_to_char(r) + line_len;
+                                buf.rope.insert(off, &pad);
+                            }
+                            let off = buf.rope.line_to_char(r) + col;
+                            buf.rope.insert(off, &typed_text);
+                        }
+                        buf.modified = true;
+                        buf.parse_syntax();
+                    }
+                }
+                // insert_buffer is already None — recording engine cleared it.
+            }
+
+            // Brief mode: Esc cancels active selection first
+            if current_mode == Mode::Brief && editor.active_window().visual_anchor.is_some() {
+                editor.active_window_mut().visual_anchor = None;
+                editor.set_status_msg("Selection cancelled", MessageKind::Info);
+            } else if current_mode == Mode::Command {
                 let target = editor.prev_mode;
                 editor.set_mode(target);
                 editor.clear_status_msg();
             } else if current_mode == Mode::Brief {
-                // In Brief mode, Esc just clears completions/status
-                // but does NOT change mode
                 editor.clear_completions();
                 editor.clear_status_msg();
             } else if current_mode == Mode::Insert {
-                // In Insert mode, Esc goes to Normal
                 let (row, col) = {
                     let win = editor.active_window();
                     (win.row, win.col)
@@ -1824,12 +2253,20 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 editor.enter_normal();
                 editor.clear_status_msg();
             } else if current_mode == Mode::Search {
-                // Returning from Search mode → go back to previous mode
                 let target = editor.prev_mode;
                 editor.set_mode(target);
                 editor.clear_status_msg();
-            } else if current_mode == Mode::Visual || current_mode == Mode::VisualLine {
-                editor.enter_normal();
+            } else if current_mode == Mode::Visual
+                || current_mode == Mode::VisualLine
+                || current_mode == Mode::VisualBlock
+            {
+                let target = if editor.prev_mode == Mode::Brief {
+                    Mode::Brief
+                } else {
+                    Mode::Normal
+                };
+                editor.set_mode(target);
+                editor.active_window_mut().visual_anchor = None;
                 editor.clear_status_msg();
             }
         }
@@ -1860,13 +2297,13 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::CommandBackspace => {
             editor.pop_command();
-            editor.cmd_history_idx = None; // Reset search position on edit
+            editor.cmd_history_idx = None;
             editor.history_search_prefix = None;
             editor.comp.on_edit();
         }
         Action::CommandChar(ch) => {
             editor.push_command(ch);
-            editor.cmd_history_idx = None; // Reset search position on edit
+            editor.cmd_history_idx = None;
             editor.history_search_prefix = None;
             editor.comp.on_edit();
         }
@@ -1879,7 +2316,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::CompleteCommand => {
             let current = editor.completions().to_vec();
             if current.is_empty() {
-                // Pass history list to complete_command
                 let items =
                     crate::repl::command::complete_command(editor.command(), &editor.cmd_history);
                 if !items.is_empty() {
@@ -1905,19 +2341,21 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 let name = editor.active_filename().unwrap_or("?").to_string();
                 editor.set_status_msg(&format!("Saved {}", name), MessageKind::Success);
                 editor.refresh_buffer_words();
-
-                // Clamp cursor in case rustfmt (or any save hook)
-                // shortened the file, which would leave win.row out of bounds.
                 {
                     let max_row = editor.buf().len_lines().saturating_sub(1);
                     let safe_row = editor.active_window().row.min(max_row);
                     let max_col = editor.buf().line_char_len(safe_row);
-
                     let win = editor.active_window_mut();
                     win.row = safe_row;
                     win.col = win.col.min(max_col);
                     win.desired_col = win.col;
                 }
+            }
+        }
+        Action::SaveAs => {
+            editor.enter_command();
+            for ch in "w ".chars() {
+                editor.push_command(ch);
             }
         }
         Action::Quit => {
@@ -1931,22 +2369,55 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // Clipboard
         // ---------------------------------------------------------------
         Action::YankCurrentLine => {
-            let line_text = editor.line_text(editor.active_row());
-            editor.clipboard = Some(format!("{}\n", line_text));
-            editor.set_status_msg("Yanked 1 line", MessageKind::Info);
+            let is_brief_selecting =
+                editor.mode() == Mode::Brief && editor.active_window().visual_anchor.is_some();
+            if is_brief_selecting {
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, Mode::Visual)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
+                    editor.clipboard = Some(text);
+                    editor.set_status_msg("Yanked selection", MessageKind::Info);
+                }
+                editor.active_window_mut().visual_anchor = None;
+            } else {
+                let line_text = editor.line_text(editor.active_row());
+                editor.clipboard = Some(format!("{}\n", line_text));
+                editor.set_status_msg("Yanked 1 line", MessageKind::Info);
+            }
+        }
+        Action::YankCurrentWord => {
+            let is_brief_selecting =
+                editor.mode() == Mode::Brief && editor.active_window().visual_anchor.is_some();
+            if is_brief_selecting {
+                execute_action(editor, Action::YankCurrentLine);
+            } else {
+                if let Some(word) = editor.get_word_under_cursor() {
+                    editor.clipboard = Some(word.clone());
+                    editor.set_status_msg(&format!("Yanked word: {}", word), MessageKind::Info);
+                } else {
+                    editor.set_status_msg("No word under cursor", MessageKind::Error);
+                }
+            }
         }
         Action::Paste => {
             if let Some(text) = editor.clipboard.clone() {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                let (row, col) = (win.row, win.col);
-                buf.push_undo(row, col);
-                if text.ends_with('\n') {
-                    editing::paste_line_below(win, buf, &text);
+                if editor.clipboard_is_block {
+                    paste_block(editor, &text);
+                    editor.comp.on_edit();
                 } else {
-                    editing::paste_text(win, buf, &text);
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    let (row, col) = (win.row, win.col);
+                    buf.push_undo(row, col);
+                    if text.ends_with('\n') {
+                        editing::paste_line_below(win, buf, &text);
+                    } else {
+                        editing::paste_text(win, buf, &text);
+                    }
+                    editor.comp.on_edit();
                 }
-                let _ = buf;
-                editor.comp.on_edit();
             } else {
                 editor.set_status_msg("Yank register is empty", MessageKind::Error);
             }
@@ -2003,13 +2474,32 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::ToggleBookmarkAtCursor => {
             let row = editor.active_row();
+            let col = editor.active_window().col;
             let buf = editor.buf_mut();
-            if buf.bookmarks.contains(&row) {
+            let existing = buf
+                .named_bookmarks
+                .iter()
+                .find(|(_, &(r, _))| r == row)
+                .map(|(&c, _)| c);
+            if let Some(ch) = existing {
+                buf.named_bookmarks.remove(&ch);
                 buf.bookmarks.remove(&row);
-                editor.set_status_msg("Bookmark removed", MessageKind::Info);
+                editor.set_status_msg(&format!("Mark '{}' removed", ch), MessageKind::Info);
             } else {
-                buf.bookmarks.insert(row);
-                editor.set_status_msg("Bookmark added", MessageKind::Info);
+                let mut next_ch = None;
+                for c in 'a'..='z' {
+                    if !buf.named_bookmarks.contains_key(&c) {
+                        next_ch = Some(c);
+                        break;
+                    }
+                }
+                if let Some(c) = next_ch {
+                    buf.named_bookmarks.insert(c, (row, col));
+                    buf.bookmarks.insert(row);
+                    editor.set_status_msg(&format!("Mark '{}' set", c), MessageKind::Info);
+                } else {
+                    editor.set_status_msg("All marks a-z are already set", MessageKind::Error);
+                }
             }
         }
 
@@ -2028,92 +2518,30 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
 
         // ---------------------------------------------------------------
-        // Vim Dot Repeat Execution
+        // Vim Dot Repeat
         // ---------------------------------------------------------------
         Action::RepeatLastChange => {
             editor.repeat_last_action();
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// action_display_name
-// ---------------------------------------------------------------------------
-
-/// Convert an `Action` into a human-readable label.
-///
-/// `CamelCase` → `"Camel Case"`, tuple payload preserved:
-/// `SwitchBuffer(1)` → `"Switch Buffer(1)"`.
-pub fn action_display_name(action: &Action) -> String {
-    let raw = format!("{:?}", action);
-
-    // Split off any tuple payload  "SwitchBuffer(1)" → "SwitchBuffer" + "(1)"
-    let (main, suffix) = match raw.find('(') {
-        Some(pos) => (&raw[..pos], Some(&raw[pos..])),
-        None => (raw.as_str(), None),
-    };
-
-    let mut out = String::with_capacity(main.len() + 8);
-    for (i, ch) in main.chars().enumerate() {
-        if ch.is_uppercase() && i > 0 {
-            out.push(' ');
-        }
-        out.push(ch);
-    }
-    if let Some(suf) = suffix {
-        out.push_str(suf);
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// lookup_key_action  (scankey overlay helper)
-// ---------------------------------------------------------------------------
-
-/// Return a human-readable description of what `key_str` does in `mode`.
-/// Used by the scankey overlay to display a binding without executing it.
-pub fn lookup_key_action(config: &Config, key_str: &str, mode: Mode, raw_key: KeyEvent) -> String {
-    // Insert / Brief / Command — resolve_single_key knows the answers.
-    if mode != Mode::Normal {
-        if let Some(action) = resolve_single_key(config, key_str, mode, false, raw_key) {
-            return action_display_name(&action);
-        }
-    }
-
-    // Normal mode (and fallback) — resolve_sequence handles multi-key bindings.
-    match resolve_sequence(config, key_str, false, mode) {
-        ResolveResult::Action(action) | ResolveResult::AutoAction(action) => {
-            action_display_name(&action)
-        }
-        ResolveResult::Pending => {
-            // Show what sequences this key is a prefix for.
-            let suggestions = get_sequence_suggestions(config, key_str, mode);
-            if suggestions.is_empty() {
-                "Partial sequence…".to_string()
-            } else {
-                let items: Vec<String> = suggestions
-                    .iter()
-                    .take(4)
-                    .map(|s| format!("{}→{}", s.suffix, s.description))
-                    .collect();
-                format!("Prefix: {}", items.join(", "))
-            }
-        }
-        ResolveResult::None => "No binding".to_string(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // get_all_mode_bindings  (reference popup helper)
 // ---------------------------------------------------------------------------
 
-/// Return every known binding for `mode` as `(key, description)` pairs.
+//gg/ Return every known binding for `mode` as `(key, description)` pairs.
 pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
     match mode {
-        Mode::Normal => get_default_actions()
-            .into_iter()
-            .map(|(key, action)| (key.to_string(), action_display_name(&action)))
-            .collect(),
+        Mode::Normal => {
+            let mut bindings: Vec<(String, String)> = get_default_actions()
+                .into_iter()
+                .map(|(key, action)| (key.to_string(), action_display_name(&action)))
+                .collect();
+            // Ensure zz appears with a friendly description even if the
+            // generic action_display_name is terse
+            bindings.push(("z z".into(), "Center cursor on screen".into()));
+            bindings
+        }
 
         Mode::Insert => vec![
             ("Esc".into(), "Exit to Normal".into()),
@@ -2140,14 +2568,17 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             ("Tab / →".into(), "Accept completion / Tab".into()),
             ("↑ / ↓".into(), "Cycle completion / Move".into()),
             // Alt
-            ("Alt+s".into(), "Save".into()),
+            ("Alt+s".into(), "Search".into()),
+            ("Alt+w".into(), "Save".into()),
+            ("Alt+o".into(), "Save as…".into()),
             ("Alt+q".into(), "Quit".into()),
             ("Alt+w".into(), "Force quit".into()),
             ("Alt+d".into(), "Delete line".into()),
+            ("Alt+j".into(), "Open marks popup".into()), // Update description
             ("Alt+k".into(), "Delete to EOL".into()),
             ("Alt+u".into(), "Undo".into()),
             ("Alt+y".into(), "Yank line".into()),
-            ("Alt+p".into(), "Paste".into()),
+            ("Alt+l".into(), "Start/Cancel Selection".into()),
             ("Alt+b".into(), "Word backward".into()),
             ("Alt+f".into(), "Word forward".into()),
             ("Alt+a".into(), "Line start".into()),
@@ -2158,12 +2589,13 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             ("Alt+1-4".into(), "Switch buffer 1-4".into()),
             ("Alt+x".into(), "Exit to Normal".into()),
             // Ctrl
-            ("Ctrl+s".into(), "Save".into()),
-            ("Ctrl+c".into(), "Exit to Normal".into()),
+            ("Ctrl+c".into(), "Copy".into()),
+            ("Ctrl+x".into(), "Cut".into()),
+            ("Ctrl+v".into(), "Paste".into()),
             ("Ctrl+n/p".into(), "Cycle completion".into()),
         ],
 
-        Mode::Visual | Mode::VisualLine => vec![
+        Mode::Visual | Mode::VisualLine | Mode::VisualBlock => vec![
             ("Esc".into(), "Exit to Normal".into()),
             ("y".into(), "Yank selection".into()),
             ("d / x".into(), "Delete/cut selection".into()),
@@ -2201,191 +2633,41 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Helper to get the active keybinding submap directly.
-fn get_active_bindings(config: &Config, mode: Mode) -> &std::collections::HashMap<String, String> {
+pub fn get_active_bindings(
+    config: &Config,
+    mode: Mode,
+) -> &std::collections::HashMap<String, String> {
     match mode {
         Mode::Normal => &config.keybindings.normal,
         Mode::Insert => &config.keybindings.insert,
         Mode::Brief => &config.keybindings.brief,
         Mode::Command => &config.keybindings.command,
-        Mode::Visual | Mode::VisualLine => &config.keybindings.visual,
+        Mode::Visual | Mode::VisualLine | Mode::VisualBlock => &config.keybindings.visual,
         Mode::Search => &config.keybindings.command,
         Mode::LlmPrompt => &config.keybindings.command,
     }
 }
 
-/// Normalizes various user-friendly config key notations into the standard internal representation.
-/// Examples:
-/// - "<alt>+<shift>+q" -> "alt+shift+q"
-/// - "<alt> q"          -> "alt+q"
-/// - "<insert> <ctrl> p" -> "<insert> ctrl+p"
-/// - "<normal> <tab>"   -> "<normal> tab"
-fn normalize_config_key(bind_key: &str) -> String {
-    let mut key = bind_key.trim().to_string();
+// ── System clipboard ────────────────────────────────────────────────────────
+// All paste operations must call `clamp_cursor_after_paste` when done to
+// ensure the cursor never lands past the real end of the line.  Previously
+// `paste_from_system_clipboard` could leave the cursor at column 20 000+
+// because the rope inserts multi-line text and the column wasn't re-clamped.
+// ---------------------------------------------------------------------------
 
-    // 1. Extract and preserve the mode prefix
-    let mut mode_prefix = "";
-    if key.starts_with("<normal> ") {
-        mode_prefix = "<normal> ";
-        key = key["<normal> ".len()..].to_string();
-    } else if key.starts_with("<insert> ") {
-        mode_prefix = "<insert> ";
-        key = key["<insert> ".len()..].to_string();
-    } else if key.starts_with("<brief> ") {
-        mode_prefix = "<brief> ";
-        key = key["<brief> ".len()..].to_string();
-    } else if key.starts_with("<command> ") {
-        mode_prefix = "<command> ";
-        key = key["<command> ".len()..].to_string();
-    } else if key.starts_with("normal+") {
-        mode_prefix = "normal+";
-        key = key["normal+".len()..].to_string();
-    } else if key.starts_with("insert+") {
-        mode_prefix = "insert+";
-        key = key["insert+".len()..].to_string();
-    } else if key.starts_with("brief+") {
-        mode_prefix = "brief+";
-        key = key["brief+".len()..].to_string();
-    } else if key.starts_with("command+") {
-        mode_prefix = "command+";
-        key = key["command+".len()..].to_string();
-    }
-
-    // 2. Normalize modifier chains
-    // Convert e.g., "<alt>+<shift>+q" -> "<alt+shift+q>"
-    let mut normalized = key
-        .replace(">+<", "+")
-        .replace("><", "+")
-        .replace("> + <", "+")
-        .replace("> <", "+");
-
-    // Preserve the `<leader>` token dynamically by replacing it during stripping
-    normalized = normalized.replace("<leader>", "__LEADER__");
-
-    // 3. Strip outer brackets from valid modifiers and special keys
-    let mut final_key = String::new();
-    let mut in_bracket = false;
-    let mut bracket_content = String::new();
-
-    for ch in normalized.chars() {
-        if ch == '<' {
-            in_bracket = true;
-            bracket_content.clear();
-        } else if ch == '>' {
-            in_bracket = false;
-            let content = bracket_content.to_lowercase();
-            // List of valid modifiers and special keys we strip brackets from
-            if matches!(
-                content.as_str(),
-                "alt"
-                    | "ctrl"
-                    | "shift"
-                    | "tab"
-                    | "backspace"
-                    | "enter"
-                    | "esc"
-                    | "space"
-                    | "up"
-                    | "down"
-                    | "left"
-                    | "right"
-                    | "pageup"
-                    | "pagedown"
-                    | "home"
-                    | "end"
-                    | "delete"
-                    | "insert"
-            ) || content.contains('+')
-            {
-                final_key.push_str(&bracket_content);
-            } else {
-                final_key.push('<');
-                final_key.push_str(&bracket_content);
-                final_key.push('>');
-            }
-        } else if in_bracket {
-            bracket_content.push(ch);
-        } else {
-            final_key.push(ch);
-        }
-    }
-
-    // Restore the `<leader>` token
-    final_key = final_key.replace("__LEADER__", "<leader>");
-
-    // 4. Convert remaining space-separated modifiers, e.g. "alt q" -> "alt+q"
-    let modifiers = ["alt", "ctrl", "shift"];
-    for m in &modifiers {
-        let pattern_space = format!("{} ", m);
-        let pattern_plus = format!("{}+", m);
-        final_key = final_key.replace(&pattern_space, &pattern_plus);
-    }
-
-    format!("{}{}", mode_prefix, final_key.trim())
-}
-
-pub fn find_custom_action(config: &Config, key_seq: &str, mode: Mode) -> Option<Action> {
-    // 1. Try active mode-specific bindings first
-    let active_bindings = get_active_bindings(config, mode);
-    for (bind, action_str) in active_bindings {
-        let normalized_bind = normalize_config_key(bind);
-        let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
-        if resolved_bind == key_seq {
-            return action_str.parse::<Action>().ok();
-        }
-    }
-
-    // 1b. For Brief Mode: check Normal Mode bindings if starting with the leader
-    if mode == Mode::Brief && key_seq.starts_with(&config.leader) {
-        for (bind, action_str) in &config.keybindings.normal {
-            let normalized_bind = normalize_config_key(bind);
-            let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
-            if resolved_bind == key_seq {
-                return action_str.parse::<Action>().ok();
-            }
-        }
-    }
-
-    // 2. Try global bindings as a fallback
-    for (bind, action_str) in &config.keybindings.global {
-        let normalized_bind = normalize_config_key(bind);
-        let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
-        if resolved_bind == key_seq {
-            return action_str.parse::<Action>().ok();
-        }
-    }
-
-    None
-}
-
-pub fn find_custom_prefix_actions(config: &Config, key_seq: &str, mode: Mode) -> Vec<Action> {
-    let active_bindings = get_active_bindings(config, mode);
-    let key_lower = key_seq.to_lowercase();
-    let mut actions = Vec::new();
-
-    let mut check_prefix = |map: &std::collections::HashMap<String, String>| {
-        for (bind_key, action_str) in map {
-            let normalized_bind = normalize_config_key(bind_key);
-            let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
-            let norm = resolved_bind.to_lowercase();
-
-            if norm.starts_with(&key_lower) && norm.len() > key_lower.len() {
-                if let Ok(action) = action_str.parse::<Action>() {
-                    if !actions.contains(&action) {
-                        actions.push(action);
-                    }
-                }
-            }
-        }
+// ---------------------------------------------------------------------------
+// Internal helper – always call this after any paste that touches the cursor.
+// ---------------------------------------------------------------------------
+fn clamp_cursor_after_paste(editor: &mut Editor) {
+    let (win, buf) = editor.active_window_and_buf_mut();
+    let max_row = buf.len_lines().saturating_sub(1);
+    win.row = win.row.min(max_row);
+    let max_col = buf.line_char_len(win.row).saturating_sub(1);
+    // saturating_sub(1) would underflow on an empty line; guard for that.
+    win.col = if buf.line_char_len(win.row) == 0 {
+        0
+    } else {
+        win.col.min(max_col)
     };
-
-    check_prefix(active_bindings);
-
-    // 1b. For Brief Mode: search Normal Mode prefix candidates if starting with the leader
-    if mode == Mode::Brief && key_lower.starts_with(&config.leader) {
-        check_prefix(&config.keybindings.normal);
-    }
-
-    check_prefix(&config.keybindings.global);
-
-    actions
+    win.desired_col = win.col;
 }

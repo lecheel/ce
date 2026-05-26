@@ -573,6 +573,10 @@ impl Editor {
     /// Convenience: layout with a 1-row/col separator.
     pub fn layout_windows_default(&mut self, area: WindowPosition) {
         self.layout_windows(area, 1);
+        if self.needs_initial_scroll {
+            self.scroll_active_window_to_cursor();
+            self.needs_initial_scroll = false;
+        }
     }
 }
 
@@ -628,6 +632,7 @@ impl Editor {
         self.prev_mode = self.mode;
         self.mode = Mode::Command;
         self.command.clear();
+        self.command_cursor = 0;
         self.comp.on_leave_insert();
         self.cmd_history_idx = None;
         self.pending_input = PendingInput::None;
@@ -659,10 +664,17 @@ impl Editor {
                 let row = self.active_window().row;
                 self.active_window_mut().visual_anchor = Some((row, 0));
             }
+            Mode::VisualBlock => {
+                self.prev_mode = self.mode;
+                self.mode = Mode::VisualBlock;
+                let cur = (self.active_window().row, self.active_window().col);
+                self.active_window_mut().visual_anchor = Some(cur);
+            }
             Mode::Search => {
                 self.prev_mode = self.mode;
                 self.mode = Mode::Search;
                 self.command.clear();
+                self.command_cursor = 0;
                 self.comp.on_leave_insert();
                 self.cmd_history_idx = None;
                 self.clear_pending_keys();
@@ -886,18 +898,27 @@ impl Editor {
 impl Editor {
     pub fn clear_command(&mut self) {
         self.command.clear();
+        self.command_cursor = 0;
         self.comp.on_leave_insert();
         self.cmd_history_idx = None;
     }
-
     pub fn push_command(&mut self, ch: char) {
-        self.command.push(ch);
+        self.command.insert(self.command_cursor, ch);
+        self.command_cursor += 1;
     }
     pub fn pop_command(&mut self) {
-        self.command.pop();
+        if self.command_cursor > 0 {
+            self.command_cursor -= 1;
+            self.command.remove(self.command_cursor);
+        }
     }
     pub fn set_command(&mut self, cmd: String) {
         self.command = cmd;
+        self.command_cursor = self.command.len();
+    }
+    /// Move the command-line cursor to an absolute position (clamped).
+    pub fn set_command_cursor(&mut self, pos: usize) {
+        self.command_cursor = pos.min(self.command.len());
     }
 }
 
@@ -991,6 +1012,12 @@ impl Editor {
         let w = self.active_window().position.width;
         let gutter = self.active_gutter_width();
         self.active_window_mut().scroll_to_cursor(h, w, gutter);
+
+        let max_scroll = self.buf().len_lines().saturating_sub(h.saturating_sub(1));
+        let win = self.active_window_mut();
+        if win.scroll_line > max_scroll {
+            win.scroll_line = max_scroll;
+        }
     }
 
     // ---------------------------------------------------------------------------

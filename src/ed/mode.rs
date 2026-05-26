@@ -20,6 +20,7 @@ pub enum Mode {
     VisualLine, // Line-wise selection
     Search,
     LlmPrompt,
+    VisualBlock,
 }
 
 // ---------------------------------------------------------------------------

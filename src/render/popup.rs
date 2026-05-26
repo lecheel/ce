@@ -1169,7 +1169,7 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
     }
 
     // Pass `editor.mode()` directly into the generator
-    let suggestions = crate::keybind::bindings::get_sequence_suggestions(
+    let suggestions = crate::keybind::get_sequence_suggestions(
         &editor.config,
         &editor.pending_keys,
         editor.mode(),

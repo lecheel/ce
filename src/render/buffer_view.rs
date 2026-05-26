@@ -221,7 +221,8 @@ fn draw_pane(
     let is_block_cursor = (mode == Mode::Normal
         || mode == Mode::Search
         || mode == Mode::Visual
-        || mode == Mode::VisualLine)
+        || mode == Mode::VisualLine
+        || mode == Mode::VisualBlock)
         && is_active;
 
     for virtual_row in scroll..end {
@@ -254,14 +255,34 @@ fn draw_pane(
         let is_cursor_line = i == cursor_row;
         let hscroll = win.scroll_col;
         let line_text = buf.line_text(i);
-        let chars: Vec<char> = line_text.chars().skip(hscroll).collect();
+
+        // OPTIMIZATION: Only collect and process characters that can fit in the viewport
+        let max_visible_chars = (area.width as usize).saturating_mul(2).max(100);
+        let chars: Vec<char> = line_text
+            .chars()
+            .skip(hscroll)
+            .take(max_visible_chars)
+            .collect();
         let col = cursor_col.saturating_sub(hscroll);
 
         // Visual selection mask
+        let is_selecting = mode == Mode::Visual
+            || mode == Mode::VisualLine
+            || mode == Mode::VisualBlock
+            || editor.visual_block_insert_state.is_some()
+            || (mode == Mode::Brief && win.visual_anchor.is_some());
+
+        let block_insert_col = editor.visual_block_insert_state.as_ref().map(|s| s.col);
+
         let selected_mask: Vec<bool> = (0..chars.len())
             .map(|c_idx| {
-                if mode == Mode::Visual || mode == Mode::VisualLine {
-                    is_char_selected(win, i, c_idx + hscroll, mode)
+                if is_selecting {
+                    let eval_mode = if block_insert_col.is_some() {
+                        Mode::VisualBlock
+                    } else {
+                        mode
+                    };
+                    is_char_selected_ex(win, i, c_idx + hscroll, eval_mode, block_insert_col)
                 } else {
                     false
                 }
@@ -293,11 +314,14 @@ fn draw_pane(
             let col = col.min(chars.len());
             let raw_line = buf.line_text(i);
             let mut highlights = buf.syntax.get_line_highlights(i, &raw_line);
+
+            // Skip and clamp syntax highlights relative to viewport scroll
             if hscroll < highlights.len() {
                 highlights = highlights.split_off(hscroll);
             } else {
                 highlights.clear();
             }
+            highlights.truncate(chars.len());
             while highlights.len() < chars.len() {
                 highlights.push(None);
             }
@@ -388,9 +412,18 @@ fn draw_pane(
             // Non-cursor line
             let raw_line = buf.line_text(i);
             let mut highlights = buf.syntax.get_line_highlights(i, &raw_line);
+
+            // Skip and clamp syntax highlights relative to viewport scroll (fixes off-by-hscroll bug)
+            if hscroll < highlights.len() {
+                highlights = highlights.split_off(hscroll);
+            } else {
+                highlights.clear();
+            }
+            highlights.truncate(chars.len());
             while highlights.len() < chars.len() {
                 highlights.push(None);
             }
+
             let mut spans = gutter_spans;
             spans.extend(styled_spans_from_highlights(
                 &chars,
@@ -401,6 +434,8 @@ fn draw_pane(
             ));
             rendered.push(Line::from(spans));
         }
+
+        let gutter_spans = crate::ed::gutter::render_gutter_line(buf, win, i, &editor.config);
     }
 
     // EOF padding (rows past end of virtual content)
@@ -486,12 +521,28 @@ fn draw_dividers(f: &mut Frame, windows: &[Window]) {
     }
 }
 
-/// Checks if a given row/col coordinate is inside the active selection window.
-pub fn is_char_selected(win: &Window, row: usize, col: usize, mode: Mode) -> bool {
+/// Like `is_char_selected` but accepts an optional frozen cursor column
+/// used during visual-block insert so the highlight rectangle doesn't
+/// drift as the user types.
+pub fn is_char_selected_ex(
+    win: &Window,
+    row: usize,
+    col: usize,
+    mode: Mode,
+    frozen_cursor_col: Option<usize>,
+) -> bool {
     let Some(anchor) = win.visual_anchor else {
         return false;
     };
-    let cursor = (win.row, win.col);
+
+    // Use the frozen col for VisualBlock so typing doesn't shift the rect.
+    let effective_cursor_col = if mode == Mode::VisualBlock {
+        frozen_cursor_col.unwrap_or(win.col)
+    } else {
+        win.col
+    };
+
+    let cursor = (win.row, effective_cursor_col);
 
     let (start, end) = if anchor.0 < cursor.0 || (anchor.0 == cursor.0 && anchor.1 <= cursor.1) {
         (anchor, cursor)
@@ -501,6 +552,12 @@ pub fn is_char_selected(win: &Window, row: usize, col: usize, mode: Mode) -> boo
 
     if mode == Mode::VisualLine {
         row >= start.0 && row <= end.0
+    } else if mode == Mode::VisualBlock {
+        let r1 = anchor.0.min(win.row);
+        let r2 = anchor.0.max(win.row);
+        let c1 = anchor.1.min(effective_cursor_col);
+        let c2 = anchor.1.max(effective_cursor_col);
+        row >= r1 && row <= r2 && col >= c1 && col <= c2
     } else {
         if row < start.0 || row > end.0 {
             false
@@ -516,4 +573,8 @@ pub fn is_char_selected(win: &Window, row: usize, col: usize, mode: Mode) -> boo
             false
         }
     }
+}
+
+pub fn is_char_selected(win: &Window, row: usize, col: usize, mode: Mode) -> bool {
+    is_char_selected_ex(win, row, col, mode, None)
 }

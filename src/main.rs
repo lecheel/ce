@@ -94,10 +94,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Status) => cmd_status(),
         Some(Commands::Auth) => cmd_auth().await,
-        None => {
-            let first = cli.path.first().cloned();
-            cmd_edit(first, cli.path).await
-        }
+        None => cmd_edit(cli.path).await,
     }
 }
 
@@ -138,8 +135,8 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_edit(first_file: Option<String>, all_paths: Vec<String>) -> Result<()> {
-    log::debug!("Edit flow — files: {:?}", all_paths);
+async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
+    log::debug!("Edit flow — args: {:?}", all_args);
 
     let config = Config::load().context("Failed to load config")?;
 
@@ -160,8 +157,39 @@ async fn cmd_edit(first_file: Option<String>, all_paths: Vec<String>) -> Result<
         None
     };
 
+    // ── Parse Vim-style +N arguments (e.g. ./ce +5 main.rs) ──────────
+    let mut initial_line: Option<usize> = None;
+    let mut files = Vec::new();
+
+    for arg in all_args {
+        if let Some(num_str) = arg.strip_prefix('+') {
+            if num_str.is_empty() {
+                // A bare `+` means "jump to the last line" in Vim
+                initial_line = Some(usize::MAX);
+            } else if let Ok(num) = num_str.parse::<usize>() {
+                initial_line = Some(num);
+            }
+        } else {
+            files.push(arg);
+        }
+    }
+
+    let first_file = files.first().cloned();
     let mut editor = Editor::new(first_file)?;
-    for extra in all_paths.iter().skip(1) {
+
+    // ── Apply +N line override ────────────────────────────────────────
+    // Because Editor::new sets `needs_initial_scroll = true`, overriding
+    // the row here will automatically center the viewport on the first frame!
+    if let Some(line) = initial_line {
+        let row = line.saturating_sub(1); // 1-based to 0-based
+        let (win, buf) = editor.active_window_and_buf_mut();
+        win.row = row.min(buf.len_lines().saturating_sub(1));
+        win.col = 0;
+        win.desired_col = 0;
+    }
+
+    // Open any additional files specified after the first
+    for extra in files.iter().skip(1) {
         editor.open_buffer(Some(extra.clone()));
     }
 
@@ -286,41 +314,6 @@ fn spawn_completion(
 }
 
 // ---------------------------------------------------------------------------
-// Atomic Paste Handler (Exactly One Undo Snapshot)
-// ---------------------------------------------------------------------------
-
-fn handle_paste_event(editor: &mut Editor, text: String) {
-    if text.is_empty() {
-        return;
-    }
-    match editor.mode() {
-        ed::Mode::Command | ed::Mode::Search => {
-            // Append directly to the command line input
-            for ch in text.chars() {
-                editor.push_command(ch);
-            }
-            editor.comp.on_edit();
-        }
-        _ => {
-            // General buffer paste
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-
-            // Save EXACTLY one undo snapshot covering the entire paste payload
-            buf.push_undo(row, col);
-
-            // Perform the multi-character text insertion
-            crate::ed::editing::paste_text(win, buf, &text);
-
-            // Sync syntax and completions
-            buf.parse_syntax();
-            editor.comp.on_edit();
-            editor.refresh_buffer_words();
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Main event loop
 // ---------------------------------------------------------------------------
 
@@ -394,7 +387,7 @@ async fn run_loop(
             // Terminal Paste Event
             // ---------------------------------------------------------------
             AppMessage::Paste(data) => {
-                handle_paste_event(editor, data);
+                editor.handle_paste(&data);
             }
 
             // ---------------------------------------------------------------

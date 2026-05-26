@@ -12,6 +12,12 @@ use crate::ed::window::{LayoutNode, Window};
 use crate::popup::{PopupItem, PopupKind, PopupState};
 use crate::render::statusbar_state::StatusBarState;
 
+#[derive(Debug, Clone)]
+pub struct VisualBlockInsertState {
+    pub rows: Vec<usize>, // The rows in the rectangular selection
+    pub col: usize,       // The target column of the insertion
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingGitAction {
     None,
@@ -89,6 +95,8 @@ pub struct Editor {
     pub buffer_words: Vec<String>,
 
     pub clipboard: Option<String>,
+    pub clipboard_is_block: bool,
+    pub visual_block_insert_state: Option<VisualBlockInsertState>,
 
     pub cmd_history: Vec<String>,
     pub cmd_history_idx: Option<usize>,
@@ -120,6 +128,8 @@ pub struct Editor {
     pub git_commit_start_time: Option<std::time::Instant>,
     pub llm: crate::ai::llama::llm::LlmState,
     pub cmd_waiting_register: bool,
+    pub command_cursor: usize,
+    pub needs_initial_scroll: bool,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -166,6 +176,7 @@ impl Editor {
             mode: Mode::Normal,
             comp: CompletionMachine::new(),
             command: String::new(),
+            command_cursor: 0,
             status_msg: String::new(),
             status_kind: MessageKind::Info,
             status_time: std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -178,6 +189,8 @@ impl Editor {
             vocab_words,
             buffer_words: Vec::new(),
             clipboard: None,
+            clipboard_is_block: false,
+            visual_block_insert_state: None,
             cmd_history,
             cmd_history_idx: None,
             cmd_temp_input: String::new(),
@@ -201,6 +214,7 @@ impl Editor {
             git_commit_start_time: None,
             llm: crate::ai::llama::llm::LlmState::new(),
             cmd_waiting_register: false,
+            needs_initial_scroll: true,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -259,6 +273,7 @@ impl Editor {
     pub fn open_marks_popup(&mut self) {
         let mut entries = Vec::new();
         for buf in &self.buffers {
+            // 1. Vim-style named bookmarks (also includes auto-incremented a..z from Alt+M)
             for (&c, &(r, co)) in &buf.named_bookmarks {
                 entries.push(crate::popup::MarkEntry {
                     ch: c,
@@ -268,7 +283,28 @@ impl Editor {
                     buffer_name: buf.display_name(),
                 });
             }
+
+            // 2. Any line bookmarks that don't have a named character
+            for &row in &buf.bookmarks {
+                let has_named = buf.named_bookmarks.values().any(|(r, _)| *r == row);
+                if !has_named {
+                    entries.push(crate::popup::MarkEntry {
+                        ch: '*',
+                        row,
+                        col: 0,
+                        buffer_id: buf.id,
+                        buffer_name: buf.display_name(),
+                    });
+                }
+            }
         }
+
+        // Sort entries by file, then by row so they appear in logical order
+        entries.sort_by(|a, b| {
+            a.buffer_id
+                .cmp(&b.buffer_id)
+                .then_with(|| a.row.cmp(&b.row))
+        });
 
         if entries.is_empty() {
             self.set_status_msg("No marks set", MessageKind::Info);
@@ -383,6 +419,26 @@ impl Editor {
     #[inline]
     pub fn active_buf(&self) -> &Buffer {
         self.buf()
+    }
+    /// Center the viewport so that the cursor row is in the middle of
+    /// the visible area (Vim's `zz` behaviour).
+    pub fn center_viewport_on_cursor(&mut self) {
+        let gutter = self.active_gutter_width();
+        let (win, buf) = self.active_window_and_buf_mut();
+        let viewport_h = win.position.height;
+        let viewport_w = win.position.width;
+        let half = viewport_h / 2;
+
+        // Ideal scroll_line puts the cursor row at the vertical midpoint
+        let ideal = if win.row >= half { win.row - half } else { 0 };
+
+        // Clamp: don't scroll past the end of the file
+        let max_scroll = buf.len_lines().saturating_sub(viewport_h.saturating_sub(1));
+        win.scroll_line = ideal.min(max_scroll);
+
+        // Ensure cursor is still visible (should be by construction, but
+        // keeps the internal invariants consistent)
+        win.scroll_to_cursor(viewport_h, viewport_w, gutter);
     }
 }
 
@@ -666,7 +722,22 @@ impl Editor {
 
         //-- 1. Intercept typing and command modes (Insert/Brief/Command) and return early --//
         if self.mode == Mode::Insert || self.mode == Mode::Command || self.mode == Mode::Search {
-            let key_str = crate::keybind::bindings::format_key(key);
+            let key_str = crate::keybind::binding_ex::format_key(key);
+            let action = crate::keybind::bindings::resolve_single_key(
+                &self.config,
+                &key_str,
+                self.mode,
+                ghost_active,
+                key,
+            );
+            log::debug!(
+                "[key] mode={:?} key_str={:?} raw={:?} mod={:?} → {:?}",
+                self.mode,
+                key_str,
+                key.code,
+                key.modifiers,
+                action
+            );
             if let Some(action) = crate::keybind::bindings::resolve_single_key(
                 &self.config,
                 &key_str,
@@ -700,9 +771,12 @@ impl Editor {
         }
 
         // 3. Try visual-specific commands first, but fall through to allow hjkl movements
-        if self.mode == Mode::Visual || self.mode == Mode::VisualLine {
+        if self.mode == Mode::Visual
+            || self.mode == Mode::VisualLine
+            || self.mode == Mode::VisualBlock
+        {
             if self.pending_keys.is_empty() {
-                let key_str = crate::keybind::bindings::format_key(key);
+                let key_str = crate::keybind::binding_ex::format_key(key);
                 if let Some(action) = crate::keybind::bindings::resolve_single_key(
                     &self.config,
                     &key_str,
@@ -713,11 +787,10 @@ impl Editor {
                     crate::keybind::execute_action(self, action);
                     return;
                 }
-            } else {
             }
         }
 
-        let key_str = crate::keybind::bindings::format_key(key);
+        let key_str = crate::keybind::binding_ex::format_key(key);
         if key_str.is_empty() {
             return;
         }
@@ -743,26 +816,26 @@ impl Editor {
             format!("{} {}", self.pending_keys, key_str)
         };
 
-        match crate::keybind::bindings::resolve_sequence(
+        match crate::keybind::binding_ex::resolve_sequence(
             &self.config,
             &new_seq,
             ghost_active,
             self.mode,
         ) {
-            crate::keybind::bindings::ResolveResult::Action(action)
-            | crate::keybind::bindings::ResolveResult::AutoAction(action) => {
+            crate::keybind::binding_ex::ResolveResult::Action(action)
+            | crate::keybind::binding_ex::ResolveResult::AutoAction(action) => {
                 self.clear_pending_keys();
                 crate::keybind::execute_action(self, action);
             }
-            crate::keybind::bindings::ResolveResult::Pending => {
+            crate::keybind::binding_ex::ResolveResult::Pending => {
                 self.pending_keys = new_seq.clone();
             }
-            crate::keybind::bindings::ResolveResult::None => {
+            crate::keybind::binding_ex::ResolveResult::None => {
                 self.clear_pending_keys();
 
                 // ── Fallback for Brief Mode single-key presses ────────────
                 if self.mode == Mode::Brief {
-                    let key_str = crate::keybind::bindings::format_key(key);
+                    let key_str = crate::keybind::binding_ex::format_key(key);
                     if let Some(action) = crate::keybind::bindings::resolve_single_key(
                         &self.config,
                         &key_str,
@@ -869,5 +942,171 @@ impl Editor {
         });
 
         self.popup.open_buffer_list(entries);
+    }
+}
+
+impl Editor {
+    /// Safely changes the active editor mode and automatically manages
+    /// the lifecycle of visual selection anchors on the viewports.
+    pub fn change_mode(&mut self, new_mode: Mode) {
+        let old_mode = self.mode;
+
+        // Helper to check if a mode is a visual selection mode
+        let is_visual = |m: Mode| matches!(m, Mode::Visual | Mode::VisualLine | Mode::VisualBlock);
+
+        // 1. If leaving a visual mode to a non-visual mode, clear anchors
+        if is_visual(old_mode) && !is_visual(new_mode) {
+            // Preserve the anchor if we are currently mid-column insertion
+            if self.visual_block_insert_state.is_none() {
+                for win in &mut self.windows {
+                    win.visual_anchor = None;
+                }
+            }
+        }
+
+        // 2. If entering a visual mode from a non-visual mode, initialize anchor
+        if is_visual(new_mode) && !is_visual(old_mode) {
+            let win = self.active_window_mut();
+            if win.visual_anchor.is_none() {
+                win.visual_anchor = Some((win.row, win.col));
+            }
+        }
+
+        // 3. Delegate to the underlying mode setters
+        if new_mode == Mode::Normal {
+            self.enter_normal();
+        } else if new_mode == Mode::Brief {
+            self.enter_brief();
+        } else {
+            self.set_mode(new_mode);
+        }
+    }
+
+    pub fn finalize_visual_block_insert(&mut self, pre_captured_insert: Option<String>) {
+        if let Some(state) = self.visual_block_insert_state.take() {
+            self.active_window_mut().visual_anchor = None;
+
+            if let Some(typed_text) = pre_captured_insert {
+                if !typed_text.is_empty() {
+                    let cursor_row = self.active_window().row;
+                    let (win_row, win_col) = {
+                        let win = self.active_window();
+                        (win.row, win.col)
+                    };
+                    self.buf_mut().push_undo(win_row, win_col);
+                    let buf = self.buf_mut();
+                    for &r in &state.rows {
+                        if r == cursor_row {
+                            continue; // Already inserted on this line normally
+                        }
+                        if r >= buf.len_lines() {
+                            continue;
+                        }
+                        let line_len = buf.line_char_len(r);
+                        let col = state.col;
+                        if col > line_len {
+                            let pad = " ".repeat(col - line_len);
+                            let off = buf.rope.line_to_char(r) + line_len;
+                            buf.rope.insert(off, &pad);
+                        }
+                        let off = buf.rope.line_to_char(r) + col;
+                        buf.rope.insert(off, &typed_text);
+                    }
+                    buf.modified = true;
+                    buf.parse_syntax();
+                }
+            }
+            self.insert_buffer = None;
+        }
+    }
+}
+
+impl Editor {
+    /// Handles rapid terminal bracketed paste events (`Event::Paste`).
+    /// Inserts the text in a single transaction while preventing the cursor
+    /// and horizontal scroll from jumping to extreme columns (e.g. 25,000).
+    /// Handles rapid terminal bracketed paste events (`Event::Paste`).
+    /// Inserts the text in a single transaction while preventing the cursor
+    /// and horizontal scroll from jumping to extreme columns (e.g. 25,000).
+    pub fn handle_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        // 1. Handle Command / Search modes (paste into the prompt, not the buffer)
+        if matches!(self.mode, Mode::Command | Mode::Search) {
+            for ch in text.chars() {
+                self.push_command(ch);
+            }
+            self.comp.on_edit();
+            return;
+        }
+
+        // 2. General buffer paste
+        let bid = self.buf().id;
+        let (start_row, start_col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+
+        {
+            let (win, buf) = self.active_window_and_buf_mut();
+            buf.push_undo(win.row, win.col);
+
+            let is_line_paste = text.ends_with('\n') || text.ends_with('\r');
+            if is_line_paste {
+                crate::ed::editing::paste_line_below(win, buf, text);
+            } else {
+                crate::ed::editing::paste_text(win, buf, text);
+            }
+
+            // ── Accurately calculate the end position of the pasted content ──
+            let mut final_row = start_row;
+            let mut final_col = start_col;
+
+            if is_line_paste {
+                let newlines = text.matches('\n').count();
+                final_row = (start_row + newlines).min(buf.len_lines().saturating_sub(1));
+                final_col = 0;
+            } else {
+                let mut current_col = start_col;
+                for c in text.chars() {
+                    if c == '\n' {
+                        final_row += 1;
+                        current_col = 0;
+                    } else if c != '\r' {
+                        current_col += 1;
+                    }
+                }
+                final_col = current_col;
+            }
+
+            // Clamp to valid buffer positions to avoid out-of-bounds panics
+            final_row = final_row.min(buf.len_lines().saturating_sub(1));
+            if final_row < buf.len_lines() {
+                final_col = final_col.min(buf.line_char_len(final_row));
+            } else {
+                final_col = 0;
+            }
+
+            // ── Forcefully sync the window cursor AND desired_col ──
+            // Setting `desired_col` is crucial to stop the 25,000 column jump.
+            win.row = final_row;
+            win.col = final_col;
+            win.desired_col = final_col;
+
+            buf.parse_syntax();
+        }
+
+        // Dismiss ghost/completion overlays, snap viewport, and debounce git gutter
+        self.comp.on_edit();
+        self.snap_cursor_to_viewport();
+        self.git_debounce.notify_edit(bid);
+        self.refresh_buffer_words();
+    }
+
+    /// Alias for bracketed paste event loop compatibility.
+    pub fn insert_str(&mut self, text: &str) {
+        self.handle_paste(text);
     }
 }

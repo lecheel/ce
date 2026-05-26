@@ -878,7 +878,7 @@ impl Editor {
                     self.clear_status_msg();
                 }
                 _ => {
-                    let formatted = crate::keybind::bindings::format_key(key);
+                    let formatted = crate::keybind::binding_ex::format_key(key);
 
                     let implicit_shift = matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase())
                         && !key.modifiers.contains(KeyModifiers::SHIFT);
@@ -916,8 +916,8 @@ impl Editor {
                     let raw_info = format!("Mods: {} | Char: {}", mods_display, char_display);
 
                     // Look up action
-                    let key_str = crate::keybind::bindings::format_key(key);
-                    let mut action_str = crate::keybind::bindings::lookup_key_action(
+                    let key_str = crate::keybind::binding_ex::format_key(key);
+                    let mut action_str = crate::keybind::binding_ex::lookup_key_action(
                         &self.config,
                         &key_str,
                         self.mode,

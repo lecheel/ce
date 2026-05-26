@@ -153,9 +153,11 @@ pub fn draw_command_line(f: &mut Frame, area: Rect, editor: &Editor) {
     f.render_widget(widget, area);
 
     if editor.mode() == Mode::Command || editor.mode() == Mode::Search {
-        // Measure character count instead of bytes to maintain proper cursor offset
-        let cmd_len = editor.command().chars().count().saturating_add(1);
-        let cx = area.x.saturating_add(cmd_len.min(u16::MAX as usize) as u16);
+        let cursor_char_pos = editor.command_cursor; // chars before cursor
+        let cx = area
+            .x
+            .saturating_add(1) // +1 for the ":" or "/" prefix
+            .saturating_add(cursor_char_pos.min(u16::MAX as usize) as u16);
         let cx = cx.min(area.right().saturating_sub(1));
         let cy = area.y;
         f.set_cursor_position((cx, cy));

@@ -568,6 +568,7 @@ impl Editor {
         if let Some(idx) = found_idx {
             self.cmd_history_idx = Some(idx);
             self.command = self.cmd_history[idx].clone();
+            self.command_cursor = self.command.len(); // ← FIX: move cursor to end
         }
     }
 
@@ -591,10 +592,12 @@ impl Editor {
         if let Some(idx) = found_idx {
             self.cmd_history_idx = Some(idx);
             self.command = self.cmd_history[idx].clone();
+            self.command_cursor = self.command.len(); // ← FIX: move cursor to end
         } else {
             // Reached the end of matching history; restore original typed text
             self.cmd_history_idx = None;
             self.command = self.cmd_temp_input.clone();
+            self.command_cursor = self.command.len(); // ← FIX: move cursor to end
         }
     }
 }
