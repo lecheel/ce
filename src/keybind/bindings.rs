@@ -274,6 +274,13 @@ impl Action {
                 | Action::DeleteInsideBrackets
                 | Action::ChangeInsideBrackets
                 | Action::ClipboardReplaceBuffer
+                | Action::DeleteSelection
+                | Action::IndentSelection
+                | Action::OutdentSelection
+                | Action::GitRevert
+                | Action::PasteFromSystemClipboard
+                | Action::CutToSystemClipboard
+                | Action::PutFromSystemClipboardBelow
         )
     }
 }
@@ -907,15 +914,56 @@ fn exits_insert_mode(action: Action) -> bool {
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
 
-    // ── ① Capture insert_buffer text BEFORE the recording engine clears it.
-    //    Only needed for ExitMode / EnterNormal (the two actions that end an
-    //    insert session AND may need to replicate block-column text).
     let pre_captured_insert: Option<String> =
         if action == Action::ExitMode || action == Action::EnterNormal {
             editor.insert_buffer.clone()
         } else {
             None
         };
+
+    if action != Action::RepeatLastChange {
+        reset_brief_trackers();
+    }
+    if action != Action::MoveLineStart && action != Action::MoveLineEnd {
+        reset_brief_trackers();
+    }
+
+    // ── MASTER UNDO GUARD ────────────────────────────────────────────
+    // Determines if we should take an undo snapshot BEFORE executing the action.
+    let is_typing_mode = matches!(editor.mode(), Mode::Insert | Mode::Brief);
+
+    let is_entering_insert = matches!(
+        action,
+        Action::EnterInsert
+            | Action::EnterAppend
+            | Action::EnterInsertLineStart
+            | Action::EnterInsertLineEnd
+            | Action::InsertNewlineBelow
+            | Action::InsertNewlineAbove
+            | Action::VisualBlockInsert
+            | Action::VisualBlockAppend
+            | Action::ChangeSelection
+            | Action::ChangeInsideWord
+            | Action::ChangeInsideQuotes
+            | Action::ChangeInsideParens
+            | Action::ChangeInsideFunction
+            | Action::ChangeInsideBraces
+            | Action::ChangeInsideBrackets
+    );
+
+    // ExitMode and EnterNormal finalize block inserts and must NEVER push undo,
+    // as they must merge into the snapshot taken when the insert session started.
+    let is_block_finalize = matches!(action, Action::ExitMode | Action::EnterNormal);
+    let is_undo_or_repeat = matches!(action, Action::Undo | Action::RepeatLastChange);
+
+    if !is_undo_or_repeat
+        && !is_block_finalize
+        && (is_entering_insert || (!is_typing_mode && action.modifies_buffer()))
+    {
+        let (win, buf) = editor.active_window_and_buf_mut();
+        buf.push_undo(win.row, win.col);
+    }
+    // ─────────────────────────────────────────────────────────────────
 
     // ── Brief trackers reset ───────────────────────────────────────────────
     if action != Action::RepeatLastChange {
@@ -1228,7 +1276,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 // Pad active line if it is shorter than target column so alignment is correct
                 let line_len = buf.line_char_len(r1);
                 if c1 > line_len {
-                    buf.push_undo(r1, line_len);
                     let pad = " ".repeat(c1 - line_len);
                     let off = buf.rope.line_to_char(r1) + line_len;
                     buf.rope.insert(off, &pad);
@@ -1274,7 +1321,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 // Pad active line if it is shorter than target column so alignment is correct
                 let line_len = buf.line_char_len(r1);
                 if insert_col > line_len {
-                    buf.push_undo(r1, line_len);
                     let pad = " ".repeat(insert_col - line_len);
                     let off = buf.rope.line_to_char(r1) + line_len;
                     buf.rope.insert(off, &pad);
@@ -1340,7 +1386,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     editor.clipboard = Some(text);
                     editor.clipboard_is_block = false;
                     let (win, buf) = editor.active_window_and_buf_mut();
-                    buf.push_undo(win.row, win.col);
                     buf.rope.remove(start_char..end_char);
                     buf.modified = true;
                     let new_line = buf.rope.char_to_line(start_char);
@@ -1372,7 +1417,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 };
                 if let Some((start_char, end_char)) = range {
                     let (win, buf) = editor.active_window_and_buf_mut();
-                    buf.push_undo(win.row, win.col);
                     buf.rope.remove(start_char..end_char);
                     buf.modified = true;
                     let new_line = buf.rope.char_to_line(start_char);
@@ -1394,7 +1438,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             if let Some(anchor) = win.visual_anchor {
                 let r1 = anchor.0.min(win.row);
                 let r2 = anchor.0.max(win.row);
-                buf.push_undo(win.row, win.col);
                 for r in r1..=r2 {
                     let mut temp_win = win.clone();
                     temp_win.row = r;
@@ -1409,7 +1452,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             if let Some(anchor) = win.visual_anchor {
                 let r1 = anchor.0.min(win.row);
                 let r2 = anchor.0.max(win.row);
-                buf.push_undo(win.row, win.col);
                 for r in r1..=r2 {
                     let mut temp_win = win.clone();
                     temp_win.row = r;
@@ -1702,14 +1744,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::Backspace => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::backspace(win, buf);
             editor.comp.on_edit();
         }
         Action::DeleteCharForward => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::delete_char_forward(win, buf);
             editor.comp.on_edit();
         }
@@ -1718,21 +1758,18 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.clipboard = Some(format!("{}\n", line_text));
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::delete_current_line(win, buf);
             editor.comp.on_edit();
         }
         Action::DeleteToEndOfLine => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::delete_to_end_of_line(win, buf);
             editor.comp.on_edit();
         }
         Action::InsertNewline => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::insert_newline(win, buf);
             buf.parse_syntax();
             editor.comp.on_edit();
@@ -1740,7 +1777,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::InsertTab => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::insert_tab(win, buf);
             buf.parse_syntax();
             editor.comp.on_edit();
@@ -1759,21 +1795,18 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::IndentLine => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::indent_line(win, buf);
             editor.comp.on_edit();
         }
         Action::OutdentLine => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::outdent_line(win, buf);
             editor.comp.on_edit();
         }
         Action::InsertChar(ch) => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::insert_char(win, buf, ch);
             editor.comp.on_edit();
         }
@@ -1805,7 +1838,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::InsertNewlineBelow => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::insert_newline_below(win, buf);
             buf.parse_syntax();
             let _ = buf;
@@ -1814,7 +1846,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::InsertNewlineAbove => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
-            buf.push_undo(row, col);
             editing::insert_newline_above(win, buf);
             buf.parse_syntax();
             let _ = buf;
@@ -2157,7 +2188,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let bid = editor.buf().id;
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                buf.push_undo(win.row, win.col);
                 let total_chars = buf.rope.len_chars();
                 if total_chars > 0 {
                     buf.rope.remove(0..total_chars);
@@ -2203,7 +2233,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             let win = editor.active_window();
                             (win.row, win.col)
                         };
-                        editor.buf_mut().push_undo(win_row, win_col);
                         let buf = editor.buf_mut();
                         for &r in &state.rows {
                             if r == cursor_row {
@@ -2410,7 +2439,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 } else {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     let (row, col) = (win.row, win.col);
-                    buf.push_undo(row, col);
                     if text.ends_with('\n') {
                         editing::paste_line_below(win, buf, &text);
                     } else {

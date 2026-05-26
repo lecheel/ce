@@ -558,8 +558,6 @@ pub fn delete_block(editor: &mut Editor) {
     let c1 = anchor.1.min(win_col);
     let c2 = anchor.1.max(win_col);
 
-    editor.buf_mut().push_undo(win_row, win_col);
-
     let buf = editor.buf_mut();
     for r in r1..=r2 {
         if r >= buf.len_lines() {
@@ -592,8 +590,6 @@ pub fn delete_block(editor: &mut Editor) {
 pub fn paste_block(editor: &mut Editor, text: &str) {
     let (win, buf) = editor.active_window_and_buf_mut();
     let (row, col) = (win.row, win.col);
-
-    buf.push_undo(row, col);
 
     let lines: Vec<&str> = if text.contains("\r\n") {
         text.split("\r\n").collect()

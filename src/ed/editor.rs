@@ -801,10 +801,28 @@ impl Editor {
                 self.clear_pending_keys();
                 handled = true;
             }
+
+            let is_selecting = matches!(
+                self.mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) || self.visual_block_insert_state.is_some()
+                || self.windows.iter().any(|w| w.visual_anchor.is_some());
+
             if !self.status_msg.is_empty() {
                 self.clear_status_msg();
-                handled = true;
+                if !is_selecting {
+                    handled = true;
+                }
             }
+
+            // AGGRESSIVE CLEANUP: If ESC is pressed and we have lingering anchors
+            // clear them immediately to prevent ghost marks in the next round.
+            if is_selecting && self.visual_block_insert_state.is_none() {
+                for win in &mut self.windows {
+                    win.visual_anchor = None;
+                }
+            }
+
             if handled {
                 return;
             }
@@ -876,7 +894,6 @@ impl Editor {
                 return;
             }
 
-            buf.push_undo(win.row, win.col);
             buf.rope.remove(start_offset..end_offset);
 
             win.row = sr;
@@ -950,26 +967,27 @@ impl Editor {
     /// the lifecycle of visual selection anchors on the viewports.
     pub fn change_mode(&mut self, new_mode: Mode) {
         let old_mode = self.mode;
-
-        // Helper to check if a mode is a visual selection mode
         let is_visual = |m: Mode| matches!(m, Mode::Visual | Mode::VisualLine | Mode::VisualBlock);
 
-        // 1. If leaving a visual mode to a non-visual mode, clear anchors
-        if is_visual(old_mode) && !is_visual(new_mode) {
-            // Preserve the anchor if we are currently mid-column insertion
-            if self.visual_block_insert_state.is_none() {
-                for win in &mut self.windows {
-                    win.visual_anchor = None;
-                }
+        // 1. Clear anchors if leaving a visual mode, OR if we are in a non-visual mode
+        // and somehow anchors leaked (and we aren't in a block insert).
+        let should_clear = (is_visual(old_mode) && !is_visual(new_mode))
+            || (!is_visual(new_mode)
+                && self.visual_block_insert_state.is_none()
+                && self.windows.iter().any(|w| w.visual_anchor.is_some()));
+
+        if should_clear {
+            for win in &mut self.windows {
+                win.visual_anchor = None;
             }
         }
 
-        // 2. If entering a visual mode from a non-visual mode, initialize anchor
+        // 2. If entering a visual mode from a non-visual mode, ALWAYS initialize anchor
+        // to the current cursor. This overwrites any leaked anchors from previous rounds!
         if is_visual(new_mode) && !is_visual(old_mode) {
             let win = self.active_window_mut();
-            if win.visual_anchor.is_none() {
-                win.visual_anchor = Some((win.row, win.col));
-            }
+            // REMOVED: if win.visual_anchor.is_none()
+            win.visual_anchor = Some((win.row, win.col));
         }
 
         // 3. Delegate to the underlying mode setters
@@ -984,16 +1002,19 @@ impl Editor {
 
     pub fn finalize_visual_block_insert(&mut self, pre_captured_insert: Option<String>) {
         if let Some(state) = self.visual_block_insert_state.take() {
-            self.active_window_mut().visual_anchor = None;
+            // Clear anchors across ALL windows to prevent split-screen leaks
+            for win in &mut self.windows {
+                win.visual_anchor = None;
+            }
 
             if let Some(typed_text) = pre_captured_insert {
                 if !typed_text.is_empty() {
                     let cursor_row = self.active_window().row;
-                    let (win_row, win_col) = {
-                        let win = self.active_window();
-                        (win.row, win.col)
-                    };
-                    self.buf_mut().push_undo(win_row, win_col);
+
+                    // REMOVED: self.buf_mut().push_undo(win_row, win_col);
+                    // The undo snapshot is already taken when entering Insert mode.
+                    // Removing this merges the block duplication into the insert session's undo block.
+
                     let buf = self.buf_mut();
                     for &r in &state.rows {
                         if r == cursor_row {
@@ -1051,7 +1072,6 @@ impl Editor {
 
         {
             let (win, buf) = self.active_window_and_buf_mut();
-            buf.push_undo(win.row, win.col);
 
             let is_line_paste = text.ends_with('\n') || text.ends_with('\r');
             if is_line_paste {
