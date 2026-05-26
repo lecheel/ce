@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>codeium-editor — Architecture &amp; Features</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --fg:      #e6edf3;
+    --muted:   #8b949e;
+    --accent:  #58a6ff;
+    --green:   #3fb950;
+    --orange:  #d29922;
+    --red:     #f85149;
+    --purple:  #bc8cff;
+    --cyan:  #39d2c0;
+    --pink:    #f778ba;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.6;
+    padding: 2rem;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+
+  /* ---- Header ---- */
+  .header {
+    text-align: center;
+    padding: 2.5rem 0 1.5rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2.5rem;
+  }
+  .header h1 {
+    font-size: 2.4rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--purple), var(--pink));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: .5rem;
+  }
+  .header .tagline {
+    color: var(--muted);
+    font-size: 1.1rem;
+  }
+  .header .badges {
+    margin-top: 1rem;
+    display: flex;
+    gap: .6rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-block;
+    padding: .25rem .7rem;
+    border-radius: 999px;
+    font-size: .78rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    color: var(--fg);
+  }
+  .badge.rust   { background: #b7410e33; border-color: #b7410e; color: #f74c00; }
+  .badge.tui    { background: #58a6ff22; border-color: var(--accent); color: var(--accent); }
+  .badge.ai     { background: #bc8cff22; border-color: var(--purple); color: var(--purple); }
+  .badge.vim    { background: #3fb95022; border-color: var(--green); color: var(--green); }
+  .badge.brief  { background: #39d2c022; border-color: var(--cyan); color: var(--cyan); }
+  .badge.async  { background: #d2992222; border-color: var(--orange); color: var(--orange); }
+
+  /* ---- Section titles ---- */
+  h2 {
+    font-size: 1.55rem;
+    margin: 2.5rem 0 1rem;
+    padding-bottom: .4rem;
+    border-bottom: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+  }
+  h2 .icon { font-size: 1.3rem; }
+  h3 {
+    font-size: 1.15rem;
+    margin: 1.5rem 0 .6rem;
+    color: var(--accent);
+  }
+
+  /* ---- Architecture diagram ---- */
+  .arch-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.8rem;
+    margin: 1.2rem 0 2rem;
+    overflow-x: auto;
+  }
+  .arch-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    min-width: 780px;
+  }
+  .arch-box {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .9rem;
+    position: relative;
+  }
+  .arch-box .box-title {
+    font-weight: 700;
+    font-size: .92rem;
+    margin-bottom: .4rem;
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+  }
+  .arch-box .box-title .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .arch-box ul {
+    list-style: none;
+    font-size: .82rem;
+    color: var(--muted);
+  }
+  .arch-box ul li::before {
+    content: "›";
+    margin-right: .35rem;
+    color: var(--border);
+  }
+  .mod-ed       { border-color: var(--green); }
+  .mod-ed .dot  { background: var(--green); }
+  .mod-cfg      { border-color: var(--orange); }
+  .mod-cfg .dot { background: var(--orange); }
+  .mod-key      { border-color: var(--cyan); }
+  .mod-key .dot { background: var(--cyan); }
+  .mod-comp     { border-color: var(--purple); }
+  .mod-comp .dot{ background: var(--purple); }
+  .mod-ai       { border-color: var(--pink); }
+  .mod-ai .dot  { background: var(--pink); }
+  .mod-render   { border-color: var(--accent); }
+  .mod-render .dot { background: var(--accent); }
+  .mod-popup    { border-color: var(--muted); }
+  .mod-popup .dot { background: var(--muted); }
+  .mod-repl     { border-color: var(--orange); }
+  .mod-repl .dot { background: var(--orange); }
+  .mod-main     { border-color: var(--red); }
+  .mod-main .dot { background: var(--red); }
+  .mod-git      { border-color: var(--cyan); }
+  .mod-git .dot { background: var(--cyan); }
+
+  /* ---- Bug/note callout ---- */
+  .callout {
+    background: #f8514915;
+    border: 1px solid #f8514944;
+    border-left: 4px solid var(--red);
+    border-radius: 8px;
+    padding: .85rem 1.1rem;
+    margin: .6rem 0 1rem;
+    font-size: .84rem;
+    color: #ffa0a0;
+  }
+  .callout strong { color: var(--red); }
+  .callout.fixed {
+    background: #3fb95015;
+    border-color: #3fb95044;
+    border-left-color: var(--green);
+    color: #90e0a0;
+  }
+  .callout.fixed strong { color: var(--green); }
+  .callout.note {
+    background: #58a6ff15;
+    border-color: #58a6ff44;
+    border-left-color: var(--accent);
+    color: #a0c8ff;
+  }
+  .callout.note strong { color: var(--accent); }
+
+  /* ---- Flow diagram ---- */
+  .flow {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin: 1.2rem 0 2rem;
+    overflow-x: auto;
+  }
+  .flow-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: .6rem;
+    margin: .5rem 0;
+    flex-wrap: nowrap;
+    min-width: 700px;
+  }
+  .flow-node {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .45rem .8rem;
+    font-size: .82rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .flow-arrow {
+    color: var(--muted);
+    font-size: 1rem;
+    flex-shrink: 0;
+  }
+  .flow-label {
+    font-size: .72rem;
+    color: var(--muted);
+    text-align: center;
+    margin-top: -.2rem;
+  }
+
+  /* ---- Feature cards ---- */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 1rem;
+    margin: 1rem 0 2rem;
+  }
+  .feature-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+  }
+  .feature-card h4 {
+    font-size: 1rem;
+    margin-bottom: .5rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
+  .feature-card p {
+    color: var(--muted);
+    font-size: .88rem;
+  }
+  .feature-card .tag {
+    display: inline-block;
+    padding: .1rem .45rem;
+    border-radius: 4px;
+    font-size: .72rem;
+    font-weight: 600;
+    margin-top: .6rem;
+  }
+  .tag-done    { background: #3fb95022; color: var(--green); border: 1px solid #3fb95044; }
+  .tag-partial { background: #d2992222; color: var(--orange); border: 1px solid #d2992244; }
+  .tag-bugfix  { background: #f8514922; color: var(--red); border: 1px solid #f8514944; }
+  .tag-stub    { background: #8b949e22; color: var(--muted); border: 1px solid #8b949e44; }
+
+  /* ---- Module detail table ---- */
+  .mod-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0 2rem;
+    font-size: .88rem;
+  }
+  .mod-table th,
+  .mod-table td {
+    text-align: left;
+    padding: .65rem .9rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .mod-table th {
+    background: var(--surface);
+    color: var(--accent);
+    font-weight: 700;
+    position: sticky;
+    top: 0;
+  }
+  .mod-table tr:hover td { background: #ffffff06; }
+  .mod-table code {
+    background: #ffffff0a;
+    padding: .15rem .4rem;
+    border-radius: 4px;
+    font-size: .82rem;
+    color: var(--cyan);
+  }
+
+  /* ---- TODO section ---- */
+  .todo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 1rem;
+    margin: 1rem 0 2rem;
+  }
+  .todo-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem;
+  }
+  .todo-card ul {
+    list-style: none;
+    font-size: .85rem;
+    color: var(--muted);
+  }
+  .todo-card ul li {
+    padding: .2rem 0;
+    display: flex;
+    align-items: flex-start;
+    gap: .4rem;
+  }
+  .todo-card ul li .chk {
+    flex-shrink: 0;
+    width: 16px; height: 16px;
+    border: 1.5px solid var(--border);
+    border-radius: 3px;
+    display: inline-block;
+    margin-top: 2px;
+  }
+  .chk.done { background: var(--green); border-color: var(--green); position: relative; }
+  .chk.done::after {
+    content: "✓";
+    color: var(--bg);
+    font-size: 11px;
+    font-weight: 700;
+    position: absolute;
+    top: -1px; left: 2px;
+  }
+  .chk.partial { background: var(--orange); border-color: var(--orange); position: relative; }
+  .chk.partial::after {
+    content: "~";
+    color: var(--bg);
+    font-size: 11px;
+    font-weight: 700;
+    position: absolute;
+    top: -2px; left: 3px;
+  }
+  .chk.bug { background: var(--red); border-color: var(--red); position: relative; }
+  .chk.bug::after {
+    content: "!";
+    color: var(--bg);
+    font-size: 11px;
+    font-weight: 700;
+    position: absolute;
+    top: -1px; left: 5px;
+  }
+  .priority-high   { color: var(--red); font-weight: 600; }
+  .priority-medium { color: var(--orange); font-weight: 600; }
+  .priority-low    { color: var(--muted); }
+
+  /* ---- Footer ---- */
+  .footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: var(--muted);
+    font-size: .82rem;
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <h1>codeium-editor</h1>
+  <p class="tagline">Mini vim-buffer TUI editor with AI completions, split layouts, Brief mode, and dynamic configuration</p>
+  <div class="badges">
+    <span class="badge rust">Rust 2021</span>
+    <span class="badge tui">Ratatui + Crossterm</span>
+    <span class="badge ai">Codeium + Llama.cpp LLM</span>
+    <span class="badge vim">Vim-like Modal Sequences</span>
+    <span class="badge brief">Brief Mode (Always-Insert)</span>
+    <span class="badge async">Tokio Async</span>
+  </div>
+</div>
+
+<!-- ARCHITECTURE -->
+<h2><span class="icon">🏗</span> Module Architecture</h2>
+
+<div class="arch-container">
+  <div class="arch-grid">
+    <!-- Row 1 -->
+    <div class="arch-box mod-main" style="grid-column: span 4;">
+      <div class="box-title"><span class="dot"></span> main.rs — CLI &amp; Event Loop</div>
+      <ul>
+        <li>clap CLI: path args, <code>auth</code> subcommand, <code>status</code> subcommand</li>
+        <li>tokio mpsc event bus: <code>AppMessage::Input</code> / <code>CompletionResponse</code> / <code>Tick</code></li>
+        <li>Codeium server spawn + API key gated by <code>codeium_enabled</code> config flag — skipped entirely when false</li>
+        <li>Request Version IDs protect against async completions overwriting newer state</li>
+        <li>Crossterm KeyPress-only filtering (Release/Repeat events dropped at source)</li>
+        <li>Local completion async task reads pre-cached <code>buffer_words</code> + <code>vocab_words</code> + active line delta</li>
+      </ul>
+    </div>
+
+    <!-- Row 2 -->
+    <div class="arch-box mod-ed">
+      <div class="box-title"><span class="dot"></span> ed/ — Editor Core</div>
+      <ul>
+        <li><code>buffer.rs</code> — Rope-backed Buffer, UndoSnapshot, file I/O, rustfmt on .rs save, active bookmarks, and Git change states</li>
+        <li><code>window.rs</code> — Independent viewports, <code>desired_col</code> (curswant), LayoutNode binary tree, WindowPosition, <code>get_selection_range()</code> selection calculations</li>
+        <li><code>editor.rs</code> — Request versioning, history I/O, buffer word cache refresh, QuitPrompt, Brief/Vim mode state, and <code>get_word_under_cursor()</code> helper routines</li>
+        <li><code>movement.rs</code> — hjkl, word, line, page (viewport-aware) movement free-functions</li>
+        <li><code>editing.rs</code> — Auto-indent Enter, soft-tab, indent/outdent, paste helpers, desired_col sync, and fine-grained AST updates</li>
+        <li><code>repeat.rs</code> — Vim dot repeat (<code>.</code>) engine leveraging structured <code>RepeatableAction</code> payloads and automated scale multipliers</li>
+        <li><code>gutter.rs</code> — Absolute/relative line numbers, colored Git diff gutter signs, visual bookmarks</li>
+        <li><code>syntax.rs</code> — Tree-sitter integration, scope detection, highlighting, and quote/brace/parameter text objects</li>
+        <li><code>ext.rs</code> — EditorExt trait (plugin hook stubs)</li>
+      </ul>
+    </div>
+    <div class="arch-box mod-comp">
+      <div class="box-title"><span class="dot"></span> comp/ — Completion</div>
+      <ul>
+        <li><code>state.rs</code> — CompletionMachine: ghost-text, cycling, 400 ms throttle, request IDs</li>
+        <li><code>provider.rs</code> — <code>CompletionProvider</code> async trait (backend-agnostic)</li>
+        <li>Contextual guards: blocks mid-word, next-to-<code>)</code>, and before-<code>)</code> positions</li>
+        <li><code>find_prefix_overlap()</code> prevents character duplication on accept</li>
+      </ul>
+    </div>
+    <div class="arch-box mod-ai">
+      <div class="box-title"><span class="dot"></span> ai/ — AI &amp; LLM Backends</div>
+      <ul>
+        <li><code>codeium/</code> — Cloud gRPC-JSON completions, LSP helper thread, browser login auth, and Windsurf/VSCode fallback cache scrapers.</li>
+        <li><code>llama/llm.rs</code> — Custom local <code>llama.cpp</code> integration over raw TCP stream. Communicates using OpenAI-compatible <code>/v1/chat/completions</code> payload mappings to process model-native templates.</li>
+        <li>Powers both interactive split-screen LLM chat sessions (<code>:llm</code>) and the automated conventional git commit generator (<code>:gc</code> / status screen <code>c</code>).</li>
+      </ul>
+    </div>
+    <div class="arch-box mod-render">
+      <div class="box-title"><span class="dot"></span> render/ — UI</div>
+      <ul>
+        <li><code>buffer_view.rs</code> — Render active windows with styled line display utilizing <code>gutter.rs</code> for dynamic sidebar layout, visual selection overlay, and on-screen query highlights</li>
+        <li><code>tabs.rs</code> — Multi-buffer tab bar (hidden when single buffer)</li>
+        <li><code>statusbar.rs</code> — Mode pill, filename with Fish-style contraction, <code>[+]</code>, row:col, lang, <code>Struct::fn()</code> scope, Codeium spinner/OK/OFF</li>
+        <li><code>command_line.rs</code> — <code>:</code> command + top-5 candidate preview OR status message. Layout: very bottom line.</li>
+        <li><code>helpers.rs</code> — CJK-aware char width, digit count, language display names, and Fish-style path contracting algorithm</li>
+      </ul>
+    </div>
+
+    <!-- Row 3 -->
+    <div class="arch-box mod-key">
+      <div class="box-title"><span class="dot"></span> keybind/ — Keybindings</div>
+      <ul>
+        <li><code>actions.rs</code> — EditorAction enum (pure data, no UI deps)</li>
+        <li><code>bindings.rs</code> — Action enum, format_key, resolve_sequence, resolve_single_key, Brief Alt-key layer, and bracket normalizer</li>
+        <li>Leader Key dynamic multi-key sequences with mapleader override support</li>
+        <li>Unified Namespaced configuration: <code>keybindings.normal</code>, <code>keybindings.insert</code>, <code>keybindings.visual</code>, <code>keybindings.global</code></li>
+        <li>Text Objects: <code>diw</code>, <code>ci"</code>, <code>di(</code>, <code>ci{</code>, etc.</li>
+      </ul>
+    </div>
+    <div class="arch-box mod-cfg">
+      <div class="box-title"><span class="dot"></span> config/ — Configuration</div>
+      <ul>
+        <li><code>app_config.rs</code> — Config struct with load/save to <code>~/.config/ce/config.json</code></li>
+        <li>Fields: <code>api_key</code>, <code>api_url</code>, <code>portal_url</code>, <code>max_tokens</code>, <code>codeium_enabled</code>, <code>popup_enabled</code>, <code>init_mode</code>, <code>keybindings</code>, <code>leader</code>, <code>search_wrap_enabled</code></li>
+        <li>Auto-discovers nvim/codeium key on load if api_key is absent</li>
+      </ul>
+    </div>
+    <div class="arch-box mod-repl">
+      <div class="box-title"><span class="dot"></span> repl/ — Command REPL</div>
+      <ul>
+        <li><code>command.rs</code> — :q :q! :w :wq :x :e :new :ls :bn :bp :bd :b N :config :vocab :vim :brief :sp :vs :on :gs :stash</li>
+        <li>Tab path completion with <code>./</code> and <code>../</code> relative prefix preservation</li>
+        <li>Command name prefix completion via <code>complete_command()</code>, integrated with persistent history search</li>
+      </ul>
+    </div>
+    <div class="arch-box mod-popup">
+      <div class="box-title"><span class="dot"></span> popup/ — Popup System</div>
+      <ul>
+        <li><code>mod.rs</code> — PopupState, PopupItem, PopupKind (Completion/CommandPalette/Hover/Custom)</li>
+        <li>Centered floating config dashboard — runtime Serde JSON bool reflection + Space toggle</li>
+        <li>Bottom-right Which-Key hint with compact modifier notation (s+, c+, a+), synced with 30-char min width and unified theme colors</li>
+      </ul>
+    </div>
+
+    <!-- Row 4 (Git Integration Modules) -->
+    <div class="arch-box mod-git" style="grid-column: span 4;">
+      <div class="box-title"><span class="dot"></span> git/ — Git State Machinery</div>
+      <ul>
+        <li><code>status.rs</code> — Git status screen parser. Retains raw 2-character columns (prevents whitespace-trimming bugs) to map Stage Changes, Unstage Changes, Untracked, Branches, and Stashes.</li>
+        <li><code>PendingGitAction</code> — Safety intercept dialog state-machine. Generates warning prompts on-screen for checkout and pop actions.</li>
+        <li>Automatic file buffer reloading, active syntax parsing, gutter diff updates, and window cursor clamping upon successful branch checkouts.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- KNOWN ISSUES / FIXES -->
+<h2><span class="icon">🐛</span> Known Issues &amp; Fixes</h2>
+
+<div class="callout fixed">
+  <strong>Fixed — Git Status parsing column shifts</strong><br>
+  In the initial status screen, using <code>let trimmed = raw_line.trim();</code> removed leading spaces from unstaged modified files (e.g. <code> M main.rs</code>). This shifted the second-column <code>M</code> flag to index 0, causing the parser to incorrectly classify unstaged changes as staged. Fixed by preserving raw lines during row index parsing.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Visual mode selection movement keys blocked</strong><br>
+  In <code>Editor::handle_key()</code>, if the active mode was not Normal, we returned early. This blocked navigation keys like <code>h</code>/<code>j</code>/<code>k</code>/<code>l</code> from being processed, making Visual selection completely static. Fixed by allowing unmatched visual inputs to fall through to standard multi-key and movement resolvers.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Esc key unresponsive in Visual modes</strong><br>
+  In <code>bindings.rs</code>, <code>Action::ExitMode</code> lacked match arms for <code>Mode::Visual</code> and <code>Mode::VisualLine</code>, so pressing <code>Esc</code> in Visual modes did nothing. Fixed by adding a branch to transition back to Normal mode and clear the selection anchor.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Custom Leader immediately executes unique actions (AutoAction bug)</strong><br>
+  In <code>keybind/bindings.rs</code>, if only one keybinding matched the pressed leader key prefix (e.g., <code>, q q</code>), <code>resolve_sequence()</code> returned <code>AutoAction</code>, instantly firing the command on the first keypress. Fixed by returning <code>ResolveResult::Pending</code> on all partial prefix matches, allowing the user to complete their custom sequences.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Double mutable borrow compiler conflict on Undo</strong><br>
+  In <code>keybind/bindings.rs</code>, attempting to simultaneously mutably borrow the buffer (to pop undo states) and the active window (to restore cursor coordinates) caused compiler errors. Fixed by leveraging the editor's disjoint borrow helper <code>active_window_and_buf_mut()</code>.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Codeium ghost text never shows after first request</strong><br>
+  In <code>comp/state.rs</code>, <code>set_completions()</code> and <code>cancel_pending()</code> previously did not clear <code>last_checked_pos</code>. After the first request fired for position <code>(row, col)</code>, <code>last_checked_pos</code> was permanently set, causing <code>maybe_request()</code> to return <code>None</code> for all future ticks at the same cursor position. Fixed by ensuring position state is correctly cleared upon receiving a response or cancellation.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Inline [1/8] overwriting ghost text</strong><br>
+  The completion indicator <code>[idx/total]</code> rendered inline on the cursor line was overwriting the end of ghost text. It has been removed from <code>buffer_view.rs</code>. Completion counts and candidates are now exclusively shown in the bottom command line area, leaving ghost text clean and uninterrupted.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Cursor column resets to 0 over empty lines</strong><br>
+  Moving vertically (j/k/PageUp/PageDown) would clamp <code>win.col</code> to the line length (0 for empty lines), losing the original horizontal position. Fixed by adding a <code>desired_col</code> field (Vim's "curswant") to <code>Window</code>, which remembers the target column and restores it when returning to a longer line.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Syntax highlighting not applying</strong><br>
+  <code>Buffer::new()</code> and <code>open_file()</code> never called <code>parse_syntax()</code>, so the syntax tree was always <code>None</code> on startup. Additionally, the catch-all arm <code>Action::InsertChar(_) | Backspace | ... => parse_syntax()</code> in <code>execute_action</code> was unreachable because those variants were already matched by earlier arms. Fixed by adding <code>parse_syntax()</code> calls on buffer load and moving the parse call to the end of <code>execute_action</code>.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Command Line and Status Bar swapped</strong><br>
+  The command/message line and the status bar positions were inverted compared to standard Vim layout. The command/message line now correctly sits at the very bottom of the screen, with the status bar immediately above it.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Which-Key and Config popups not rendering</strong><br>
+  The <code>draw_config_popup</code> and <code>draw_key_sequence_hint</code> functions existed but were never called from the main <code>render::draw()</code> function. They have been added to the render pipeline.
+</div>
+
+<!-- EVENT FLOW -->
+<h2><span class="icon">⚡</span> Event Flow</h2>
+
+<div class="flow">
+  <div class="flow-row">
+    <div class="flow-node" style="border-color:var(--green);">Crossterm<br>Key Event (Press Only)</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--orange);">mpsc::Sender<br>AppMessage::Input</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--accent);">tokio<br>Event Loop</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--green);">Editor::<br>handle_key()</div>
+  </div>
+  <div class="flow-row">
+    <div class="flow-node" style="border-color:var(--muted);">50 ms<br>Tick Timer</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--orange);">AppMessage::Tick<br>poll_completion()</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--accent);">Codeium LSP<br>or Local Scanner</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--purple);">tokio::spawn<br>fetch_completion_items()</div>
+  </div>
+  <div class="flow-row">
+    <div class="flow-node" style="border-color:var(--pink);">CompletionResponse<br>(ID verified)</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--orange);">mpsc::Sender<br>AppMessage::CompletionResponse</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--green);">Editor::<br>ingest_completion_response()</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-node" style="border-color:var(--accent);">render::<br>draw()</div>
+  </div>
+  <p class="flow-label" style="margin-top:.8rem;">
+    KeyPress-only filter applied at input thread. Stale completions discarded by Request ID versioning.
+    Local completions read pre-cached <code>buffer_words</code> + <code>vocab_words</code> + active-line delta scan — zero rope I/O on each keystroke. Ghost text only renders in Insert and Brief modes.
+  </p>
+</div>
+
+<!-- FEATURE CARDS -->
+<h2><span class="icon">✨</span> Implemented Features</h2>
+
+<div class="feature-grid">
+  <div class="feature-card">
+    <h4>⌨️ Vim-like Modal Editing</h4>
+    <p>Normal (hjkl, dd, yy, u, x, gg, G), Insert (direct typing, soft-tabs, auto-indent on Enter), Visual/Visual-Line (styled overlays with hardware cursor tracking), Command (<code>:</code> prefix), Brief (always-insert). Transitions: i/I/a/A/o/O enter insert, <code>gi</code> enters Brief, <code>v</code>/<code>V</code> enter Visual selections, Esc returns to Normal with cursor-left adjustment.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🚀 Brief Mode (Always-Insert)</h4>
+    <p>An alternative editing mode where all printable keys insert text, and commands are accessed via <code>Alt</code> shortcuts (e.g., <code>Alt+s</code> save, <code>Alt+d</code> delete line, <code>Alt+u</code> undo, <code>Alt+x</code> exit to Vim). <code>F9</code> opens the command line. Esc clears ghost text but stays in Brief. Set <code>"init_mode": "brief"</code> in config to start in Brief mode. Switch modes with <code>:vim</code> and <code>:brief</code>.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🪟 Split Window Layouts</h4>
+    <p>Split the active window horizontally (<code>:sp</code> / <code>Ctrl+w s</code>) or vertically (<code>:vs</code> / <code>Ctrl+w v</code>). Navigate with <code>Ctrl+w h/j/k/l</code> or <code>Ctrl+w w</code>. Close with <code>Ctrl+w q</code> or <code>:q</code>. <code>:on</code> closes all other windows. Dividers rendered between panes.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>📄 Multi-Buffer Editing</h4>
+    <p>Open multiple files as separate buffers with tab bar (hidden for single buffer, <code>[+]</code> modified flag). Commands: <code>:e &lt;path&gt;</code>, <code>:bn</code>/<code>:bp</code>, <code>:bd</code>, <code>:ls</code>, <code>:b N</code>. <code>refresh_buffer_words()</code> is triggered on every open/switch/close for accurate local autocomplete.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🤖 AI Ghost-Text Completions (Codeium)</h4>
+    <p>Completions from local Codeium LSP via gRPC-JSON gateway. Inline ghost text with prefix-overlap dedup and suffix-overlap trimming (no inline [1/8] clutter). Tab or Right-Arrow accepts; Ctrl+N/P or Up/Down (when ghost active) cycles candidates. Contextual guards block mid-word, <code>)</code>-adjacent triggers. Works reliably in both Insert and Brief modes.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🤖 Local LLM &amp; Conventional Commits</h4>
+    <p>Generates semantic conventional git commits from staged diffs using a local <code>llama.cpp</code> server (via <code>/v1/chat/completions</code>). Features a split-pane interactive chat session (<code>:llm</code>) allowing real-time prompt querying. Supported by robust raw-TCP network sockets and background async pollers.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🌳 Tree-sitter Syntax &amp; Text Objects</h4>
+    <p>Incremental Tree-sitter parsing for Rust, Python, JS/TS. Syntax-aware highlighting with correct "most specific node wins" logic. Text objects: <code>diw/ciw</code>, <code>di"/ci"</code>, <code>di(/ci(</code>, <code>di{/ci{</code>, <code>di[/ci]</code>, <code>dif/cif</code>. Contextual scope (e.g., <code>Struct::fn</code> or <code>Enum</code>) displayed dynamically on the status bar right.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🔍 Vim-style Search &amp; Highlighting</h4>
+    <p>Forward search with <code>/</code> and navigation via <code>n</code>/<code>N</code> with Vim-compliant wrap-around behavior (controlled by <code>search_wrap_enabled</code> in config). Pressing <code>*</code> grabs the word under/after the cursor and jumps directly to its next occurrence. Matches are highlighted on-screen with high-contrast yellow background.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🔑 Leader Key &amp; Mapleader Overrides</h4>
+    <p>Vim-style sequences like <code>space w</code> to save, <code>space q</code> to quit. By defining <code>"leader": ","</code> in <code>config.json</code>, the editor dynamically overrides the default system leader <code>"space"</code> mappings to use your custom leader, freeing up the spacebar completely.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🐙 Interactive Git Workspace Safety</h4>
+    <p>Dedicated <code>*git-status*</code> buffer. Renders staged changes (no-symbol green), unstaged changes (bracketed yellow), untracked files (red), branch history (active starred), and the last 10 stashes. Protected by a prompt-level safety flow (<code>y/n</code>) for switches and pops.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🐙 Git Gutter Diff &amp; Gutter Display</h4>
+    <p>A unified gutter rendering system with support for absolute or hybrid relative line numbers, colored Git diff columns (green ┃ for additions, yellow ┃ for edits, red ┵ for removals), and visual bookmarks (represented by purple stars ★), all togglable dynamically with custom shortcuts.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>↩️ Vim Dot Repeat (<code>.</code>)</h4>
+    <p>A structural, state-preserving repeat mechanism. Using a <code>RepeatAction</code> enum, the editor tracks and replicates standalone normal mode modifications (e.g., <code>dd</code>, <code>x</code>), insert typing sessions (including multi-line edits), and complex text object changes (like <code>ciw</code>).</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>📋 Which-Key Popup</h4>
+    <p>Bottom-right floating popup shows downstream keys available for the current pending sequence. Compact modifier notation (shift+ → s+, ctrl+ → c+, alt+ → a+). Scans both default actions and user config keybindings. Toggled via <code>space t</code> or <code>:config</code> → popup_enabled.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🛠️ Local Autocomplete Fallback</h4>
+    <p>When Codeium is disabled, completions come from three merged sources: pre-cached vocab words (length ≥ 4, loaded from <code>wordlist.txt</code>), pre-cached buffer words (length ≥ 6, lazy-indexed at load/save/switch), and an incremental delta scan of the current active line to capture newly typed identifiers. All run non-blocking via <code>tokio::spawn</code>.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>↩️ Register Copy-Paste &amp; Undo</h4>
+    <p>Yank current line via <code>yy</code> (or as side-effect of <code>dd</code>) into a unified clipboard register. Paste below current line via <code>space p v</code>. Line-yanked text (ends with <code>\n</code>) uses <code>paste_line_below()</code>; char-yanked text uses inline <code>paste_text()</code>. Per-buffer undo stack: 500 rope snapshots, reverted via <code>u</code>.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>💾 File I/O with Auto-Format</h4>
+    <p>Rope-backed open/save. <code>:w</code> writes to disk; <code>.rs</code> files automatically run <code>rustfmt</code> then reload, restoring cursor within bounds. <code>:w &lt;path&gt;</code> sets filename then saves. Rope always maintains trailing newline. Tab completion for <code>:e</code>/<code>:w</code>/<code>:wq</code> with <code>./</code> and <code>../</code> prefix preservation.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>⚙️ Reflection Config Dashboard</h4>
+    <p><code>:config</code> opens a centered overlay. Uses runtime <code>serde_json::to_value(&amp;config)</code> to discover all boolean fields dynamically — no hardcoded list. Space toggles, Esc closes. Toggle is saved to disk immediately. Key names are humanized (<code>codeium_enabled</code> → <code>Codeium Enabled</code>).</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>📝 Persistent Command History</h4>
+    <p>Command mode input is logged to <code>~/.config/ce/history.txt</code> (max 500 entries, dedup consecutive). Up/Down arrows navigate backward/forward; on reaching the bottom, the pre-navigation draft is restored from <code>cmd_temp_input</code>. History is loaded at startup.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🧭 Smart Cursor &amp; Viewport Movement</h4>
+    <p><code>desired_col</code> (curswant) remembers your horizontal position when moving vertically over short or empty lines, snapping back when returning to a long line. PageUp/PageDown adapt to the current window's viewport height rather than a hardcoded jump value.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🧹 Dirty Buffer Quit Prompt</h4>
+    <p>Attempting to quit (<code>:q</code>, <code>space q</code>) with unsaved changes triggers an interactive overlay: <strong>y</strong> saves then quits/closes, <strong>n</strong> discards and quits/closes, <strong>c</strong> or Esc cancels. Prompt is rendered as a red-bold status message. <code>:q!</code> and <code>space Q</code> force-quit without prompting.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+</div>
+
+<!-- TECH STACK -->
+<h2><span class="icon">🦀</span> Technology Stack</h2>
+
+<div class="feature-grid">
+  <div class="feature-card">
+    <h4>Core Runtime</h4>
+    <p><strong>Tokio</strong> (full) — async runtime, mpsc channels, interval timers, tokio::spawn.<br>
+    <strong>Crossterm 0.29</strong> — raw mode, press-only key events, alternate screen.<br>
+    <strong>Ratatui 0.29</strong> — declarative TUI: Paragraph, Layout, Span, Line, Clear, Block.</p>
+  </div>
+  <div class="feature-card">
+    <h4>Text Buffer &amp; Syntax</h4>
+    <p><strong>Ropey 1</strong> — rope data structure for O(log n) inserts/deletes. Each <code>Buffer</code> owns a <code>Rope</code>; <code>line_to_char()</code> gives O(1) line→char index. Trailing newline invariant is always maintained.<br>
+    <strong>Tree-sitter</strong> — incremental parsing, syntax highlighting, and text object/scope queries for Rust, Python, JS/TS.</p>
+  </div>
+  <div class="feature-card">
+    <h4>Networking</h4>
+    <p><strong>reqwest 0.12</strong> (rustls-tls, json, blocking) — async HTTP client for Codeium LSP + cloud; blocking client for binary download.<br>
+    <strong>sha2</strong> — binary integrity SHA-256 verification on download.<br>
+    <strong>flate2</strong> — gzip decompression of downloaded LSP binary.</p>
+  </div>
+  <div class="feature-card">
+    <h4>CLI &amp; Config</h4>
+    <p><strong>clap 4</strong> (derive) — path args + auth/status subcommands.<br>
+    <strong>serde / serde_json</strong> — JSON reflection for config toggle dashboard + API types.<br>
+    <strong>dirs</strong> — cross-platform config/cache/home/data paths.<br>
+    <strong>uuid</strong> — session ID and auth state generation.<br>
+    <strong>anyhow</strong> — error handling throughout.</p>
+  </div>
+</div>
+
+<!-- COMMAND REFERENCE -->
+<h2><span class="icon">⌨️</span> Command &amp; Key Reference</h2>
+
+<div class="feature-grid">
+  <div class="feature-card">
+    <h4>Normal Mode</h4>
+    <p>
+      <code>h j k l</code> move · <code>w b</code> word · <code>0 $</code> line start/end<br>
+      <code>g g</code> first line · <code>G</code> last line · <code>PageUp/PageDown</code> viewport scroll<br>
+      <code>i I a A o O</code> enter insert · <code>g i</code> enter brief · <code>:</code> enter command<br>
+      <code>x</code> delete char · <code>dd</code> delete line (yanks) · <code>yy</code> yank line<br>
+      <code>d$</code> delete to end · <code>diw/ciw</code> inside word · <code>di"/ci"</code> inside quotes<br>
+      <code>di(/ci(</code> inside parens · <code>di{/ci{</code> inside braces · <code>di[/ci[</code> inside brackets<br>
+      <code>dif/cif</code> inside function · <code>u</code> undo · <code>&gt;</code> indent · <code>&lt;</code> outdent<br>
+      <code>Tab / Right</code> accept ghost (if visible)<br>
+      <code>Alt+d</code> delete current line (global)<br>
+      <code>space w</code> save · <code>space q</code> quit · <code>space Q</code> force quit<br>
+      <code>space p v</code> paste · <code>space t</code> toggle which-key popup<br>
+      <code>Ctrl+w s/v</code> split · <code>Ctrl+w h/j/k/l/w</code> focus · <code>Ctrl+w q</code> close
+    </p>
+  </div>
+  <div class="feature-card">
+    <h4>Insert Mode</h4>
+    <p>
+      Direct character input · <code>Backspace</code> · <code>Delete</code><br>
+      <code>Enter</code> newline with auto-indent · <code>Tab</code> soft-tab (4 spaces) or accept ghost<br>
+      <code>Right</code> accept ghost text (if visible)<br>
+      <code>Home/End</code> · <code>Left/Right</code> move cursor<br>
+      <code>Up/Down</code> — cycle completions if ghost active, else move<br>
+      <code>Ctrl+N / Ctrl+P</code> cycle completions<br>
+      <code>Alt+d</code> delete current line<br>
+      <code>Esc</code> → Normal (cursor moves left 1 col)
+    </p>
+  </div>
+  <div class="feature-card">
+    <h4>Brief Mode (Always-Insert)</h4>
+    <p>
+      Direct character input · <code>Backspace</code> · <code>Delete</code> · <code>Enter</code><br>
+      <code>Tab</code> accept ghost or insert soft-tab<br>
+      <code>Up/Down</code> cycle completions if ghost active, else move<br>
+      <code>F9</code> open command line · <code>Esc</code> clear ghost/status<br>
+      <code>Alt+x</code> / <code>Ctrl+c</code> → Normal mode<br>
+      <code>Alt+s</code> save · <code>Alt+q</code> quit · <code>Alt+d</code> delete line<br>
+      <code>Alt+u</code> undo · <code>Alt+y</code> yank · <code>Alt+p</code> paste<br>
+      <code>Alt+b/f</code> word back/forward · <code>Alt+a/e</code> line start/end<br>
+      <code>Alt+&lt;/&gt;</code> first/last line · <code>Alt+1-4</code> switch buffer
+    </p>
+  </div>
+  <div class="feature-card">
+    <h4>Command Mode (<code>:</code>)</h4>
+    <p>
+      <code>:q</code> quit (dirty check) · <code>:q!</code> force quit · <code>:w</code> save · <code>:w &lt;path&gt;</code> save as<br>
+      <code>:wq</code> / <code>:x</code> save &amp; quit · <code>:e &lt;path&gt;</code> open · <code>:e</code> / <code>:new</code> new buffer<br>
+      <code>:ls</code> / <code>:buffers</code> / <code>:files</code> list · <code>:b N</code> switch by index<br>
+      <code>:bn</code> / <code>:bnext</code> · <code>:bp</code> / <code>:bprev</code> · <code>:bd</code> / <code>:bdelete</code><br>
+      <code>:sp</code> / <code>:vs</code> split window · <code>:on</code> close other windows<br>
+      <code>:vim</code> switch to Vim (Normal) mode · <code>:brief</code> switch to Brief mode<br>
+      <code>:config</code> open settings dashboard · <code>:vocab &lt;word&gt;</code> add to wordlist<br>
+      <code>:gs</code> / <code>:gitstatus</code> open status panel · <code>:stash [msg]</code> push working changes<br>
+      <code>:prompt &lt;msg&gt;</code> / <code>:&gt; &lt;msg&gt;</code> direct LLM chat query<br>
+      <code>Up/Down</code> navigate command history · <code>Tab</code> complete command/path<br>
+      <code>Esc</code> cancel and return to previous mode
+    </p>
+  </div>
+  <div class="feature-card" style="grid-column: span 2;">
+    <h4>🐙 Git Status Buffer Shortcuts</h4>
+    <p>
+      These shortcuts are active strictly when focused on the <code>*git-status*</code> panel in Normal mode:<br>
+      <code>s</code> — Toggle stage / unstage status for the file under the cursor (unstages if staged, stages if unstaged/untracked)<br>
+      <code>c</code> — Auto-stage all tracked modifications and open an LLM commit message generation task<br>
+      <code>z</code> — Pre-populate Command mode with <code>:stash </code> to prompt-fill a custom stash description<br>
+      <code>Enter</code> — contextual action based on row: open file in active window / switch branch / pop stash<br>
+      <code>y / n</code> — confirm or cancel interactive prompts (e.g. branch checkout safety locks or destructive stash pops)<br>
+      <code>q / Esc</code> — safely exit the status panel, restoring whichever mode you had active previously (Vim or Brief)
+    </p>
+  </div>
+</div>
+
+<!-- TODO -->
+<h2><span class="icon">📋</span> TODO — Roadmap &amp; Planned Features</h2>
+
+<div class="todo-grid">
+  <!-- Core Editor -->
+  <div class="todo-card">
+    <h4>🟢 Core Editor</h4>
+    <ul>
+      <li><span class="chk done"></span> Multi-buffer editing with tab bar</li>
+      <li><span class="chk done"></span> Vim-like modal editing (Normal/Insert/Command/Brief)</li>
+      <li><span class="chk done"></span> Brief mode (Always-Insert, Alt-key commands, F9 for :cmd)</li>
+      <li><span class="chk done"></span> Split window layouts (horizontal/vertical, focus, close)</li>
+      <li><span class="chk done"></span> Smart cursor vertical movement (desired_col / curswant)</li>
+      <li><span class="chk done"></span> Undo stack per buffer (500 snapshots)</li>
+      <li><span class="chk done"></span> File I/O with rustfmt auto-format for .rs</li>
+      <li><span class="chk done"></span> CJK-aware character width handling</li>
+      <li><span class="chk done"></span> Yank / Put (yy, dd, space p v)</li>
+      <li><span class="chk done"></span> Command history — persistent on-disk recall</li>
+      <li><span class="chk done"></span> Interactive dirty-buffer quit prompt (y/n/c)</li>
+      <li><span class="chk done"></span> Viewport-aware PageUp/PageDown</li>
+      <li><span class="chk done"></span> Repeat (.) — last editing command</li>
+      <li><span class="chk"></span> <span class="priority-high">Redo (Ctrl+R)</span> — reverse of undo</li>
+      <li><span class="chk done"></span> Visual mode (v, V) — selection &amp; range ops</li>
+      <li><span class="chk done"></span> Search (/ n N, *) — forward/backward text search</li>
+      <li><span class="chk"></span> <span class="priority-medium">Replace (:%s/old/new/g)</span></li>
+      <li><span class="chk"></span> <span class="priority-low">Count prefix (3j, 5dd)</span></li>
+    </ul>
+  </div>
+
+  <!-- Syntax & Rendering -->
+  <div class="todo-card">
+    <h4>🌳 Syntax &amp; Rendering</h4>
+    <ul>
+      <li><span class="chk done"></span> Tree-sitter syntax highlighting (Rust, Python, JS/TS)</li>
+      <li><span class="chk done"></span> Text objects: diw, ci", di(, di{, di[, dif</li>
+      <li><span class="chk done"></span> Scope extraction (Impl::function / Enum) in status bar</li>
+      <li><span class="chk done"></span> Red block cursor in Normal, bar cursor in Insert/Brief</li>
+      <li><span class="chk done"></span> Clean ghost text (removed inline [1/8] clutter)</li>
+      <li><span class="chk done"></span> Standard Vim bottom layout (Command line at very bottom, Status bar above)</li>
+      <li><span class="chk done"></span> Which-key and Config popups rendering correctly</li>
+      <li><span class="chk done"></span> Dynamic Gutter — Bookmarks, Hybrid Relative numbers, Git sign columns</li>
+      <li><span class="chk done"></span> Custom <code>gitstatus</code> buffer coloring</li>
+      <li><span class="chk"></span> <span class="priority-medium">Theme / Color scheme support</span></li>
+      <li><span class="chk"></span> <span class="priority-low">Indentation guides</span></li>
+    </ul>
+  </div>
+
+  <!-- Completion -->
+  <div class="todo-card">
+    <h4>🟣 Completion System</h4>
+    <ul>
+      <li><span class="chk done"></span> Ghost-text inline display with prefix-overlap dedup</li>
+      <li><span class="chk done"></span> Tab / Right-Arrow accept · Ctrl+N/P cycle</li>
+      <li><span class="chk done"></span> 400 ms throttle + position dedup guard</li>
+      <li><span class="chk done"></span> CompletionProvider async trait</li>
+      <li><span class="chk done"></span> Top 5 candidates status-bar preview</li>
+      <li><span class="chk done"></span> Local buffer autocomplete fallback (3-source merge)</li>
+      <li><span class="chk done"></span> Persistent wordlist.txt via :vocab</li>
+      <li><span class="chk done"></span> Works in both Insert and Brief modes</li>
+      <li><span class="chk done"></span> Fixed Codeium ghost text stalling — last_checked_pos now properly cleared</li>
+      <li><span class="chk"></span> <span class="priority-high">Popup-based completion dropdown</span></li>
+      <li><span class="chk"></span> <span class="priority-medium">Fuzzy filtering of candidates</span></li>
+    </ul>
+  </div>
+
+  <!-- Git Integration -->
+  <div class="todo-card">
+    <h4>🐙 Git &amp; Workspace Safety</h4>
+    <ul>
+      <li><span class="chk done"></span> Interactive Git Status screen (<code>:gs</code>)</li>
+      <li><span class="chk done"></span> Precise status parsing (fixes whitespace column shifts)</li>
+      <li><span class="chk done"></span> Always-on Stage/Unstage/Untracked/Branch/Stash lists</li>
+      <li><span class="chk done"></span> Non-destructive branch switch (blocks when unclean, untracked ignored)</li>
+      <li><span class="chk done"></span> Automatic checkout reloads, gutter sync, and cursor clamps</li>
+      <li><span class="chk done"></span> Dynamic Git Stash push with custom comments anywhere</li>
+      <li><span class="chk done"></span> Destructive Git Stash pop with confirmation prompts</li>
+      <li><span class="chk done"></span> State-machine prompt block (prevents key event leaks)</li>
+      <li><span class="chk done"></span> Git diff gutters &amp; visual hunks overlay popup</li>
+      <li><span class="chk"></span> <span class="priority-medium">Interactive git staging tool</span></li>
+    </ul>
+  </div>
+
+  <!-- Popup -->
+  <div class="todo-card">
+    <h4>📋 Popup Menu System</h4>
+    <ul>
+      <li><span class="chk done"></span> PopupState / PopupItem / PopupKind types</li>
+      <li><span class="chk done"></span> Floating centered overlay with Clear background</li>
+      <li><span class="chk done"></span> Interactive Config reflection dashboard (Space toggle)</li>
+      <li><span class="chk done"></span> Bottom-right Which-Key popup with compact mods, synced with 30-char min width</li>
+      <li><span class="chk"></span> <span class="priority-medium">Command palette (Ctrl+Shift+P)</span></li>
+      <li><span class="chk"></span> <span class="priority-medium">Hover documentation (K)</span></li>
+    </ul>
+  </div>
+
+  <!-- AI -->
+  <div class="todo-card">
+    <h4>🩷 AI / Codeium &amp; Llama.cpp Backends</h4>
+    <ul>
+      <li><span class="chk done"></span> Local LSP binary: find → download → spawn → port-file poll</li>
+      <li><span class="chk done"></span> gRPC-JSON gateway completions with request metadata</li>
+      <li><span class="chk done"></span> Cloud REST fallback engine (CompletionEngine)</li>
+      <li><span class="chk done"></span> Smart auth: multi-path key discovery + browser login</li>
+      <li><span class="chk done"></span> Request Versioning IDs — stale responses discarded</li>
+      <li><span class="chk done"></span> Codeium disabled → zero server spawn, no API key needed</li>
+      <li><span class="chk done"></span> Fixed ghost text stalling when Codeium enabled — position state properly reset</li>
+      <li><span class="chk done"></span> Local <code>llama.cpp</code> raw TCP socket integration</li>
+      <li><span class="chk done"></span> Standard OpenAI-compatible <code>/v1/chat/completions</code> payload structure</li>
+      <li><span class="chk done"></span> Conventional git commit generation via Llama.cpp (<code>:gc</code> / <code>c</code>)</li>
+      <li><span class="chk done"></span> Real-time LLM chat interface session (<code>:llm</code> / <code>:prompt</code>)</li>
+      <li><span class="chk"></span> <span class="priority-medium">Alternative backends: ai::copilot, ai::local (Ollama)</span></li>
+    </ul>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <p>codeium-editor v0.1.0 — Modular architecture · 11 modules (ed, comp, ai, render, keybind, config, repl, popup, git, main) · ~10,200 LOC</p>
+  <p style="margin-top:.3rem;">Rust 2021 · Tokio · Ratatui · Ropey · Tree-sitter · Codeium AI LSP + Local Llama.cpp LLM Backend</p>
+</div>
+
+</body>
+</html>
