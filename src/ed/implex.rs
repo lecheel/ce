@@ -1608,7 +1608,8 @@ impl Editor {
     }
 
     pub fn save_active_buffer(&mut self) -> Result<()> {
-        self.buf_mut().save_file()?;
+        let format_on_save = self.config.format_on_save;
+        self.buf_mut().save_file(format_on_save)?;
         self.refresh_buffer_words();
         Ok(())
     }

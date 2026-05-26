@@ -436,7 +436,7 @@ impl Editor {
         };
 
         let repo_root = match repo_root {
-            Some(r) => r,
+            Some(r) => std::fs::canonicalize(&r).unwrap_or(r),
             None => {
                 self.set_status_msg("Not in a git repository", MessageKind::Error);
                 return;
@@ -549,7 +549,7 @@ impl Editor {
         };
 
         let repo_root = match repo_root {
-            Some(r) => r,
+            Some(r) => std::fs::canonicalize(&r).unwrap_or(r),
             None => {
                 self.set_status_msg("Not in a git repository", MessageKind::Error);
                 return;
@@ -696,7 +696,7 @@ impl Editor {
         };
 
         let repo_root = match repo_root {
-            Some(r) => r,
+            Some(r) => std::fs::canonicalize(&r).unwrap_or(r),
             None => {
                 self.set_status_msg("Not in a git repository", MessageKind::Error);
                 return;

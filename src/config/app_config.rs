@@ -11,6 +11,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 // Helper to default init_mode to "vim"
 fn default_init_mode() -> String {
     "vim".to_string()
@@ -116,6 +120,12 @@ pub struct Config {
     pub bookmarks_enabled: bool,
     #[serde(default)]
     pub search_wrap_enabled: bool,
+    // ---- Formatting Feature Toggle ----
+    #[serde(default = "default_false")]
+    pub format_on_save: bool,
+
+    #[serde(default = "default_true")]
+    pub show_startup_hints: bool,
 }
 
 impl Default for Config {
@@ -143,6 +153,8 @@ impl Default for Config {
             git_gutter_enabled: true,
             bookmarks_enabled: true,
             search_wrap_enabled: false,
+            show_startup_hints: true,
+            format_on_save: false,
         }
     }
 }
@@ -202,6 +214,8 @@ impl Config {
                 git_gutter_enabled: true,
                 search_wrap_enabled: false,
                 bookmarks_enabled: true,
+                show_startup_hints: true,
+                format_on_save: false,
                 ..Default::default()
             }
         };

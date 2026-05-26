@@ -42,6 +42,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "scankey" => {
             editor.open_scankey_popup();
         }
+        "checkhealth" | "health" => {
+            editor.open_checkhealth();
+        }
         s if s.starts_with("vocab ") => {
             let word = s.strip_prefix("vocab ").unwrap().trim();
             if !word.is_empty() {
@@ -320,7 +323,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "e", "new", "config", "vocab", "sp", "split", "vs", "vsplit",
         "on", "only", "vim", "brief", "scankey", "ff", "finder", "filepicker", 
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
-        "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd",
+        "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

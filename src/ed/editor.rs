@@ -222,12 +222,14 @@ impl Editor {
             editor.enter_brief();
         }
 
-        let init_msg = if editor.config.init_mode == "brief" {
-            "Brief mode | F9 for :commands, :vim to vim mode"
-        } else {
-            "Type i to insert mode, gi to brief mode, :q to quit, :e <path> to open another file"
-        };
-        editor.set_status(init_msg, MessageKind::Info);
+        if editor.config.show_startup_hints {
+            let init_msg = if editor.config.init_mode == "brief" {
+                "Brief mode | F9 for :commands, :vim to vim mode"
+            } else {
+                "Type i to insert mode, gi to brief mode, :q to quit, :e <path> to open another file"
+            };
+            editor.set_status(init_msg, MessageKind::Info);
+        }
 
         if let Some(ref name) = filename {
             let bid = editor.active_window().buffer_id();
@@ -689,27 +691,30 @@ impl Editor {
                 BufferKind::Ripgrep => self.handle_ripgrep_key(key),
                 BufferKind::GitCommit => self.handle_git_commit_key(key),
                 BufferKind::GitStatus => self.handle_git_status_key(key),
+                BufferKind::CheckHealth => self.handle_checkhealth_key(key),
                 _ => false,
             };
             if handled {
-                return; // Early return only if consumed by the override
+                return;
             }
         }
 
         // 3. Try visual-specific commands first, but fall through to allow hjkl movements
         if self.mode == Mode::Visual || self.mode == Mode::VisualLine {
-            let key_str = crate::keybind::bindings::format_key(key);
-            if let Some(action) = crate::keybind::bindings::resolve_single_key(
-                &self.config,
-                &key_str,
-                self.mode,
-                ghost_active,
-                key,
-            ) {
-                crate::keybind::execute_action(self, action);
-                return; // Only return if a visual command (like y, d, c, esc) was executed
+            if self.pending_keys.is_empty() {
+                let key_str = crate::keybind::bindings::format_key(key);
+                if let Some(action) = crate::keybind::bindings::resolve_single_key(
+                    &self.config,
+                    &key_str,
+                    self.mode,
+                    ghost_active,
+                    key,
+                ) {
+                    crate::keybind::execute_action(self, action);
+                    return;
+                }
+            } else {
             }
-            // Fall through to allow hjkl, word forward, G, gg, etc.
         }
 
         let key_str = crate::keybind::bindings::format_key(key);
@@ -733,7 +738,7 @@ impl Editor {
         }
 
         let new_seq = if self.pending_keys.is_empty() {
-            key_str
+            key_str.clone()
         } else {
             format!("{} {}", self.pending_keys, key_str)
         };

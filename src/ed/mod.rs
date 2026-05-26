@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod clipboard;
 pub mod diff_align;
 pub mod editing;
 pub mod editor;
@@ -6,6 +7,7 @@ pub mod ext;
 pub mod handle_git;
 pub mod handle_key;
 pub mod handle_mru;
+pub mod health;
 pub mod implex;
 pub mod misc_helper;
 pub mod mode;

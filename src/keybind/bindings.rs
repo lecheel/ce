@@ -111,6 +111,13 @@ pub enum Action {
     BookmarkGoto, // '`' prefix — awaits next char or '`' for ping-pong
     JumpLastPosition,
 
+    // ── System clipboard
+    YankToSystemClipboard,
+    PasteFromSystemClipboard,
+    CutToSystemClipboard,
+    YankWordToSystemClipboard,
+    PutFromSystemClipboardBelow,
+
     // Gutter Display Toggles
     ToggleLineNumbers,
     ToggleRelativeLineNumbers,
@@ -425,6 +432,12 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("p", Action::Paste),
         ("m", Action::BookmarkSet),
         ("`", Action::BookmarkGoto),
+        // Copy
+        ("+ y".into(), Action::YankToSystemClipboard), // "+y  — yank to system
+        ("+ p".into(), Action::PasteFromSystemClipboard), // "+p  — paste from system
+        ("+ d".into(), Action::CutToSystemClipboard),  // "+d  — cut to system
+        ("+ y w".into(), Action::YankWordToSystemClipboard), // "+yw — yank word to system
+        ("+ p u".into(), Action::PutFromSystemClipboardBelow), // "+pu — put below from system
         // Command mode
         (":", Action::EnterCommand),
         // Line operations
@@ -853,6 +866,7 @@ pub fn resolve_single_key(
 
         Mode::Visual | Mode::VisualLine => match key_str {
             "y" => Some(Action::YankSelection),
+            // "+" => Some(Action::YankToSystemClipboard),
             "d" | "x" => Some(Action::DeleteSelection),
             "c" => Some(Action::ChangeSelection),
             ">" => Some(Action::IndentSelection),
@@ -1765,6 +1779,23 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::GitStatus => {
             editor.open_git_status();
         }
+        // ── System clipboard ───────────────────────────────────────
+        Action::YankToSystemClipboard => {
+            editor.yank_to_system_clipboard();
+        }
+        Action::PasteFromSystemClipboard => {
+            editor.paste_from_system_clipboard();
+        }
+        Action::CutToSystemClipboard => {
+            editor.cut_to_system_clipboard();
+        }
+        Action::YankWordToSystemClipboard => {
+            editor.yank_word_to_system_clipboard();
+        }
+        Action::PutFromSystemClipboardBelow => {
+            editor.put_from_system_clipboard_below();
+        }
+
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();
@@ -2140,6 +2171,7 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             (">".into(), "Indent selection lines".into()),
             ("<".into(), "Outdent selection lines".into()),
             ("← ↑ ↓ →".into(), "Move cursor / adjust selection".into()),
+            ("+y".into(), "Yank to system clipboard".into()),
         ],
 
         Mode::Command => vec![

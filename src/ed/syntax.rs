@@ -149,6 +149,9 @@ impl SyntaxState {
             Some("rg") => {
                 return style_for_rg_line(line_text);
             }
+            Some("checkhealth") => {
+                return crate::ed::health::style_for_checkhealth_line(line_text);
+            }
             None => return char_styles,
             _ => {}
         }

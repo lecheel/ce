@@ -36,6 +36,7 @@ pub enum BufferKind {
     GitCommit,
     LlmInput,
     Llm,
+    CheckHealth,
 }
 
 // ── GitSign (unchanged) ──────────────────────────────────────────────────
@@ -100,6 +101,7 @@ impl Buffer {
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
             BufferKind::Ripgrep => "rg".to_string(),
+            BufferKind::CheckHealth => "checkhealth".to_string(),
             BufferKind::GitDiffHead => detect_language(self.filename.as_deref()),
             _ => detect_language(self.filename.as_deref()),
         };
@@ -113,6 +115,7 @@ impl Buffer {
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
             BufferKind::Ripgrep => "rg".to_string(),
+            BufferKind::CheckHealth => "checkhealth".to_string(),
             _ => detect_language(self.filename.as_deref()),
         };
         self.syntax.parse_incremental(&self.rope, Some(&lang), edit);
@@ -177,6 +180,7 @@ impl Buffer {
                 | BufferKind::GitDiffHead
                 | BufferKind::Ripgrep
                 | BufferKind::Llm
+                | BufferKind::CheckHealth
         )
     }
 
@@ -210,7 +214,7 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn save_file(&mut self) -> Result<()> {
+    pub fn save_file(&mut self, format_on_save: bool) -> Result<()> {
         // ── Reject saves for special buffers ────────────────────────
         if self.kind != BufferKind::Normal {
             anyhow::bail!("Cannot save a special buffer");
@@ -222,28 +226,56 @@ impl Buffer {
                 let text = self.rope.to_string();
                 std::fs::write(&path, &text).with_context(|| format!("Cannot write {}", path))?;
 
-                if path.ends_with(".rs") {
-                    let output = std::process::Command::new("rustfmt")
-                        .arg("--edition")
-                        .arg("2021")
-                        .arg(&path)
-                        .output()
-                        .context("Failed to execute rustfmt. Is it installed?")?;
+                if format_on_save {
+                    if path.ends_with(".rs") {
+                        let output = std::process::Command::new("rustfmt")
+                            .arg("--edition")
+                            .arg("2021")
+                            .arg(&path)
+                            .output()
+                            .context("Failed to execute rustfmt. Is it installed?")?;
 
-                    if output.status.success() {
-                        if let Err(e) = self.open_file(&path) {
-                            return Err(e);
+                        if output.status.success() {
+                            self.open_file(&path)?;
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            anyhow::bail!("Saved but rustfmt failed:\n{}", stderr)
                         }
-                        self.modified = false;
-                        Ok(())
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        anyhow::bail!("Saved but rustfmt failed:\n{}", stderr)
+                    } else if path.ends_with(".py") || path.ends_with(".pyi") {
+                        let ruff_result = std::process::Command::new("ruff")
+                            .args(["format", &path])
+                            .output();
+
+                        let output = match ruff_result {
+                            Ok(o) if o.status.success() => o,
+                            Ok(o) => {
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                anyhow::bail!("Saved but ruff format failed:\n{}", stderr)
+                            }
+                            Err(_) => {
+                                let black_output = std::process::Command::new("black")
+                                    .arg(&path)
+                                    .output()
+                                    .context(
+                                        "Neither ruff nor black found. \
+                                         Install one for .py auto-formatting.",
+                                    )?;
+
+                                if black_output.status.success() {
+                                    black_output
+                                } else {
+                                    let stderr = String::from_utf8_lossy(&black_output.stderr);
+                                    anyhow::bail!("Saved but black failed:\n{}", stderr)
+                                }
+                            }
+                        };
+
+                        self.open_file(&path)?;
                     }
-                } else {
-                    self.modified = false;
-                    Ok(())
                 }
+
+                self.modified = false;
+                Ok(())
             }
             None => anyhow::bail!("No filename — use :w <path>"),
         }
@@ -318,6 +350,7 @@ impl Buffer {
             BufferKind::Ripgrep => "[Ripgrep]".to_string(),
             BufferKind::GitCommit => "[Git Commit]".to_string(),
             BufferKind::GitStatus => "[Git Status]".to_string(),
+            BufferKind::CheckHealth => "[Check Health]".to_string(),
             BufferKind::GitDiffHead => self
                 .filename
                 .as_deref()

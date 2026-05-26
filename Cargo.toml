@@ -1,6 +1,6 @@
 [package]
 name = "ce"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Mini vim buffer editor with Codeium AI ghost-text completions and multi-buffer support"
 
@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
 git2 = "0.20.4"
+arboard = "3.4"
 
 
 unicode-segmentation = "1.12"

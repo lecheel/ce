@@ -1,3 +1,4 @@
+//--+ git/log.rs
 //! git/log.rs — tig-like git log viewer as a special buffer.
 //!
 //! Displays a structured git log with per-commit file changes.
@@ -21,8 +22,8 @@ pub struct GitLogEntry {
     pub author: String,
     pub date: String,
     pub subject: String,
-    /// `(status_letter, file_path)` — status is M / A / D / R / C / T …
-    pub files: Vec<(String, String)>,
+    /// `(added_lines, deleted_lines, file_path)`
+    pub files: Vec<(String, String, String)>,
 }
 
 /// What happens when the user presses Enter on a given display row.
@@ -48,6 +49,32 @@ pub struct GitLogState {
 // ---------------------------------------------------------------------------
 
 impl GitLogState {
+    /// Helper to resolve git rename formats like `dir/{old => new}/file` or `old => new`
+    /// to the target/new path.
+    fn parse_git_rename_path(path: &str) -> String {
+        if !path.contains("=>") {
+            return path.to_string();
+        }
+        if let (Some(start_brace), Some(end_brace)) = (path.find('{'), path.find('}')) {
+            if start_brace < end_brace {
+                let prefix = &path[..start_brace];
+                let suffix = &path[end_brace + 1..];
+                let middle = &path[start_brace + 1..end_brace];
+                let parts: Vec<&str> = middle.split("=>").collect();
+                if parts.len() == 2 {
+                    let new_middle = parts[1].trim();
+                    let joined = format!("{}{}{}", prefix, new_middle, suffix);
+                    return joined.replace("//", "/");
+                }
+            }
+        }
+        let parts: Vec<&str> = path.split("=>").collect();
+        if parts.len() == 2 {
+            return parts[1].trim().to_string();
+        }
+        path.to_string()
+    }
+
     /// Run `git log` in `repo_root`, parse the output, and return
     /// `(state, display_text_for_rope)`.
     ///
@@ -59,7 +86,7 @@ impl GitLogState {
                 "-500", // cap at 500 commits for performance
                 "--pretty=format:_COMMIT_%x00%H%x00%h%x00%an%x00%ad%x00%s",
                 "--date=short",
-                "--name-status",
+                "--numstat",
             ])
             .current_dir(repo_root)
             .output()
@@ -129,7 +156,7 @@ impl GitLogState {
                 continue;
             }
 
-            // ── File-status line (M\tpath / A\tpath / R100\told\tnew) ─
+            // ── File line in numstat (added \t deleted \t path) ──
             if let Some(ref mut entry) = current_entry {
                 let trimmed = raw_line.trim();
                 if trimmed.is_empty() {
@@ -137,35 +164,33 @@ impl GitLogState {
                 }
 
                 let tab_parts: Vec<&str> = trimmed.splitn(3, '\t').collect();
-                if tab_parts.len() >= 2 {
-                    let status = tab_parts[0].trim().to_string();
-                    // For renames, `tab_parts[2]` is the new path.
-                    let path = if tab_parts.len() == 3 && status.starts_with('R') {
-                        tab_parts[2].to_string()
-                    } else {
-                        tab_parts[1].to_string()
-                    };
+                if tab_parts.len() >= 3 {
+                    let added = tab_parts[0].trim().to_string();
+                    let deleted = tab_parts[1].trim().to_string();
+                    let path = tab_parts[2].trim().to_string();
 
-                    let status_char = match status.as_str() {
-                        "A" => "+",
-                        "D" => "−",
-                        "M" => "~",
-                        "R" => ">",
-                        "C" => "=",
-                        "T" => "T",
-                        other => other,
-                    };
+                    let clean_path = Self::parse_git_rename_path(&path);
 
                     let file_idx = display_lines.len();
-                    display_lines.push(format!("    {} {}", status_char, path));
+                    let added_str = if added == "-" {
+                        "-".to_string()
+                    } else {
+                        format!("+{}", added)
+                    };
+                    let deleted_str = if deleted == "-" {
+                        "-".to_string()
+                    } else {
+                        format!("-{}", deleted)
+                    };
+                    display_lines
+                        .push(format!("    {:>5} {:>5}  {}", added_str, deleted_str, path));
 
-                    // `status` is moved here, but `status_char` borrow has already been consumed by format! above
-                    entry.files.push((status, path.clone()));
+                    entry.files.push((added, deleted, clean_path.clone()));
 
                     line_actions.insert(
                         file_idx,
                         GitLogLineAction::OpenFile {
-                            path,
+                            path: clean_path,
                             commit: entry.hash_full.clone(),
                         },
                     );
