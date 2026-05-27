@@ -129,3 +129,16 @@ pub fn digit_count(n: usize) -> usize {
     }
     count
 }
+
+/// Returns the line-comment prefix for a given language ID.
+pub fn comment_prefix_for_lang(lang: &str) -> &'static str {
+    match lang {
+        "rust" | "javascript" | "typescript" | "go" | "java" | "c" | "cpp" | "cs" | "swift"
+        | "kotlin" => "//",
+        "python" | "sh" | "bash" | "zsh" | "ruby" | "yaml" | "toml" | "perl" | "r" => "#",
+        "lua" | "sql" | "haskell" | "ada" | "elm" => "--",
+        "vim" => "\"",
+        "clojure" | "lisp" | "scheme" => ";;",
+        _ => "//", // Default fallback
+    }
+}

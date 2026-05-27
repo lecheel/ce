@@ -143,6 +143,7 @@ pub enum Action {
     InsertTab,
     IndentLine,
     OutdentLine,
+    ToggleComment,
 
     // Modes
     EnterInsert,
@@ -285,6 +286,7 @@ pub enum Action {
     SearchNext,
     SearchPrev,
     SearchCurrentWord,
+    MatchBracket,
 
     // Visual Selection Modes
     EnterVisual,
@@ -411,6 +413,7 @@ impl Action {
                 | Action::PasteFromSystemClipboard
                 | Action::CutToSystemClipboard
                 | Action::PutFromSystemClipboardBelow
+                | Action::ToggleComment
         )
     }
 }
@@ -471,6 +474,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("pagedown", Action::PageDown),
         ("z z", Action::ScrollCenter),
         // searching
+        ("%", Action::MatchBracket),
         ("/", Action::EnterSearch),
         ("n", Action::SearchNext),
         ("N", Action::SearchPrev),
@@ -486,6 +490,8 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("x", Action::DeleteCharForward),
         ("u", Action::Undo),
         ("p", Action::Paste),
+        ("g c c", Action::ToggleComment),
+        // bookmarks
         ("m", Action::BookmarkSet),
         ("`", Action::BookmarkGoto),
         // Copy
@@ -2324,6 +2330,99 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.buf_mut().search_pattern = None;
             editor.set_status_msg("Search highlight cleared", MessageKind::Info);
         }
+        Action::MatchBracket => {
+            let (row, col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
+
+            // 1. Try Tree-sitter first (100% accurate, ignores strings/comments)
+            let ts_match = editor.buf().syntax.find_matching_bracket(row, col);
+
+            if let Some((target_row, target_col)) = ts_match {
+                let win = editor.active_window_mut();
+                win.row = target_row;
+                win.col = target_col;
+                win.desired_col = target_col;
+            } else {
+                // 2. Fallback: If tree-sitter fails (e.g. no grammar loaded),
+                // you can optionally call a traditional scanner here.
+                // editor.find_matching_bracket_fallback();
+                editor.set_status_msg("No matching bracket found", MessageKind::Info);
+            }
+
+            editor.snap_cursor_to_viewport();
+        }
+        Action::ToggleComment => {
+            let lang = editor
+                .buf()
+                .syntax
+                .language_id
+                .as_deref()
+                .unwrap_or("unknown");
+            let prefix = crate::ed::misc_helper::comment_prefix_for_lang(lang);
+            let prefix_with_space = format!("{} ", prefix);
+
+            let (win, buf) = editor.active_window_and_buf_mut();
+            let row = win.row;
+
+            if row >= buf.len_lines() {
+                return;
+            }
+
+            let start_char = buf.rope.line_to_char(row);
+            let is_last_line = row + 1 >= buf.len_lines();
+            let end_char = if is_last_line {
+                buf.rope.len_chars()
+            } else {
+                buf.rope.line_to_char(row + 1)
+            };
+
+            // Extract current line text without the trailing newline
+            let current_line = buf.rope.slice(start_char..end_char).to_string();
+            let line_without_newline = current_line.trim_end_matches('\n');
+
+            let trimmed = line_without_newline.trim_start();
+            let leading_ws_len = line_without_newline.len() - trimmed.len();
+            let leading_ws = &line_without_newline[..leading_ws_len];
+
+            let new_content = if trimmed.starts_with(prefix_with_space.as_str()) {
+                // Remove comment: "// " -> ""
+                format!("{}{}", leading_ws, &trimmed[prefix_with_space.len()..])
+            } else if trimmed.starts_with(prefix) {
+                // Remove comment: "//" -> "" (no trailing space after prefix)
+                format!("{}{}", leading_ws, &trimmed[prefix.len()..])
+            } else if trimmed.is_empty() {
+                // Empty line: just insert the prefix
+                format!("{}{}", leading_ws, prefix)
+            } else {
+                // Add comment: "code" -> "// code"
+                format!("{}{}{}", leading_ws, prefix_with_space, trimmed)
+            };
+
+            // Replace line in rope
+            buf.rope.remove(start_char..end_char);
+
+            let replacement = if is_last_line {
+                new_content
+            } else {
+                format!("{}\n", new_content)
+            };
+
+            buf.rope.insert(start_char, &replacement);
+            buf.modified = true;
+            buf.parse_syntax();
+
+            // Move to next line (clamped to the end of the buffer)
+            let max_row = buf.len_lines().saturating_sub(1);
+            win.row = (row + 1).min(max_row);
+            // Optional: Reset column to 0 or first non-blank character
+            win.col = 0;
+            win.desired_col = 0;
+
+            editor.comp.on_edit();
+        }
+
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();

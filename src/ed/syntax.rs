@@ -460,6 +460,54 @@ impl SyntaxState {
             (None, None) => None,
         }
     }
+    /// Find the matching bracket for the character at (row, col).
+    /// Uses tree-sitter for 100% accurate matching (automatically ignores strings/comments).
+    /// Returns (row, col) of the matching bracket.
+    pub fn find_matching_bracket(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let tree = self.tree.as_ref()?;
+        let root = tree.root_node();
+        let point = Point::new(row, col);
+
+        // Find the node exactly at the cursor
+        let node = root.descendant_for_point_range(point, point)?;
+        let kind = node.kind();
+
+        // Only trigger on bracket characters
+        if !matches!(kind, "{" | "}" | "(" | ")" | "[" | "]") {
+            return None;
+        }
+
+        // The bracket's parent is the structural node (e.g., 'block', 'parameters')
+        let parent = node.parent()?;
+
+        // Opening brackets are always the first child, closing brackets are the last.
+        let matching_node = if matches!(kind, "{" | "(" | "[") {
+            parent.child(parent.child_count() - 1)?
+        } else {
+            parent.child(0)?
+        };
+
+        // Sanity check: ensure the matching node is actually the opposite bracket
+        // (If the code has syntax errors, the tree might be malformed)
+        let expected = match kind {
+            "{" => "}",
+            "}" => "{",
+            "(" => ")",
+            ")" => "(",
+            "[" => "]",
+            "]" => "[",
+            _ => unreachable!(),
+        };
+
+        if matching_node.kind() == expected {
+            Some((
+                matching_node.start_position().row,
+                matching_node.start_position().column,
+            ))
+        } else {
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
