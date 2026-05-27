@@ -18,9 +18,9 @@ use crate::keybind::binding_ex::yank_block;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use strum::{AsRefStr, EnumIter, EnumString};
 
 // ========== BRIEF MODE HOME/END TRACKERS ==========
 struct BriefHomeTracker {
@@ -55,11 +55,66 @@ fn reset_brief_trackers() {
     }
 }
 
+// ========== AROUND-FUNCTION SAFETYNET ==========
+
+/// Maximum number of lines a function may span before the safetynet rejects
+/// a delete/change-around operation.
+const AROUND_FN_MAX_LINES: usize = 500;
+
+/// Information returned by `Editor::function_around_span_info`.
+#[derive(Debug, Clone)]
+pub struct FunctionSpanInfo {
+    /// Inclusive start row of the function node.
+    pub start_row: usize,
+    /// Exclusive end row (the row *after* the closing brace).
+    pub end_row: usize,
+    /// Number of lines the function spans (`end_row - start_row`).
+    pub line_count: usize,
+    /// How many nested function-like nodes live inside this one.
+    /// E.g. a function that contains `pub fn helper() { … }` counts as 1.
+    pub nested_fn_count: usize,
+}
+
+/// Inspects the function surrounding the cursor and returns `Ok(())` if the
+/// around-function operation may proceed, or `Err(message)` when the
+/// safetynet rejects it.
+///
+/// Two checks are performed:
+///   1. **Line-count cap** – aborts if the function exceeds
+///      `AROUND_FN_MAX_LINES` (500 by default).
+///   2. **Nested-function guard** – aborts if the function body contains
+///      one or more inner `fn` definitions (e.g. `pub fn inner() { … }`).
+///      This prevents accidentally nuking an outer function that
+///      encapsulates several helpers.
+fn check_around_function_safetynet(editor: &Editor) -> Result<(), String> {
+    match editor.function_around_span_info() {
+        Some(info) => {
+            if info.line_count > AROUND_FN_MAX_LINES {
+                return Err(format!(
+                    "Function spans {} lines (limit {}). Operation aborted for safety.",
+                    info.line_count, AROUND_FN_MAX_LINES
+                ));
+            }
+            if info.nested_fn_count > 0 {
+                return Err(format!(
+                    "Function contains {} nested fn definition(s). Operation aborted for safety.",
+                    info.nested_fn_count
+                ));
+            }
+            Ok(())
+        }
+        // Could not resolve span (e.g. no tree-sitter parse). Allow through
+        // on a best-effort basis so the action still works for simple cases.
+        None => Ok(()),
+    }
+}
 // ---------------------------------------------------------------------------
 // Action — representation of all editor commands
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,  AsRefStr, EnumString, EnumIter)]
+#[strum(serialize_all = "snake_case")] // MoveLeft -> "move_left" automatically
+#[strum(ascii_case_insensitive)]
+#[rustfmt::skip]
 pub enum Action {
     // Navigation
     MoveLeft,
@@ -85,7 +140,6 @@ pub enum Action {
     InsertNewlineBelow,
     InsertNewlineAbove,
     Undo,
-    InsertChar(char),
     InsertTab,
     IndentLine,
     OutdentLine,
@@ -108,7 +162,6 @@ pub enum Action {
     // Command Line
     ExecuteCommand,
     CommandBackspace,
-    CommandChar(char),
     CompleteCommand,
     CommandHistoryPrev,
     CommandHistoryNext,
@@ -123,6 +176,7 @@ pub enum Action {
     // Copy / Paste Register
     YankCurrentLine,
     YankCurrentWord,
+    YankWordToSystemClipboard,    
     Paste,
 
     // Config Toggles
@@ -132,6 +186,7 @@ pub enum Action {
     SplitHorizontal,
     SplitVertical,
     CloseWindow,
+    #[strum(serialize = "only_window", serialize = "only")]
     OnlyWindow,
     FocusNextWindow,
     FocusPrevWindow,
@@ -139,7 +194,6 @@ pub enum Action {
     FocusWindowRight,
     FocusWindowUp,
     FocusWindowDown,
-    SwitchBuffer(usize),
 
     // Text Objects
     DeleteInsideWord,
@@ -154,16 +208,17 @@ pub enum Action {
     ChangeInsideBraces,
     DeleteInsideBrackets,
     ChangeInsideBrackets,
+    DeleteAroundFunction,
+    ClearSearchHighlight,
 
-    BookmarkSet,  // 'm' prefix — awaits next char
-    BookmarkGoto, // '`' prefix — awaits next char or '`' for ping-pong
+    BookmarkSet,
+    BookmarkGoto,
     JumpLastPosition,
 
-    // ── System clipboard
+    // System clipboard
     YankToSystemClipboard,
     PasteFromSystemClipboard,
     CutToSystemClipboard,
-    YankWordToSystemClipboard,
     PutFromSystemClipboardBelow,
     ClipboardReplaceBuffer,
 
@@ -181,16 +236,20 @@ pub enum Action {
     BufferList,
     BufferClose,
     Save,
+    #[strum(serialize = "save_as", serialize = "write")]
     SaveAs,
     Quit,
+    #[strum(serialize = "force_quit", serialize = "q!")]
     ForceQuit,
+    #[strum(serialize = "quit_all", serialize = "qa")]
     QuitAll,
+    #[strum(serialize = "force_quit_all", serialize = "qa!", serialize = "qall!")]
     ForceQuitAll,
 
     // Brief ops
     BriefSelectionToggle,
 
-    // Extend Selection (Shift+Nav)
+    // Extend Selection
     ExtendSelectionLeft,
     ExtendSelectionRight,
     ExtendSelectionUp,
@@ -203,10 +262,11 @@ pub enum Action {
     ExtendSelectionToLastLine,
     ExtendSelectionPageUp,
     ExtendSelectionPageDown,
-
-    //-- enum Actions (anchor dont removed) --//
     EnterLlmPrompt,
+    EnterCommandPalette,
+    
     FunctionList,
+    Guide,
     LastRg,
     RgUnderCursor,
     BookMarks,
@@ -217,6 +277,7 @@ pub enum Action {
     HunkPopup,
     GitLog,
     GitStatus,
+
     // Vim Search Actions
     EnterSearch,
     CancelSearch,
@@ -239,9 +300,77 @@ pub enum Action {
 
     // Vim Dot Repeat
     RepeatLastChange,
+
+    // ── DISABLED: Dynamic Tuple Variants ──────────────────────────
+    // strum cannot generate FromStr for variants containing data.
+    #[strum(disabled)]
+    InsertChar(char),
+    #[strum(disabled)]
+    CommandChar(char),
+    #[strum(disabled)]
+    SwitchBuffer(usize),
 }
 
 impl Action {
+    /// Parses an action string, handling strum aliases and dynamic variants.
+    /// Replaces the standard `FromStr` to support custom logic.
+    pub fn parse(s: &str) -> Result<Self, anyhow::Error> {
+        let lower = s.to_lowercase().replace('_', "");
+
+        // 1. Handle dynamic tuple variants manually
+        if lower.starts_with("switchbuffer") || lower.starts_with("buf") {
+            let idx = if lower.starts_with("buf") {
+                lower
+                    .trim_start_matches("buf")
+                    .parse::<usize>()
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+            } else {
+                lower
+                    .trim_start_matches("switchbuffer")
+                    .parse::<usize>()
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+            };
+            return Ok(Action::SwitchBuffer(idx));
+        }
+
+        // 2. Let Strum handle the heavy lifting!
+        // This automatically covers all the snake_case names, CamelCase names,
+        // and all the #[strum(serialize = "...")] aliases like "dd", "yy", "daf", etc.
+        if let Ok(action) = s.parse::<Self>() {
+            return Ok(action);
+        }
+
+        // 3. Fallback for squished no-underscore strings that strum doesn't natively generate
+        // (e.g. "deletecurrentline" instead of "delete_current_line")
+        if let Ok(action) = lower.parse::<Self>() {
+            return Ok(action);
+        }
+
+        anyhow::bail!("Unknown keybind action: {}", s)
+    }
+    /// Convert the variant name to `snake_case`.
+    ///
+    /// ```text
+    /// MoveLeft           → "move_left"
+    /// DeleteInsideWord   → "delete_inside_word"
+    /// SwitchBuffer(2)    → "switch_buffer_3"   (1-indexed for display)
+    /// InsertChar('x')    → "insert_char"       (payload stripped)
+    /// ```
+    pub fn snake_name(&self) -> String {
+        match self {
+            // Handle dynamic variants manually
+            Action::SwitchBuffer(n) => format!("switch_buffer_{}", n + 1),
+            Action::InsertChar(_) => "insert_char".to_string(),
+            Action::CommandChar(_) => "command_char".to_string(),
+
+            // Every other variant is fully automatic!
+            // e.g., Action::MoveLeft.as_ref() -> "move_left"
+            _ => self.as_ref().to_string(),
+        }
+    }
+
     /// Returns true if this action modifies the buffer text.
     /// Used to gate expensive operations like syntax parsing.
     pub fn modifies_buffer(&self) -> bool {
@@ -273,6 +402,7 @@ impl Action {
                 | Action::ChangeInsideBraces
                 | Action::DeleteInsideBrackets
                 | Action::ChangeInsideBrackets
+                | Action::DeleteAroundFunction
                 | Action::ClipboardReplaceBuffer
                 | Action::DeleteSelection
                 | Action::IndentSelection
@@ -285,163 +415,30 @@ impl Action {
     }
 }
 
-impl FromStr for Action {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().replace('_', "").as_str() {
-            "moveleft" | "left" => Ok(Action::MoveLeft),
-            "moveright" | "right" => Ok(Action::MoveRight),
-            "moveup" | "up" => Ok(Action::MoveUp),
-            "movedown" | "down" => Ok(Action::MoveDown),
-            "movewordforward" | "wordforward" => Ok(Action::MoveWordForward),
-            "movewordbackward" | "wordbackward" => Ok(Action::MoveWordBackward),
-            "movelinestart" | "linestart" => Ok(Action::MoveLineStart),
-            "movelineend" | "lineend" => Ok(Action::MoveLineEnd),
-            "movetofirstline" | "firstline" => Ok(Action::MoveToFirstLine),
-            "movetolastline" | "lastline" => Ok(Action::MoveToLastLine),
-            "pageup" => Ok(Action::PageUp),
-            "pagedown" => Ok(Action::PageDown),
-            "scrollcenter" | "zz" => Ok(Action::ScrollCenter),
-
-            "backspace" => Ok(Action::Backspace),
-            "delete" | "deletecharforward" => Ok(Action::DeleteCharForward),
-            "deletecurrentline" | "deleteline" => Ok(Action::DeleteCurrentLine),
-            "deletetoendofline" | "deleteendline" | "d$" => Ok(Action::DeleteToEndOfLine),
-            "insertnewline" | "newline" => Ok(Action::InsertNewline),
-            "insertnewlinebelow" | "newlinebelow" => Ok(Action::InsertNewlineBelow),
-            "insertnewlineabove" | "newlineabove" => Ok(Action::InsertNewlineAbove),
-            "undo" => Ok(Action::Undo),
-            "inserttab" | "tab" => Ok(Action::InsertTab),
-            "indentline" | "indent" | ">" => Ok(Action::IndentLine),
-            "outdentline" | "outdent" | "<" => Ok(Action::OutdentLine),
-
-            "enterinsert" | "insert" => Ok(Action::EnterInsert),
-            "enterappend" | "append" => Ok(Action::EnterAppend),
-            "enterinsertlinestart" | "insertlinestart" => Ok(Action::EnterInsertLineStart),
-            "enterinsertlineend" | "insertlineend" => Ok(Action::EnterInsertLineEnd),
-            "entercommand" | "command" => Ok(Action::EnterCommand),
-            "enternormal" | "normal" => Ok(Action::EnterNormal),
-            "exitmode" | "esc" | "normalmode" => Ok(Action::ExitMode),
-
-            "acceptcompletion" | "accept" => Ok(Action::AcceptCompletion),
-            "cyclecompletionnext" | "completionnext" => Ok(Action::CycleCompletionNext),
-            "cyclecompletionprev" | "completionprev" => Ok(Action::CycleCompletionPrev),
-            "completecommand" | "complete" | "tabcomplete" => Ok(Action::CompleteCommand),
-            "commandhistoryprev" | "cmdprev" | "historyprev" => Ok(Action::CommandHistoryPrev),
-            "commandhistorynext" | "cmdnext" | "historynext" => Ok(Action::CommandHistoryNext),
-
-            "yankcurrentline" | "yankline" | "yy" => Ok(Action::YankCurrentLine),
-            "paste" | "put" | "p" => Ok(Action::Paste),
-
-            "togglepopup" | "togglewhichkey" => Ok(Action::TogglePopup),
-
-            // Window management
-            "splithorizontal" | "split" | "sp" => Ok(Action::SplitHorizontal),
-            "splitvertical" | "vsplit" | "vs" => Ok(Action::SplitVertical),
-            "closewindow" | "winclose" | "wq" => Ok(Action::CloseWindow),
-            "onlywindow" | "winonly" | "on" => Ok(Action::OnlyWindow),
-            "focusnextwindow" | "focusnext" => Ok(Action::FocusNextWindow),
-            "focusprevwindow" | "focusprev" => Ok(Action::FocusPrevWindow),
-            "focuswindowleft" | "windowleft" | "wholeft" => Ok(Action::FocusWindowLeft),
-            "focuswindowright" | "windowright" | "whoright" => Ok(Action::FocusWindowRight),
-            "focuswindowup" | "windowup" | "whoup" => Ok(Action::FocusWindowUp),
-            "focuswindowdown" | "windowdown" | "whodown" => Ok(Action::FocusWindowDown),
-            "switchbuffer1" | "buf1" => Ok(Action::SwitchBuffer(0)),
-            "switchbuffer2" | "buf2" => Ok(Action::SwitchBuffer(1)),
-            "switchbuffer3" | "buf3" => Ok(Action::SwitchBuffer(2)),
-            "switchbuffer4" | "buf4" => Ok(Action::SwitchBuffer(3)),
-
-            "deleteinsideword" | "diw" => Ok(Action::DeleteInsideWord),
-            "changeinsideword" | "ciw" => Ok(Action::ChangeInsideWord),
-            "deleteinsidequotes" | "di\"" => Ok(Action::DeleteInsideQuotes),
-            "changeinsidequotes" | "ci\"" => Ok(Action::ChangeInsideQuotes),
-            "deleteinsideparens" | "di(" | "di)" => Ok(Action::DeleteInsideParens),
-            "changeinsideparens" | "ci(" | "ci)" => Ok(Action::ChangeInsideParens),
-            "deleteinsidebraces" | "di{" | "di}" => Ok(Action::DeleteInsideBraces),
-            "changeinsidebraces" | "ci{" | "ci}" => Ok(Action::ChangeInsideBraces),
-            "deleteinsidebrackets" | "di[" | "di]" => Ok(Action::DeleteInsideBrackets),
-            "changeinsidebrackets" | "ci[" | "ci]" => Ok(Action::ChangeInsideBrackets),
-            "deleteinsidefunction" | "dif" => Ok(Action::DeleteInsideFunction),
-            "changeinsidefunction" | "cif" => Ok(Action::ChangeInsideFunction),
-            "togglelinenumbers" | "togglelines" | "linenumbers" => Ok(Action::ToggleLineNumbers),
-            "togglerelativelinenumbers" | "togglerelative" | "relativenumber" => {
-                Ok(Action::ToggleRelativeLineNumbers)
-            }
-            "togglegitgutter" | "gitgutter" => Ok(Action::ToggleGitGutter),
-            "togglebookmarks" | "bookmarks" => Ok(Action::ToggleBookmarks),
-            "togglebookmarkatcursor" | "togglebookmark" | "bookmark" => {
-                Ok(Action::ToggleBookmarkAtCursor)
-            }
-            "entervisual" | "visual" => Ok(Action::EnterVisual),
-            "entervisualline" | "visualline" => Ok(Action::EnterVisualLine),
-            "entervisualblock" | "visualblock" | "altc" => Ok(Action::EnterVisualBlock),
-            "visualblockinsert" | "vblockinsert" => Ok(Action::VisualBlockInsert),
-            "visualblockappend" | "vblockappend" => Ok(Action::VisualBlockAppend),
-            "yankselection" => Ok(Action::YankSelection),
-            "deleteselection" => Ok(Action::DeleteSelection),
-            "changeselection" => Ok(Action::ChangeSelection),
-            "indentselection" => Ok(Action::IndentSelection),
-            "outdentselection" => Ok(Action::OutdentSelection),
-            "bn" | "bnext" | "buffernext" => Ok(Action::BufferNext),
-            "bp" | "bprev" | "bufferprev" => Ok(Action::BufferPrev),
-            "mru" => Ok(Action::Mru),
-            "entersearch" | "search" | "/" => Ok(Action::EnterSearch),
-            "executesearch" => Ok(Action::ExecuteSearch),
-            "searchnext" | "next" | "n" => Ok(Action::SearchNext),
-            "searchprev" | "prev" | "N" => Ok(Action::SearchPrev),
-            "searchcurrentword" | "curword" | "*" => Ok(Action::SearchCurrentWord),
-            "functions" | "funlist" | "fns" | "fn" => Ok(Action::FunctionList),
-            "hunknext" | "nexthunk" | "hunkn" => Ok(Action::HunkNext),
-            "hunkprev" | "prevhunk" | "hunkp" => Ok(Action::HunkPrev),
-            "gitrevert" | "reverthunk" | "grevert" => Ok(Action::GitRevert),
-            "hunkpopup" | "hunkdiff" => Ok(Action::HunkPopup),
-            "gitlog" | "glog" | "tig" => Ok(Action::GitLog),
-            "gitstatus" | "gs" => Ok(Action::GitStatus),
-
-            "bufferlist" | "ls" | "buffers" => Ok(Action::BufferList),
-            "bufferclose" => Ok(Action::BufferClose),
-            "quitall" | "qa" => Ok(Action::QuitAll),
-            "forcequitall" | "qa!" | "qall!" => Ok(Action::ForceQuitAll),
-            "lastrg" => Ok(Action::LastRg),
-            "rgundercursor" => Ok(Action::RgUnderCursor),
-            "marks" => Ok(Action::BookMarks),
-            "llmprompt" => Ok(Action::EnterLlmPrompt),
-            "commandlinestart" | "cmdhome" | "ctrla" => Ok(Action::CommandLineStart),
-            "commandlineend" | "cmdend" | "ctrle" => Ok(Action::CommandLineEnd),
-            "commandlineleft" | "cmdleft" | "ctrlb" => Ok(Action::CommandLineLeft),
-            "commandlineright" | "cmdright" | "ctrlf" => Ok(Action::CommandLineRight),
-            "commanddeletechar" | "cmddelete" | "ctrld" => Ok(Action::CommandDeleteChar),
-            "commandlinekilltoend" | "cmdkill" | "ctrlk" => Ok(Action::CommandLineKillToEnd),
-            "commandclear" | "cmdclear" | "altddelline" => Ok(Action::CommandClear),
-            // brief
-            "briefselectiontoggle" | "bselect" => Ok(Action::BriefSelectionToggle),
-
-            "extendselectionleft" | "selectleft" => Ok(Action::ExtendSelectionLeft),
-            "extendselectionright" | "selectright" => Ok(Action::ExtendSelectionRight),
-            "extendselectionup" | "selectup" => Ok(Action::ExtendSelectionUp),
-            "extendselectiondown" | "selectdown" => Ok(Action::ExtendSelectionDown),
-            "extendselectionwordforward" | "selectwordforward" => {
-                Ok(Action::ExtendSelectionWordForward)
-            }
-            "extendselectionwordbackward" | "selectwordbackward" => {
-                Ok(Action::ExtendSelectionWordBackward)
-            }
-            "extendselectionlinestart" | "selecthomestart" => Ok(Action::ExtendSelectionLineStart),
-            "extendselectionlineend" | "selectlineend" => Ok(Action::ExtendSelectionLineEnd),
-            "clipboardreplacebuffer" | "crb" => Ok(Action::ClipboardReplaceBuffer),
-
-            //-- FromStr commands action enterbrief (anchor dont removed) --//
-            "enterbrief" | "brief" => Ok(Action::EnterBrief),
-            "filepicker" => Ok(Action::FilePicker),
-            "save" => Ok(Action::Save),
-            "write" => Ok(Action::SaveAs),
-            "quit" => Ok(Action::Quit),
-            "forcequit" => Ok(Action::ForceQuit),
-
-            _ => anyhow::bail!("Unknown keybind action: {}", s),
+/// Calls only the strum-generated string matching, without going through
+/// our custom `FromStr` (avoids infinite recursion).
+fn action_from_strum(s: &str) -> Option<Action> {
+    // strum's EnumString uses `std::str::FromStr` — we can't call it
+    // without recursing.  Instead, enumerate the known static variants
+    // that strum would handle, using `AsRefStr` in reverse via a lookup.
+    //
+    // The pragmatic solution: use `strum::IntoEnumIterator` if you derive
+    // it, or maintain a flat match here for all non-tuple variants.
+    //
+    // Simplest correct approach: add `EnumString` as a *separate* derive
+    // on a mirror enum, or use the approach below with strum's feature.
+    use strum::IntoEnumIterator; // requires: strum_macros derive `EnumIter`
+    for variant in Action::iter() {
+        // Skip tuple variants (they don't impl AsRef cleanly)
+        match variant {
+            Action::SwitchBuffer(_) | Action::InsertChar(_) | Action::CommandChar(_) => continue,
+            _ => {}
+        }
+        if variant.as_ref().eq_ignore_ascii_case(s) {
+            return Some(variant);
         }
     }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +505,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("space g r", Action::GitRevert),
         // Global shortcuts
         ("alt+d", Action::DeleteCurrentLine),
+        ("ctrl+alt+p", Action::EnterCommandPalette),
         // Leader key sequences (Space)
         ("space Q", Action::QuitAll),
         ("space p v", Action::Paste),
@@ -543,6 +541,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("c i [", Action::ChangeInsideBrackets),
         ("d i f", Action::DeleteInsideFunction),
         ("c i f", Action::ChangeInsideFunction),
+        ("d a f", Action::DeleteAroundFunction),
         ("v", Action::EnterVisual),
         ("V", Action::EnterVisualLine),
         ("ctrl+v", Action::EnterVisualBlock),
@@ -1693,6 +1692,107 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.edit_text_object(crate::ed::syntax::TextObject::Brackets, true, true);
         }
 
+        Action::DeleteAroundFunction => {
+            if let Err(msg) = check_around_function_safetynet(editor) {
+                editor.set_status_msg(&msg, MessageKind::Error);
+                return;
+            }
+
+            let (orig_row, orig_col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
+
+            // 1. Try exact cursor position
+            let info = editor.function_around_span_info();
+
+            // 2. If not found, try moving cursor to first non-whitespace char on the line
+            // (handles cursor in leading whitespace before `pub fn`)
+            let info = if info.is_none() {
+                let new_col = {
+                    let buf = editor.buf();
+                    if orig_row < buf.len_lines() {
+                        let line = buf.line_text(orig_row);
+                        line.chars().position(|c| !c.is_whitespace())
+                    } else {
+                        None
+                    }
+                }; // buf dropped here
+
+                if let Some(col) = new_col {
+                    if col != orig_col {
+                        let win = editor.active_window_mut();
+                        win.col = col;
+                        let i = editor.function_around_span_info();
+                        let win = editor.active_window_mut();
+                        win.col = orig_col;
+                        i
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                info
+            };
+
+            // 3. If still not found, try one character back (e.g. cursor right after `}`)
+            let info = if info.is_none() && orig_col > 0 {
+                let win = editor.active_window_mut();
+                win.col = orig_col - 1;
+                let i = editor.function_around_span_info();
+                let win = editor.active_window_mut();
+                win.col = orig_col;
+                i
+            } else {
+                info
+            };
+
+            // Ensure original cursor is restored before we continue
+            {
+                let win = editor.active_window_mut();
+                win.row = orig_row;
+                win.col = orig_col;
+            }
+
+            if let Some(info) = info {
+                let deleted = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    let start_char = buf.rope.line_to_char(info.start_row);
+
+                    // To include the closing brace and its trailing newline,
+                    // we must delete up to the start of the line *after* end_row.
+                    let end_row_exclusive = (info.end_row + 1).min(buf.len_lines());
+                    let end_char = if end_row_exclusive < buf.len_lines() {
+                        buf.rope.line_to_char(end_row_exclusive)
+                    } else {
+                        buf.rope.len_chars()
+                    };
+
+                    let text = buf.rope.slice(start_char..end_char).to_string();
+                    buf.rope.remove(start_char..end_char);
+                    buf.modified = true;
+                    buf.parse_syntax();
+                    text
+                }; // win and buf dropped here
+
+                // Yank the deleted text
+                editor.clipboard = Some(deleted);
+
+                // Reposition cursor
+                {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    let max_row = buf.len_lines().saturating_sub(1);
+                    win.row = info.start_row.min(max_row);
+                    win.col = 0;
+                    win.clamp_cursor(buf);
+                    win.desired_col = win.col;
+                }
+            } else {
+                editor.set_status_msg("No function found around cursor", MessageKind::Error);
+            }
+        }
         // ---------------------------------------------------------------
         // Window management
         // ---------------------------------------------------------------
@@ -2054,12 +2154,15 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
         }
         Action::Mru => {
-            editor.open_mru_popup();
+            editor.open_mru_popup(true);
         }
         Action::FunctionList => {
             let entries = crate::popup::function_list::extract_functions(editor.buf());
             editor.popup.function_list =
                 Some(crate::popup::function_list::FunctionListPopup::new(entries));
+        }
+        Action::Guide => {
+            editor.open_guide_popup();
         }
         Action::HunkNext => {
             editor.jump_to_next_hunk();
@@ -2074,7 +2177,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.open_hunk_popup();
         }
         Action::GitLog => {
-            editor.open_git_log();
+            editor.open_git_log(None);
         }
         Action::BufferList => {
             editor.trigger_buffer_list_popup();
@@ -2212,7 +2315,15 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.snap_cursor_to_viewport();
             editor.git_debounce.notify_edit(bid);
         }
-
+        Action::EnterCommandPalette => {
+            let entries = crate::popup::command_palette::build_command_entries();
+            editor.popup.open_command_palette(entries);
+        }
+        Action::ClearSearchHighlight => {
+            editor.last_search_query = None;
+            editor.buf_mut().search_pattern = None;
+            editor.set_status_msg("Search highlight cleared", MessageKind::Info);
+        }
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();
@@ -2568,6 +2679,7 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             // Ensure zz appears with a friendly description even if the
             // generic action_display_name is terse
             bindings.push(("z z".into(), "Center cursor on screen".into()));
+            bindings.push(("d a f".into(), "Delete around function".into()));
             bindings
         }
 

@@ -22,10 +22,10 @@ pub fn format_key(key: KeyEvent) -> String {
     let mut parts = Vec::new();
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        parts.push("ctrl");
+        parts.push("ctrl".to_string());
     }
     if key.modifiers.contains(KeyModifiers::ALT) {
-        parts.push("alt");
+        parts.push("alt".to_string());
     }
 
     let code_str = match key.code {
@@ -45,7 +45,23 @@ pub fn format_key(key: KeyEvent) -> String {
         KeyCode::PageUp => "pageup".to_string(),
         KeyCode::PageDown => "pagedown".to_string(),
         KeyCode::Char(' ') => "space".to_string(),
-        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Char(c) => {
+            // Crossterm may send Shift+P as either Char('P') or Char('p')+SHIFT.
+            // Normalize: always lowercase the char, and emit "shift" prefix
+            // when SHIFT is held with ctrl/alt (global shortcuts).
+            // BUT: plain Shift+letter (no ctrl/alt) stays uppercase for vim
+            // bindings like "G", "V", "I" — do NOT emit "shift" prefix there.
+            let has_ctrl_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT);
+            if has_ctrl_or_alt && key.modifiers.contains(KeyModifiers::SHIFT) {
+                parts.push("shift".to_string());
+                c.to_lowercase().to_string()
+            } else {
+                // Plain letter, uppercase or lowercase — emit as-is.
+                // "G" stays "G", "v" stays "v".
+                c.to_string()
+            }
+        }
         KeyCode::F(num) => format!("f{}", num),
         _ => "".to_string(),
     };
@@ -54,7 +70,7 @@ pub fn format_key(key: KeyEvent) -> String {
         return "".to_string();
     }
 
-    parts.push(&code_str);
+    parts.push(code_str);
     parts.join("+")
 }
 
@@ -185,6 +201,11 @@ pub fn resolve_sequence(
     ghost_active: bool,
     mode: Mode,
 ) -> ResolveResult {
+    // Global chord shortcuts are single-key events handled before this
+    // function is ever called — they must never accumulate as a prefix.
+    if key_seq.starts_with("ctrl+shift+") {
+        return ResolveResult::None;
+    }
     // Insert and Search modes never use multi-key sequences.
     if mode == Mode::Insert || mode == Mode::Search {
         return ResolveResult::None;

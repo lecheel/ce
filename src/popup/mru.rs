@@ -175,7 +175,7 @@ pub struct MruPopup {
 }
 
 impl MruPopup {
-    pub fn new(entries: Vec<MruEntry>, repo_root: Option<PathBuf>) -> Self {
+    pub fn new(entries: Vec<MruEntry>, repo_root: Option<PathBuf>, repo_only: bool) -> Self {
         let filtered: Vec<usize> = (0..entries.len()).collect();
         MruPopup {
             entries,
@@ -185,7 +185,7 @@ impl MruPopup {
             filter: String::new(),
             sort_by_frequency: false,
             repo_root,
-            repo_only: false,
+            repo_only,
         }
     }
 

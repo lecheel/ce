@@ -79,15 +79,33 @@ impl GitLogState {
     /// `(state, display_text_for_rope)`.
     ///
     /// Returns `None` when git is unavailable or the repo has no commits.
-    pub fn load(repo_root: &Path) -> Option<(Self, String)> {
+    ///
+    /// `limit` controls the number of commits fetched:
+    ///   - `None`       → default (10)
+    ///   - `Some(0)`    → all commits (no -n argument)
+    ///   - `Some(n)`    → last n commits
+    pub fn load(repo_root: &Path, limit: Option<usize>) -> Option<(Self, String)> {
+        // Resolve the limit: default to 10, 0 means all
+        let limit_arg = match limit {
+            Some(0) => None,                // 0 means no limit (fetch all)
+            Some(n) => Some(n.to_string()), // Custom limit
+            None => Some("10".to_string()), // Default limit
+        };
+
+        let mut args = vec!["log".to_string()];
+
+        if let Some(n_str) = limit_arg {
+            args.push(format!("-{}", n_str));
+        }
+
+        args.extend([
+            "--pretty=format:_COMMIT_%x00%H%x00%h%x00%an%x00%ad%x00%s".to_string(),
+            "--date=short".to_string(),
+            "--numstat".to_string(),
+        ]);
+
         let output = Command::new("git")
-            .args([
-                "log",
-                "-500", // cap at 500 commits for performance
-                "--pretty=format:_COMMIT_%x00%H%x00%h%x00%an%x00%ad%x00%s",
-                "--date=short",
-                "--numstat",
-            ])
+            .args(&args)
             .current_dir(repo_root)
             .output()
             .ok()?;

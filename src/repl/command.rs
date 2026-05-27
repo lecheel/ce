@@ -3,6 +3,7 @@
 //! The `execute` function parses and runs `:` commands entered by the user.
 use crate::ed::mode::MessageKind;
 use crate::ed::repeat::{RepeatExt, RepeatableAction};
+use crate::Config;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,51 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         }
         "checkhealth" | "health" => {
             editor.open_checkhealth();
+        }
+        // ---- Guide Commands ----
+        "guide" => {
+            editor.open_guide_popup();
+        }
+        s if s.starts_with("guide ") => {
+            let arg = s.strip_prefix("guide ").unwrap().trim();
+            match arg {
+                "update" | "sync" => {
+                    let filename = editor.active_filename().map(|s| s.to_string());
+                    if let Some(name) = filename {
+                        let source = editor.buf().rope.to_string();
+                        let mut guide = crate::ed::guide::Guide::load();
+                        match guide.sync_from_buffer(std::path::Path::new(&name), &source) {
+                            Ok(result) => {
+                                editor.set_status_msg(
+                                    &format!("Guide synced: +{} ~{}", result.added, result.updated),
+                                    MessageKind::Success,
+                                );
+                            }
+                            Err(e) => {
+                                editor.set_status_msg(
+                                    &format!("Guide sync failed: {}", e),
+                                    MessageKind::Error,
+                                );
+                            }
+                        }
+                    } else {
+                        editor.set_status_msg(
+                            "Cannot sync guide: unsaved buffer",
+                            MessageKind::Error,
+                        );
+                    }
+                }
+                _ => {
+                    editor.set_status_msg(
+                        &format!("Unknown guide argument: {}", arg),
+                        MessageKind::Error,
+                    );
+                }
+            }
+        }
+        "command_palette" => {
+            let entries = crate::popup::command_palette::build_command_entries();
+            editor.popup.open_command_palette(entries);
         }
         s if s.starts_with("vocab ") => {
             let word = s.strip_prefix("vocab ").unwrap().trim();
@@ -110,7 +156,10 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             editor.set_status_msg("Opened function navigation list", MessageKind::Info);
         }
         "mru" => {
-            editor.open_mru_popup();
+            editor.open_mru_popup(true);
+        }
+        "mru!" | "mruall" => {
+            editor.open_mru_popup(false); // Global
         }
         // ---- Buffer commands ----
         "bn" | "bnext" => {
@@ -139,8 +188,22 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 editor.switch_buffer_by_index(idx);
             }
         }
-        "gitlog" | "glog" | "tig" => {
-            editor.open_git_log();
+        "tig" | "gitlog" | "glog" => {
+            // No arguments provided, use default (None -> 10)
+            editor.open_git_log(None);
+        }
+        s if s.starts_with("tig ") || s.starts_with("gitlog ") || s.starts_with("glog ") => {
+            // Arguments provided (e.g., "tig 0", "tig 20"), parse the limit
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            let arg = parts.get(1); // Get the optional second part
+
+            // Parse the argument (provide the &&str type hint to fix E0282)
+            let limit = arg.and_then(|a: &&str| a.parse::<usize>().ok());
+
+            // None -> default (10)
+            // Some(0) -> fetch all
+            // Some(n) -> fetch n
+            editor.open_git_log(limit);
         }
 
         //-- repl commands (anchor dont removed) --//
@@ -265,7 +328,23 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 editor.set_status_msg("Usage: :prompt <message>", MessageKind::Error);
             }
         }
-
+        "gen_desc" => match crate::popup::command_palette::generate_default_desc_file() {
+            Ok(()) => {
+                let path = Config::descriptions_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "~/.config/ce/desc.json".to_string());
+                editor.set_status_msg(
+                    &format!("Generated default descriptions to {}", path),
+                    MessageKind::Success,
+                );
+            }
+            Err(e) => {
+                editor.set_status_msg(
+                    &format!("Failed to generate desc.json: {}", e),
+                    MessageKind::Error,
+                );
+            }
+        },
         "marks" => {
             editor.open_marks_popup();
         }
@@ -324,6 +403,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "on", "only", "vim", "brief", "scankey", "ff", "finder", "filepicker", 
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
+        "command_palette","guide","guide sync", "guide update", "gen_desc",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

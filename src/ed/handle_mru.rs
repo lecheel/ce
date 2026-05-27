@@ -1,23 +1,32 @@
+//--+ ed/handle_mru.rs
 use crate::event::KeyEvent;
 use crate::Editor;
 
 impl Editor {
-    /// Opens the MRU popup overlay, auto-detecting the Git repository root of the active file.
-    pub fn open_mru_popup(&mut self) {
-        let repo_root = self.buf().filename.as_ref().and_then(|f| {
-            let canonical = std::path::Path::new(f).canonicalize().ok()?;
-            let mut current = canonical.as_path();
-            while let Some(parent) = current.parent() {
-                if parent.join(".git").exists() {
-                    return Some(parent.to_path_buf());
+    /// Opens the MRU popup overlay.
+    ///
+    /// If `repo_only` is true, it auto-detects the Git repository root and
+    /// filters the initial list to only that repo. If false, it opens globally.
+    /// (User can still press Tab inside the popup to toggle the filter).
+    pub fn open_mru_popup(&mut self, repo_only: bool) {
+        let repo_root = if repo_only {
+            self.buf().filename.as_ref().and_then(|f| {
+                let canonical = std::path::Path::new(f).canonicalize().ok()?;
+                let mut current = canonical.as_path();
+                while let Some(parent) = current.parent() {
+                    if parent.join(".git").exists() {
+                        return Some(parent.to_path_buf());
+                    }
+                    current = parent;
                 }
-                current = parent;
-            }
-            None
-        });
+                None
+            })
+        } else {
+            None // No repo root -> shows global MRU
+        };
 
         let entries = self.mru_manager.get_entries();
-        let mut mru_popup = crate::popup::mru::MruPopup::new(entries, repo_root);
+        let mut mru_popup = crate::popup::mru::MruPopup::new(entries, repo_root, repo_only);
         mru_popup.apply_filter();
         self.popup.mru = Some(mru_popup);
     }
@@ -50,7 +59,7 @@ impl Editor {
                 }
             }
 
-            // Toggles sorting between recency and frequency frequency
+            // Toggles sorting between recency and frequency
             KeyCode::Home => {
                 if let Some(ref mut mru) = self.popup.mru {
                     mru.toggle_sort(&self.mru_manager);

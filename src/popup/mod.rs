@@ -1,13 +1,16 @@
 // File: src/popup/mod.rs
 
 pub mod buffer_list;
+pub mod command_palette;
 pub mod file_picker;
 pub mod function_list;
 pub mod git_hunk;
+pub mod guide;
 pub mod marks;
 pub mod mru;
 
 pub use buffer_list::{BufferEntry, BufferList};
+pub use command_palette::CommandPalettePopup;
 pub use file_picker::FilePicker;
 pub use function_list::FunctionListPopup;
 pub use marks::{MarkEntry, MarksPopup};
@@ -85,13 +88,17 @@ pub struct PopupState {
     // -- FunctionList specific --
     pub function_list: Option<FunctionListPopup>,
     pub git_hunk: Option<crate::popup::git_hunk::GitHunkPopup>,
-    pub buffer_list: Option<BufferList>, // Keeps buffer picker state
+    pub buffer_list: Option<BufferList>,
 
     // -- Explicit popup content (Config, Scankey) --
     pub content: Option<PopupContent>,
     pub mru: Option<MruPopup>,
 
     pub marks: Option<MarksPopup>,
+    pub guide: Option<guide::GuidePopup>,
+
+    // -- Command Palette --
+    pub command_palette: Option<CommandPalettePopup>,
 }
 
 impl PopupState {
@@ -113,6 +120,8 @@ impl PopupState {
             mru: None,
             content: None,
             marks: None,
+            guide: None,
+            command_palette: None, // ← ADD
         }
     }
 
@@ -126,6 +135,7 @@ impl PopupState {
             || self.git_hunk.is_some()
             || self.buffer_list.is_some()
             || self.marks.is_some()
+            || self.command_palette.is_some() // ← ADD
     }
 
     /// Close the popup and clear all specific data.
@@ -145,6 +155,7 @@ impl PopupState {
         self.git_hunk = None;
         self.buffer_list = None;
         self.marks = None;
+        self.command_palette = None; // ← ADD
     }
 
     // -- Config popup --
@@ -212,5 +223,15 @@ impl PopupState {
         self.close();
         self.buffer_list = Some(BufferList::new(entries));
         self.kind = Some(PopupKind::BufferList);
+    }
+
+    // -- Command Palette popup --                          // ← ADD entire method
+    pub fn open_command_palette(
+        &mut self,
+        entries: Vec<crate::popup::command_palette::CommandEntry>,
+    ) {
+        self.close();
+        self.command_palette = Some(CommandPalettePopup::new(entries));
+        self.kind = Some(PopupKind::CommandPalette);
     }
 }

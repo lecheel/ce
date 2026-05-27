@@ -683,7 +683,7 @@ impl Editor {
 
     /// Open a tig-like git log viewer for the repository of the active
     /// file (or the current working directory).
-    pub fn open_git_log(&mut self) {
+    pub fn open_git_log(&mut self, limit: Option<usize>) {
         // Determine repo root from the active file or cwd
         let repo_root = {
             if let Some(fname) = self.active_filename() {
@@ -703,7 +703,6 @@ impl Editor {
             }
         };
 
-        // ── CHANGE: Set target_filename to "*git-log*" ─────────────────
         let target_filename = "*git-log*".to_string();
 
         let existing_id = self
@@ -727,8 +726,19 @@ impl Editor {
             return;
         }
 
+        // ── Resolve the limit ─────────────────────────────
+        // None -> default 10
+        // Some(0) -> fetch all
+        // Some(n) -> fetch n
+        let actual_limit = match limit {
+            Some(0) => None,    // 0 means no limit (fetch all)
+            Some(n) => Some(n), // Custom limit
+            None => Some(10),   // Default limit
+        };
+
         // Load fresh log
-        let (state, text) = match crate::git::log::GitLogState::load(&repo_root) {
+        // NOTE: You will need to update GitLogState::load to accept actual_limit
+        let (state, text) = match crate::git::log::GitLogState::load(&repo_root, actual_limit) {
             Some(result) => result,
             None => {
                 self.set_status_msg("Failed to load git log (empty repo?)", MessageKind::Error);
@@ -859,9 +869,19 @@ impl Editor {
     /// if editor.try_process_special_command(&cmd) { return; }
     /// ```
     pub fn try_process_special_command(&mut self, cmd: &str) -> bool {
-        match cmd.trim() {
+        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return false;
+        }
+
+        match parts[0] {
             "gitlog" | "tig" => {
-                self.open_git_log();
+                // Parse the second argument as a number, if provided
+                // ":tig" -> None
+                // ":tig 20" -> Some(20)
+                // ":tig 0" -> Some(0)
+                let limit = parts.get(1).and_then(|s| s.parse::<usize>().ok());
+                self.open_git_log(limit);
                 true
             }
             _ => false,

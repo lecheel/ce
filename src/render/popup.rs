@@ -8,7 +8,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
-
 // ── layout helpers ─────────────────────────────────────────────────
 
 fn clamp(screen: Rect, area: Rect) -> Rect {
@@ -89,6 +88,18 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    // 6. Intercept Command Palette
+    if editor.popup.command_palette.is_some() {
+        draw_command_palette(f, editor, screen);
+        return;
+    }
+
+    // 7. Intercept Guide Popup
+    if editor.popup.guide.is_some() {
+        draw_guide(f, editor, screen);
+        return;
+    }
+
     let Some(content) = &editor.popup.content else {
         return;
     };
@@ -101,6 +112,140 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
             raw_label,
         } => draw_scankey(f, key_label, action_label, raw_label, screen),
     }
+}
+
+// 2. Add the draw_guide function:
+fn draw_guide(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.guide {
+        Some(p) => p,
+        None => return,
+    };
+
+    let width = popup_width(screen);
+    const VISIBLE_ROWS: usize = 20;
+    const TOTAL_HEIGHT: u16 = VISIBLE_ROWS as u16 + 3; // +3 borders+filter
+    let area = centered_rect(screen, width, TOTAL_HEIGHT);
+
+    let title = format!(" Guide ({}) ", popup.filtered.len());
+    let footer = format!(
+        "[Esc] close  [Enter] jump  {}/{}",
+        if popup.filtered.is_empty() {
+            0
+        } else {
+            popup.selected + 1
+        },
+        popup.filtered.len()
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+    let filter_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height - 1,
+    };
+
+    let filter_line = if popup.filter.is_empty() {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "█",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]))
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                &popup.filter,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]))
+    };
+
+    let mut list_items = Vec::with_capacity(VISIBLE_ROWS);
+    let scroll_offset = if popup.selected >= VISIBLE_ROWS {
+        popup.selected - VISIBLE_ROWS + 1
+    } else {
+        0
+    };
+
+    for i in 0..VISIBLE_ROWS {
+        let entry_idx = scroll_offset + i;
+        if entry_idx < popup.filtered.len() {
+            let real_idx = popup.filtered[entry_idx];
+            if let Some(entry) = popup.all_entries.get(real_idx) {
+                let is_selected = entry_idx == popup.selected;
+
+                let kind_display = format!("{:>12} ", entry.kind);
+
+                // Extract just the file name (e.g. "editor.rs" from "src/ed/editor.rs")
+                let file_name = std::path::Path::new(&entry.file)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&entry.file);
+
+                // Combine label and filename: "label (filename)"
+                let label_display = format!("{} ({})", entry.label, file_name);
+
+                let kind_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Magenta)
+                };
+
+                let label_style = if is_selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+
+                let spans = vec![
+                    Span::styled(kind_display, kind_style),
+                    Span::styled(label_display, label_style),
+                ];
+
+                list_items.push(ListItem::new(Line::from(spans)));
+                continue;
+            }
+        }
+        list_items.push(ListItem::new(Line::from("")));
+    }
+
+    let list = List::new(list_items);
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(filter_line, filter_area);
+    f.render_widget(list, list_area);
 }
 
 fn draw_config(f: &mut Frame, items: &[PopupItem], selected: usize, screen: Rect) {
@@ -521,6 +666,185 @@ fn draw_file_picker(f: &mut Frame, editor: &Editor, screen: Rect) {
 
     let list = List::new(items);
 
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(filter_line, filter_area);
+    f.render_widget(list, list_area);
+}
+
+fn draw_command_palette(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.command_palette {
+        Some(p) => p,
+        None => return,
+    };
+    log::debug!(
+        "[cmd_palette] DRAW filter={:?} filtered_len={} selected={}",
+        popup.filter,
+        popup.filtered.len(),
+        popup.selected,
+    );
+
+    let width = popup_width(screen);
+    let max_h = screen.height.saturating_sub(4) as usize;
+    let list_height = 20.min(max_h);
+    let total_height = (list_height as u16).saturating_add(3);
+    let area = centered_rect(screen, width, total_height);
+
+    let title = format!(" Command Palette ({}) ", popup.filtered.len());
+    let footer = format!(
+        "[Enter] execute  [Esc] close  {}/{}",
+        if popup.filtered.is_empty() {
+            0
+        } else {
+            popup.selected + 1
+        },
+        popup.filtered.len()
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+    let filter_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y.saturating_add(1),
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    // Filter line with prompt
+    let filter_line = if popup.filter.is_empty() {
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "█",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]))
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                &popup.filter,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]))
+    };
+
+    // Build list items with fuzzy highlighting
+    let mut list_items = Vec::with_capacity(list_height);
+    for i in 0..list_height {
+        let entry_idx = popup.scroll + i;
+        if entry_idx < popup.filtered.len() {
+            let real_idx = popup.filtered[entry_idx];
+            let entry = &popup.all_entries[real_idx];
+            let is_selected = entry_idx == popup.selected;
+            let match_indices = popup
+                .match_indices
+                .get(real_idx)
+                .cloned()
+                .unwrap_or_default();
+
+            let row_style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            // Format: name (description) [keyhint]
+            let name_text = &entry.name;
+            let desc_text = &entry.description;
+            let hint_text = &entry.key_hint;
+
+            let mut spans = Vec::new();
+
+            // Highlight name portion if matched
+            let mut last_idx = 0;
+            for &idx in &match_indices {
+                if idx < name_text.len() {
+                    if last_idx < idx {
+                        spans.push(Span::styled(
+                            &name_text[last_idx..idx],
+                            if is_selected {
+                                Style::default().fg(Color::White)
+                            } else {
+                                Style::default().fg(Color::Blue)
+                            },
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        &name_text[idx..idx + 1],
+                        if is_selected {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .bg(Color::DarkGray)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        },
+                    ));
+                    last_idx = idx + 1;
+                }
+            }
+            if last_idx < name_text.len() {
+                spans.push(Span::styled(
+                    &name_text[last_idx..],
+                    if is_selected {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Blue)
+                    },
+                ));
+            }
+
+            // Description (gray)
+            spans.push(Span::styled(
+                format!("  {}  ", desc_text),
+                if is_selected {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ));
+            // Key hint (dim yellow)
+            spans.push(Span::styled(
+                hint_text,
+                if is_selected {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                },
+            ));
+
+            list_items.push(ListItem::new(Line::from(spans)).style(row_style));
+        } else {
+            list_items.push(ListItem::new(Line::from("")));
+        }
+    }
+
+    let list = List::new(list_items);
     f.render_widget(Clear, area);
     f.render_widget(outer_block, area);
     f.render_widget(filter_line, filter_area);

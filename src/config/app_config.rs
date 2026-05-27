@@ -38,6 +38,32 @@ fn default_llm_system_prompt() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Command Palette Description Overrides
+// ---------------------------------------------------------------------------
+
+/// A single override entry for a command palette action.
+/// Keyed by the `Action::snake_name()` (e.g. `"move_left"`).
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct DescEntry {
+    /// Override the auto-generated display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Override the default description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Override the default key hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hint: Option<String>,
+}
+
+/// Overrides loaded from `~/.config/ce/desc.json`
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct DescOverrides {
+    #[serde(default)]
+    pub overrides: HashMap<String, DescEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // Namespaced Keybindings Layout
 // ---------------------------------------------------------------------------
 
@@ -273,5 +299,36 @@ impl Config {
         } else {
             Some(key.to_string())
         }
+    }
+    /// Returns the path to the description overrides file.
+    pub fn descriptions_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("desc.json"))
+    }
+
+    /// Load user description overrides from `~/.config/ce/desc.json`.
+    /// Returns a default (empty) struct if the file doesn't exist or fails to parse,
+    /// so the editor always works even with a broken override file.
+    pub fn load_descriptions() -> DescOverrides {
+        let path = match Self::descriptions_path() {
+            Ok(p) => p,
+            Err(_) => return DescOverrides::default(),
+        };
+
+        if !path.exists() {
+            return DescOverrides::default();
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("Failed to read desc.json: {e}");
+                return DescOverrides::default();
+            }
+        };
+
+        serde_json::from_str(&content).unwrap_or_else(|e| {
+            log::warn!("Failed to parse desc.json: {e}");
+            DescOverrides::default()
+        })
     }
 }

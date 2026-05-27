@@ -488,11 +488,12 @@ fn get_language(id: &str) -> Option<tree_sitter::Language> {
 }
 
 // ed/syntax.rs
+// Synced with Catppuccin Mocha palette from highlight.rs
 
 #[rustfmt::skip]
 fn style_for_kind(kind: &str) -> Option<Style> {
     match kind {
-        // Keywords
+        // Keywords (Mauve)
         "fn" | "let" | "mut" | "if" | "else" | "return" | "struct" | "enum" | "impl" | "pub"
         | "use" | "mod" | "match" | "loop" | "while" | "for" | "in" | "break" | "continue"
         | "async" | "await" | "dyn" | "trait" | "where" | "ref" | "as" | "type" | "const"
@@ -501,51 +502,51 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         | "lambda" | "pass" | "raise" | "global" | "nonlocal" | "assert" | "del" | "not"
         | "and" | "or" | "is" => Some(
             Style::default()
-                .fg(Color::Rgb(198, 120, 221))
+                .fg(Color::Rgb(203, 166, 247))
                 .add_modifier(Modifier::BOLD),
         ),
-        // Strings
+        // Strings (Green)
         "string"
         | "string_content"
         | "raw_string_literal"
         | "string_literal"
-        | "interpreted_string_literal" => Some(Style::default().fg(Color::Rgb(152, 195, 121))),
-        // Types/Structs/Enums
+        | "interpreted_string_literal" => Some(Style::default().fg(Color::Rgb(166, 227, 161))),
+        // Types/Structs/Enums (Sapphire)
         "type_identifier" | "struct_item" | "enum_item" | "impl_item" | "class_definition" => {
-            Some(Style::default().fg(Color::Rgb(229, 192, 123)))
+            Some(Style::default().fg(Color::Rgb(52, 155, 235)))
         }
-        // Comments
+        // Comments (Overlay0)
         "comment" | "line_comment" | "block_comment" => Some(
             Style::default()
-                .fg(Color::Rgb(92, 99, 112))
+                .fg(Color::Rgb(94, 105, 120))
                 .add_modifier(Modifier::ITALIC),
         ),
-        // Numbers
+        // Numbers (Orange/Rust)
         "integer_literal" | "float_literal" | "number" => {
-            Some(Style::default().fg(Color::Rgb(209, 154, 102)))
+            Some(Style::default().fg(Color::Rgb(191, 92, 38)))
         }
-        // Properties/Fields
+        // Properties/Fields (Text/Off-white)
         "field_identifier" | "property_identifier" | "shorthand_field_identifier" => {
-            Some(Style::default().fg(Color::Rgb(86, 182, 194)))
+            Some(Style::default().fg(Color::Rgb(205, 214, 244)))
         }
 
         // ── Git Diff / Patch Kinds ──────────────────────────────────────────
-        // Plus lines/additions (typically styled green)
+        // Plus lines/additions (Green)
         "added_line" | "addition" => Some(
-            Style::default().fg(Color::Rgb(152, 195, 121))
+            Style::default().fg(Color::Rgb(166, 227, 161))
         ),
-        // Minus lines/deletions (typically styled red)
+        // Minus lines/deletions (Red)
         "deleted_line" | "deletion" => Some(
-            Style::default().fg(Color::Rgb(224, 108, 117))
+            Style::default().fg(Color::Rgb(243, 139, 168))
         ),
-        // Chunk range/hunk headers (e.g. @@ -1,4 +1,5 @@)
+        // Chunk range/hunk headers (Mauve)
         "hunk_header" => Some(
-            Style::default().fg(Color::Rgb(198, 120, 221))
+            Style::default().fg(Color::Rgb(203, 166, 247))
         ),
-        // Diff commands, indexes, file paths, and general metadata headers
+        // Diff commands, indexes, file paths, and general metadata headers (Blue)
         "command" | "index" | "old_file" | "new_file" | "file_change" | "header" => Some(
             Style::default()
-                .fg(Color::Rgb(97, 175, 239))
+                .fg(Color::Rgb(137, 180, 250))
                 .add_modifier(Modifier::BOLD)
         ),
 
@@ -559,30 +560,30 @@ fn style_for_git_log_line(line: &str) -> Option<Style> {
     if trimmed.starts_with("commit ") {
         Some(
             Style::default()
-                .fg(Color::Rgb(229, 192, 123))
+                .fg(Color::Rgb(203, 166, 247)) // Mauve
                 .add_modifier(Modifier::BOLD),
-        ) // Bold Yellow
+        )
     } else if trimmed.starts_with("Author:") {
-        Some(Style::default().fg(Color::Rgb(97, 175, 239))) // Blue
+        Some(Style::default().fg(Color::Rgb(137, 180, 250))) // Blue
     } else if trimmed.starts_with("Date:") {
         Some(
             Style::default()
-                .fg(Color::Rgb(120, 130, 140))
+                .fg(Color::Rgb(94, 105, 120)) // Overlay0
                 .add_modifier(Modifier::ITALIC),
-        ) // Muted Gray/Italic
+        )
     } else if trimmed.starts_with("Merge:") {
-        Some(Style::default().fg(Color::Rgb(198, 120, 221))) // Magenta
+        Some(Style::default().fg(Color::Rgb(243, 139, 168))) // Pink/Red
     } else if trimmed.starts_with("diff --git")
         || trimmed.starts_with("---")
         || trimmed.starts_with("+++")
     {
-        Some(Style::default().fg(Color::Rgb(86, 182, 194))) // Cyan (for logs containing inline patches)
+        Some(Style::default().fg(Color::Rgb(52, 155, 235))) // Sapphire
     } else if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
-        Some(Style::default().fg(Color::Rgb(152, 195, 121))) // Green patch addition
+        Some(Style::default().fg(Color::Rgb(166, 227, 161))) // Green
     } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
-        Some(Style::default().fg(Color::Rgb(224, 108, 117))) // Red patch deletion
+        Some(Style::default().fg(Color::Rgb(243, 139, 168))) // Red
     } else if trimmed.starts_with('~') {
-        Some(Style::default().fg(Color::Rgb(198, 120, 100)))
+        Some(Style::default().fg(Color::Rgb(128, 135, 162))) // Overlay1
     } else {
         None
     }
@@ -597,7 +598,7 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
     if line.trim_start().starts_with('#') || line.starts_with("  [RG]") || line.starts_with("  ───")
     {
         let comment_style = Style::default()
-            .fg(Color::Rgb(92, 99, 112))
+            .fg(Color::Rgb(94, 105, 120)) // Overlay0
             .add_modifier(Modifier::ITALIC);
         styles.fill(Some(comment_style));
         return styles;
@@ -606,13 +607,14 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
     // Bold Blue for File Headers
     if line.ends_with(':') {
         let path_style = Style::default()
-            .fg(Color::Rgb(97, 175, 239))
+            .fg(Color::Rgb(137, 180, 250)) // Blue
             .add_modifier(Modifier::BOLD);
         for i in 0..chars.len().saturating_sub(1) {
             styles[i] = Some(path_style);
         }
         if !chars.is_empty() {
-            styles[chars.len() - 1] = Some(Style::default().fg(Color::Rgb(92, 99, 112)));
+            styles[chars.len() - 1] = Some(Style::default().fg(Color::Rgb(94, 105, 120)));
+            // Overlay0
         }
         return styles;
     }
@@ -621,11 +623,11 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
     if let Some(colon_pos) = line.find(": ") {
         let prefix = &line[..colon_pos];
         if prefix.chars().all(|c| c.is_ascii_digit()) {
-            let line_num_style = Style::default().fg(Color::Rgb(229, 192, 123));
+            let line_num_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
             for i in 0..colon_pos {
                 styles[i] = Some(line_num_style);
             }
-            let separator_style = Style::default().fg(Color::Rgb(92, 99, 112));
+            let separator_style = Style::default().fg(Color::Rgb(94, 105, 120)); // Overlay0
             styles[colon_pos] = Some(separator_style);
             if colon_pos + 1 < chars.len() {
                 styles[colon_pos + 1] = Some(separator_style);
@@ -643,7 +645,7 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
 
     // 1. Muted dividers and "(none)" lines
     if trimmed.starts_with('─') || trimmed == "(none)" {
-        let mute_style = Style::default().fg(Color::Rgb(92, 99, 112));
+        let mute_style = Style::default().fg(Color::Rgb(94, 105, 120)); // Overlay0
         styles.fill(Some(mute_style));
         return styles;
     }
@@ -651,37 +653,36 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
     // 2. Bold/colored Section Headers
     if trimmed.starts_with("Stage Changes") {
         let header_style = Style::default()
-            .fg(Color::Rgb(152, 195, 121))
-            .add_modifier(Modifier::BOLD); // Green
+            .fg(Color::Rgb(166, 227, 161)) // Green
+            .add_modifier(Modifier::BOLD);
         styles.fill(Some(header_style));
         return styles;
     }
     if trimmed.starts_with("Unstage Changes") {
         let header_style = Style::default()
-            .fg(Color::Rgb(229, 192, 123))
-            .add_modifier(Modifier::BOLD); // Yellow
+            .fg(Color::Rgb(249, 226, 175)) // Yellow
+            .add_modifier(Modifier::BOLD);
         styles.fill(Some(header_style));
         return styles;
     }
     if trimmed.starts_with("Untracked Files") {
         let header_style = Style::default()
-            .fg(Color::Rgb(224, 108, 117))
-            .add_modifier(Modifier::BOLD); // Red
+            .fg(Color::Rgb(243, 139, 168)) // Red
+            .add_modifier(Modifier::BOLD);
         styles.fill(Some(header_style));
         return styles;
     }
     if trimmed.starts_with("------") {
         let sep_style = Style::default()
-            .fg(Color::Rgb(97, 175, 239))
-            .add_modifier(Modifier::BOLD); // Blue
+            .fg(Color::Rgb(137, 180, 250)) // Blue
+            .add_modifier(Modifier::BOLD);
         styles.fill(Some(sep_style));
         return styles;
     }
 
     // 3. Staged items (Green)
-    // Formatted as "   {path}" (exactly 3 leading spaces, no bracket)
     if line.starts_with("   ") && !line.starts_with("    ") && !trimmed.is_empty() {
-        let file_style = Style::default().fg(Color::Rgb(152, 195, 121)); // Green
+        let file_style = Style::default().fg(Color::Rgb(166, 227, 161)); // Green
         for i in 3..chars.len() {
             styles[i] = Some(file_style);
         }
@@ -689,10 +690,9 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
     }
 
     // 4. Unstaged items (Yellow)
-    // Formatted as "  [path]"
     if line.starts_with("  [") && line.ends_with(']') {
-        let file_style = Style::default().fg(Color::Rgb(229, 192, 123)); // Yellow
-        let bracket_style = Style::default().fg(Color::Rgb(92, 99, 112)); // Muted gray brackets
+        let file_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
+        let bracket_style = Style::default().fg(Color::Rgb(128, 135, 162)); // Overlay1
         if chars.len() > 2 {
             styles[2] = Some(bracket_style);
         }
@@ -705,14 +705,13 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         return styles;
     }
 
-    // 5. Untracked files (Muted Red)
-    // Formatted as "    {path}" (exactly 4 spaces)
+    // 5. Untracked files (Red)
     if line.starts_with("    ")
         && !line.starts_with("      ")
         && !trimmed.starts_with('*')
         && !trimmed.starts_with("stash@{")
     {
-        let file_style = Style::default().fg(Color::Rgb(224, 108, 117)); // Muted Red
+        let file_style = Style::default().fg(Color::Rgb(243, 139, 168)); // Red
         for i in 4..chars.len() {
             styles[i] = Some(file_style);
         }
@@ -720,13 +719,12 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
     }
 
     // 6. Active branch vs normal branch
-    // Formatted as "    * branch_name relative_date" or "      branch_name relative_date"
     if line.starts_with("    * ") {
         let active_style = Style::default()
-            .fg(Color::Rgb(152, 195, 121))
-            .add_modifier(Modifier::BOLD); // Green and bold
+            .fg(Color::Rgb(166, 227, 161)) // Green
+            .add_modifier(Modifier::BOLD);
         let date_style = Style::default()
-            .fg(Color::Rgb(120, 130, 140))
+            .fg(Color::Rgb(94, 105, 120)) // Overlay0
             .add_modifier(Modifier::ITALIC);
 
         if chars.len() > 4 {
@@ -747,10 +745,10 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         }
         return styles;
     } else if line.starts_with("    ") && !trimmed.starts_with("stash@{") {
-        // Regular branch list: "    branch_name relative_date"
-        let branch_style = Style::default().fg(Color::Rgb(97, 175, 239)); // Blue branch name
+        // Regular branch list
+        let branch_style = Style::default().fg(Color::Rgb(137, 180, 250)); // Blue
         let date_style = Style::default()
-            .fg(Color::Rgb(120, 130, 140))
+            .fg(Color::Rgb(94, 105, 120)) // Overlay0
             .add_modifier(Modifier::ITALIC);
 
         let words: Vec<&str> = trimmed.split_whitespace().collect();
@@ -769,12 +767,11 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
     }
 
     // 7. Stash entries
-    // Formatted as "    stash@{0}: ..."
     if trimmed.starts_with("stash@{") {
         let stash_ref_style = Style::default()
-            .fg(Color::Rgb(198, 120, 221))
-            .add_modifier(Modifier::BOLD); // Magenta
-        let stash_msg_style = Style::default().fg(Color::Rgb(171, 178, 191)); // Default foreground
+            .fg(Color::Rgb(203, 166, 247)) // Mauve
+            .add_modifier(Modifier::BOLD);
+        let stash_msg_style = Style::default().fg(Color::Rgb(205, 214, 244)); // Text
 
         if let Some(colon_pos) = line.find(':') {
             for i in 0..=colon_pos {
@@ -787,13 +784,13 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         return styles;
     }
 
-    // 8. Help/footer hotkeys: "[c] Commit", "[s] Toggle staged"
+    // 8. Help/footer hotkeys
     let mut in_bracket = false;
-    let bracket_style = Style::default().fg(Color::Rgb(92, 99, 112));
+    let bracket_style = Style::default().fg(Color::Rgb(128, 135, 162)); // Overlay1
     let key_style = Style::default()
-        .fg(Color::Rgb(86, 182, 194))
-        .add_modifier(Modifier::BOLD); // Cyan
-    let text_style = Style::default().fg(Color::Rgb(171, 178, 191));
+        .fg(Color::Rgb(137, 180, 250)) // Blue
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(Color::Rgb(205, 214, 244)); // Text
 
     for i in 0..chars.len() {
         if chars[i] == '[' {

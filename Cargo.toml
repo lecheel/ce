@@ -30,7 +30,10 @@ uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
 git2 = "0.20.4"
 arboard = "3.4"
-
+toml = "0.8"
+fuzzy-matcher = "0.3"
+strum = { version = "0.26", features = ["derive"] }
+strum_macros = "0.26"
 
 unicode-segmentation = "1.12"
 unicode-width = "0.2"

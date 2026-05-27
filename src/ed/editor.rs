@@ -1,4 +1,5 @@
 //! Central editor state and key dispatch.
+// use crate::keybind::bindings::Action;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -9,6 +10,7 @@ use crate::ed::buffer::{Buffer, BufferKind};
 use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::syntax::TextObject;
 use crate::ed::window::{LayoutNode, Window};
+use crate::keybind::bindings::FunctionSpanInfo;
 use crate::popup::{PopupItem, PopupKind, PopupState};
 use crate::render::statusbar_state::StatusBarState;
 
@@ -610,6 +612,51 @@ impl Editor {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
+        if matches!(key.code, crossterm::event::KeyCode::Modifier(_)) {
+            return;
+        }
+        /*
+        // TEMP DIAGNOSTIC — remove after confirming
+        log::debug!(
+            "RAW key={:?} mod={:?} kind={:?}",
+            key.code,
+            key.modifiers,
+            key.kind
+        );
+        */
+
+        /*
+        // [2026-05-27T02:35:44Z DEBUG ce::ed::editor] RAW key=Modifier(LeftAlt) mod=KeyModifiers(CONTROL | ALT) kind=Press
+        // [2026-05-27T02:35:45Z DEBUG ce::ed::editor] RAW key=Char('p') mod=KeyModifiers(CONTROL | ALT) kind=Press
+        // [2026-05-27T02:35:46Z DEBUG ce::ed::editor] RAW key=Down mod=KeyModifiers(0x0) kind=Press
+        // [2026-05-27T02:35:46Z DEBUG ce::keybind::bindings] execute_action: MoveDown
+        // [2026-05-27T02:35:46Z DEBUG ce::ed::editor] RAW key=Down mod=KeyModifiers(0x0) kind=Press
+        // [2026-05-27T02:35:46Z DEBUG ce::keybind::bindings] execute_action: MoveDown
+        // [2026-05-27T02:35:48Z DEBUG ce::ed::editor] RAW key=Modifier(LeftControl) mod=KeyModifiers(CONTROL) kind=Press
+        // [2026-05-27T02:35:48Z DEBUG ce::ed::editor] RAW key=Modifier(LeftShift) mod=KeyModifiers(SHIFT | CONTROL) kind=Press
+        // [2026-05-27T02:35:49Z DEBUG ce::ed::editor] RAW key=Enter mod=KeyModifiers(0x0) kind=Press
+        // [2026-05-27T02:35:49Z DEBUG ce::ed::editor] RAW key=Enter mod=KeyModifiers(0x0) kind=Press
+        // [2026-05-27T02:35:50Z DEBUG ce::ed::editor] RAW key=Esc mod=KeyModifiers(0x0) kind=Press
+        // [2026-05-27T02:35:50Z DEBUG ce::ed::editor] RAW key=Modifier(LeftAlt) mod=KeyModifiers(ALT) kind=Press
+        // shift swallow by terminal
+        // the patch is working for Ctrl+SHIFT+p but lag behind for UI render
+        // ── Global shortcuts: bypass sequence resolver entirely ──────────
+        // These must fire instantly with zero pending-key accumulation.
+         */
+        /*
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.modifiers.contains(KeyModifiers::SHIFT)
+        {
+            match key.code {
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    self.clear_pending_keys();
+                    crate::keybind::execute_action(self, Action::EnterCommandPalette);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        */
 
         // ── Intercept for Pending Git Actions ────────────────────────
         if self.pending_git_action != PendingGitAction::None {
@@ -635,6 +682,11 @@ impl Editor {
             return;
         }
 
+        if self.popup.guide.is_some() {
+            self.handle_guide_popup_key(key);
+            return;
+        }
+
         if self.popup.mru.is_some() {
             self.handle_mru_key(key);
             return;
@@ -647,6 +699,11 @@ impl Editor {
 
         if self.popup.git_hunk.is_some() {
             self.handle_git_hunk_popup_key(key);
+            return;
+        }
+
+        if self.popup.command_palette.is_some() {
+            self.handle_command_palette_key(key);
             return;
         }
 
@@ -1129,4 +1186,177 @@ impl Editor {
     pub fn insert_str(&mut self, text: &str) {
         self.handle_paste(text);
     }
+}
+
+impl Editor {
+    /// Returns span information for the innermost function-like node that
+    /// contains the cursor, or `None` if tree-sitter is unavailable or no
+    /// function node is found.
+    pub fn function_around_span_info(&self) -> Option<FunctionSpanInfo> {
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+
+        let buf = self.buf();
+
+        // Convert (row, col) → byte offset for tree-sitter
+        let char_off = buf.rope.line_to_char(row).saturating_add(col);
+        let text = buf.rope.slice(..).to_string();
+        let byte_off = text.char_indices().nth(char_off).map(|(b, _)| b)?;
+
+        // ── FIX: Tree is inside `buf.syntax` ──
+        // If `tree` is not the correct field name, run:
+        //   grep -n 'pub struct SyntaxState' src/ed/syntax.rs src/ed/buffer.rs -A 10
+        // and replace `.tree` with whatever the `Option<Tree>` field is named.
+        let tree = buf.syntax.tree.as_ref()?;
+        let root = tree.root_node();
+
+        // Find the deepest node covering the cursor byte
+        let cursor_node = root.descendant_for_byte_range(byte_off, byte_off + 1)?;
+
+        // Walk upward until we hit a function-like node (innermost first).
+        let func_node = {
+            let mut node = cursor_node;
+            loop {
+                if is_fn_kind(node.kind()) {
+                    break;
+                }
+                node = match node.parent() {
+                    Some(p) => p,
+                    None => return None,
+                };
+            }
+            node
+        };
+
+        let start_row = func_node.start_position().row;
+        let end_row = func_node.end_position().row;
+        let line_count = end_row.saturating_sub(start_row);
+
+        // Count nested function-like children (excluding func_node itself).
+        let nested_fn_count = count_nested_fns(func_node);
+
+        Some(FunctionSpanInfo {
+            start_row,
+            end_row,
+            line_count,
+            nested_fn_count,
+        })
+    }
+    pub fn handle_command_palette_key(&mut self, key: KeyEvent) {
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            return;
+        }
+
+        // Ctrl combinations
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    if let Some(popup) = &mut self.popup.command_palette {
+                        popup.move_down();
+                    }
+                    return;
+                }
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    if let Some(popup) = &mut self.popup.command_palette {
+                        popup.move_up();
+                    }
+                    return;
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    if let Some(popup) = &mut self.popup.command_palette {
+                        popup.filter_clear();
+                    }
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.popup.close();
+            }
+            KeyCode::Enter => {
+                let action = self
+                    .popup
+                    .command_palette
+                    .as_ref()
+                    .and_then(|p| p.selected_entry())
+                    .map(|e| e.action);
+                if let Some(action) = action {
+                    self.popup.close();
+                    crate::keybind::bindings::execute_action(self, action);
+                }
+            }
+            KeyCode::Up => {
+                if let Some(popup) = &mut self.popup.command_palette {
+                    popup.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(popup) = &mut self.popup.command_palette {
+                    popup.move_down();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(popup) = &mut self.popup.command_palette {
+                    popup.filter_pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(popup) = &mut self.popup.command_palette {
+                    popup.filter_push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recurse into `node`'s *direct* children, counting function-like nodes.
+/// Does NOT recurse into those children's bodies (so a doubly-nested fn
+/// inside a nested fn is NOT counted as a separate top-level nested fn
+/// — it is part of the first nested fn).
+fn count_nested_fns(node: tree_sitter::Node) -> usize {
+    let mut count: usize = 0;
+    let mut stack: Vec<tree_sitter::Node> = Vec::new();
+
+    // ── FIX: Explicit `usize` annotation prevents E0282 type inference error ──
+    let child_count: usize = node.child_count();
+    for i in 0..child_count {
+        if let Some(child) = node.child(i) {
+            stack.push(child);
+        }
+    }
+
+    while let Some(n) = stack.pop() {
+        if is_fn_kind(n.kind()) {
+            count += 1;
+            // Do NOT recurse into nested functions — their own inner fns
+            // belong to them, not to the outer function we're measuring.
+        } else {
+            let cc: usize = n.child_count();
+            for i in 0..cc {
+                if let Some(child) = n.child(i) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+
+    count
+}
+
+fn is_fn_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_item"
+            | "function_definition"
+            | "method_definition"
+            | "arrow_function"
+            | "function_declaration"
+            | "method_declaration"
+    )
 }

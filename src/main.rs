@@ -28,6 +28,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+
 use std::io;
 
 use config::Config;
@@ -365,41 +366,36 @@ async fn run_loop(
         });
     }
 
+    let mut needs_redraw = true;
     while let Some(msg) = rx.recv().await {
         match msg {
-            // ---------------------------------------------------------------
-            // Keyboard input
-            // ---------------------------------------------------------------
             AppMessage::Input(key) => {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-
+                // Modifier-only events carry no action — skip redraw
+                if matches!(key.code, crossterm::event::KeyCode::Modifier(_)) {
+                    editor.handle_key(key); // still call it so modifiers are tracked
+                                            // do NOT set needs_redraw = true
+                    continue;
+                }
                 editor.handle_key(key);
-
+                needs_redraw = true;
                 if editor.should_quit() {
-                    log::debug!("Editor quit requested.");
                     break;
                 }
             }
 
-            // ---------------------------------------------------------------
-            // Terminal Paste Event
-            // ---------------------------------------------------------------
             AppMessage::Paste(data) => {
                 editor.handle_paste(&data);
+                needs_redraw = true;
             }
 
-            // ---------------------------------------------------------------
-            // Completion response — one line; machine handles ID check & phase
-            // ---------------------------------------------------------------
             AppMessage::CompletionResponse(id, items) => {
                 editor.ingest_completion_response(id, items);
+                needs_redraw = true;
             }
 
-            // ---------------------------------------------------------------
-            // Tick — three numbered steps, each a single call
-            // ---------------------------------------------------------------
             AppMessage::Tick => {
                 // 1. LSP loading indicator
                 let server_ready = !editor.config.codeium_enabled
@@ -408,8 +404,6 @@ async fn run_loop(
                 editor.tick_spinner();
 
                 // 2. Ask the machine if a request should fire.
-                //    Poll via Editor method so the borrow-checker sees comp and
-                //    buffers as disjoint fields rather than one &mut self borrow.
                 if let Some((id, text, offset, lang)) = editor.poll_completion() {
                     spawn_completion(id, text, offset, lang, editor, &server_cell, tx.clone());
                 }
@@ -420,10 +414,10 @@ async fn run_loop(
                 // 4. Poll background LLM task responses
                 editor.poll_llm_responses();
 
-                // 5. Animate the git commit generation buffer (if currently active)
+                // 5. Animate the git commit generation buffer
                 editor.tick_git_commit();
 
-                // 6. Animate general LLM prompt spinner (if currently active)
+                // 6. Animate general LLM prompt spinner
                 editor.tick_llm_prompt();
             }
         }
