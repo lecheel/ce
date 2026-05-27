@@ -137,7 +137,7 @@ impl CompletionMachine {
         if self.last_edit_time.elapsed() < std::time::Duration::from_millis(self.throttle_ms) {
             return None;
         }
-        if !self.context_allows(buf, row, col) {
+        if !self.context_allows(buf, mode, row, col) {
             return None;
         }
 
@@ -155,12 +155,25 @@ impl CompletionMachine {
     }
 
     /// Call when a completion response arrives from the async provider task.
-    pub fn on_response(&mut self, id: usize, items: Vec<String>) {
+    pub fn on_response(
+        &mut self,
+        id: usize,
+        items: Vec<String>,
+        buf: &Buffer,
+        mode: Mode,
+        row: usize,
+        col: usize,
+    ) {
         if id != self.request_id {
             log::debug!(
-                "CompletionMachine: dropped stale response (got={id}, want={})",
+                "dropped stale response (got={id}, want={})",
                 self.request_id
             );
+            return;
+        }
+        // Re-check context at current cursor position
+        if !self.context_allows(buf, mode, row, col) {
+            self.phase = Phase::Idle;
             return;
         }
         if items.is_empty() {
@@ -255,9 +268,8 @@ impl CompletionMachine {
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
-
     /// Returns false when contextual clues suggest a request would be useless.
-    fn context_allows(&self, buf: &Buffer, row: usize, col: usize) -> bool {
+    fn context_allows(&self, buf: &Buffer, mode: Mode, row: usize, col: usize) -> bool {
         if buf.rope.len_chars() <= 1 {
             return false;
         }
@@ -274,7 +286,41 @@ impl CompletionMachine {
         if c > 0 && chars[c - 1] == ')' {
             return false;
         }
+
+        // ── MINIMUM PREFIX LENGTH GUARD ──────────────────────────────
+        // Prevent ghost text from aggressively popping up on the very
+        // first keystroke.
+        // - Brief mode requires 3 chars (commands are single keys).
+        // - Vim Insert mode requires 2 chars (standard editor behavior).
+        let min_prefix = match mode {
+            Mode::Brief => 4,
+            Mode::Insert => 4,
+            _ => return true, // Other modes don't trigger completion typing
+        };
+
+        let mut prefix_len = 0;
+        let mut i = c;
+        while i > 0 {
+            let ch = chars[i - 1];
+            if ch.is_alphanumeric() || ch == '_' {
+                prefix_len += 1;
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if prefix_len < min_prefix {
+            return false;
+        }
+
         true
+    }
+    pub fn set_active(&mut self, items: Vec<String>) {
+        self.completions = items;
+        self.completion_idx = 0;
+        self.ghost_text = self.completions.first().cloned();
+        self.phase = Phase::Active;
     }
 }
 

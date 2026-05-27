@@ -173,11 +173,18 @@ pub enum Action {
     CommandDeleteChar,
     CommandLineKillToEnd,
     CommandClear,
+    CommandEnterRegisterMode,
+    CommandInsertFilename,
+    CommandInsertWord,
+    CommandInsertLine,
+    CommandCancelRegister,    
 
     // Copy / Paste Register
     YankCurrentLine,
     YankCurrentWord,
-    YankWordToSystemClipboard,    
+    YankWordToSystemClipboard,
+    BriefCutSelection,
+    BriefCopySelection,
     Paste,
 
     // Config Toggles
@@ -414,6 +421,8 @@ impl Action {
                 | Action::CutToSystemClipboard
                 | Action::PutFromSystemClipboardBelow
                 | Action::ToggleComment
+                | Action::BriefCopySelection
+                | Action::BriefCutSelection
         )
     }
 }
@@ -488,6 +497,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("o", Action::InsertNewlineBelow),
         ("O", Action::InsertNewlineAbove),
         ("x", Action::DeleteCharForward),
+        ("delete", Action::DeleteCharForward),
         ("u", Action::Undo),
         ("p", Action::Paste),
         ("g c c", Action::ToggleComment),
@@ -613,8 +623,8 @@ pub fn resolve_single_key(
                     KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::CycleCompletionNext),
                     KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::CycleCompletionPrev),
                     KeyCode::Char('s') => Some(Action::Save),
-                    KeyCode::Char('c') | KeyCode::Char('C') => Some(Action::YankCurrentLine),
-                    KeyCode::Char('x') | KeyCode::Char('X') => Some(Action::DeleteCurrentLine),
+                    KeyCode::Char('c') | KeyCode::Char('C') => Some(Action::BriefCopySelection),
+                    KeyCode::Char('x') | KeyCode::Char('X') => Some(Action::BriefCutSelection),
                     KeyCode::Char('v') | KeyCode::Char('V') => Some(Action::Paste),
                     KeyCode::Char('h') => Some(Action::ExitMode), // ← optional: Ctrl+H backspace compat
                     _ => None,
@@ -732,6 +742,7 @@ pub fn resolve_single_key(
                     KeyCode::Char('f') => Some(Action::CommandLineRight),
                     KeyCode::Char('d') => Some(Action::CommandDeleteChar),
                     KeyCode::Char('k') => Some(Action::CommandLineKillToEnd),
+                    KeyCode::Char('r') => Some(Action::CommandEnterRegisterMode),
                     KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::CommandHistoryNext),
                     KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::CommandHistoryPrev),
                     _ => None,
@@ -770,6 +781,7 @@ pub fn resolve_single_key(
                     KeyCode::Char('f') => Some(Action::CommandLineRight),
                     KeyCode::Char('d') => Some(Action::CommandDeleteChar),
                     KeyCode::Char('k') => Some(Action::CommandLineKillToEnd),
+                    KeyCode::Char('r') => Some(Action::CommandEnterRegisterMode),
                     _ => None,
                 };
             }
@@ -933,9 +945,24 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         reset_brief_trackers();
     }
 
-    // ── MASTER UNDO GUARD ────────────────────────────────────────────
-    // Determines if we should take an undo snapshot BEFORE executing the action.
-    let is_typing_mode = matches!(editor.mode(), Mode::Insert | Mode::Brief);
+    // ── MASTER UNDO GUARD (FIXED) ─────────────────────────────────────
+    let is_typing_mode = matches!(editor.mode(), Mode::Insert);
+
+    // Expanded: cover ALL typing-like actions in Brief mode
+    let is_brief_typing_action = editor.mode() == Mode::Brief
+        && matches!(
+            action,
+            Action::InsertChar(_)
+                | Action::InsertNewline
+                | Action::InsertTab
+                | Action::Backspace
+                | Action::DeleteCharForward
+        );
+
+    // Only skip snapshots if we're CONTINUING an existing typing session.
+    // The FIRST typing action after a destructive command (or after entering
+    // Brief mode) must take a snapshot to anchor the undo block.
+    let is_brief_typing_continuation = is_brief_typing_action && editor.insert_buffer.is_some();
 
     let is_entering_insert = matches!(
         action,
@@ -954,20 +981,21 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             | Action::ChangeInsideFunction
             | Action::ChangeInsideBraces
             | Action::ChangeInsideBrackets
+            | Action::EnterBrief
     );
 
-    // ExitMode and EnterNormal finalize block inserts and must NEVER push undo,
-    // as they must merge into the snapshot taken when the insert session started.
     let is_block_finalize = matches!(action, Action::ExitMode | Action::EnterNormal);
     let is_undo_or_repeat = matches!(action, Action::Undo | Action::RepeatLastChange);
 
     if !is_undo_or_repeat
         && !is_block_finalize
+        && !is_brief_typing_continuation
         && (is_entering_insert || (!is_typing_mode && action.modifies_buffer()))
     {
         let (win, buf) = editor.active_window_and_buf_mut();
         buf.push_undo(win.row, win.col);
     }
+
     // ─────────────────────────────────────────────────────────────────
 
     // ── Brief trackers reset ───────────────────────────────────────────────
@@ -998,6 +1026,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 | Action::PageUp
                 | Action::PageDown
                 | Action::BriefSelectionToggle
+                | Action::MatchBracket
                 | Action::YankCurrentLine
                 | Action::YankCurrentWord
                 | Action::CycleCompletionNext
@@ -1014,6 +1043,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 | Action::ExtendSelectionToLastLine
                 | Action::ExtendSelectionPageUp
                 | Action::ExtendSelectionPageDown
+                | Action::BriefCopySelection
+                | Action::BriefCutSelection
+                | Action::DeleteCharForward
         );
         if !keeps_selection {
             editor.active_window_mut().visual_anchor = None;
@@ -1032,93 +1064,115 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         editor.git_debounce.notify_edit(buf_id);
     }
 
-    // ── ② Recording State Engine ───────────────────────────────────────────
+    // ── ② Recording State Engine (FIXED) ──────────────────────────────
     if action != Action::RepeatLastChange {
+        let mode = editor.mode();
+        let modifies_buffer = action.modifies_buffer();
+
+        // ① Auto-initialize insert_buffer for Brief mode typing
+        if editor.insert_buffer.is_none() {
+            let is_brief_typing_action = mode == Mode::Brief
+                && matches!(
+                    action,
+                    Action::InsertChar(_)
+                        | Action::InsertNewline
+                        | Action::InsertTab
+                        | Action::Backspace
+                        | Action::DeleteCharForward
+                );
+            if enters_insert_mode(action) || is_brief_typing_action {
+                editor.insert_buffer = Some(String::new());
+            }
+        }
+
         if let Some(ref mut text) = editor.insert_buffer {
             match action {
-                Action::InsertChar(ch) => {
-                    text.push(ch);
-                }
-                Action::InsertNewline => {
-                    text.push('\n');
-                }
-                Action::InsertTab => {
-                    text.push_str("    ");
-                }
+                Action::InsertChar(ch) => text.push(ch),
+                Action::InsertNewline => text.push('\n'),
+                Action::InsertTab => text.push_str("    "),
                 Action::Backspace => {
                     text.pop();
                 }
                 Action::EnterNormal | Action::ExitMode => {
-                    // Recording engine finalises the insert session and clears
-                    // insert_buffer.  pre_captured_insert already holds a copy
-                    // so block-column replication below is unaffected.
                     let final_text = text.clone();
                     editor.record_action(RepeatableAction::Insert(final_text), 1);
                     editor.insert_buffer = None;
                 }
+                _ if mode == Mode::Brief && modifies_buffer => {
+                    let final_text = text.clone();
+                    if !final_text.is_empty() {
+                        editor.record_action(RepeatableAction::Insert(final_text), 1);
+                    }
+                    editor.insert_buffer = None;
+                }
+                _ if enters_insert_mode(action) => {
+                    let final_text = text.clone();
+                    if !final_text.is_empty() {
+                        editor.record_action(RepeatableAction::Insert(final_text), 1);
+                    }
+                    editor.insert_buffer = None;
+                }
                 _ => {}
             }
-        } else {
-            if enters_insert_mode(action) {
-                editor.insert_buffer = Some(String::new());
-            } else if action.modifies_buffer() {
-                match action {
-                    Action::Backspace => {
-                        editor.record_action(
-                            RepeatableAction::DeleteChars {
-                                count: 1,
-                                direction: DeleteDirection::Left,
-                            },
-                            1,
-                        );
-                    }
-                    Action::DeleteCharForward => {
-                        editor.record_action(
-                            RepeatableAction::DeleteChars {
-                                count: 1,
-                                direction: DeleteDirection::Right,
-                            },
-                            1,
-                        );
-                    }
-                    Action::DeleteCurrentLine => {
-                        editor.record_action(RepeatableAction::DeleteLine, 1);
-                    }
-                    Action::DeleteToEndOfLine => {
-                        editor.record_action(RepeatableAction::DeleteToLineEnd, 1);
-                    }
-                    Action::DeleteInsideWord => {
-                        editor.record_action(RepeatableAction::DeleteWordForward, 1);
-                    }
-                    Action::IndentLine => {
-                        editor.record_action(
-                            RepeatableAction::Indent {
-                                count: 1,
-                                outdent: false,
-                            },
-                            1,
-                        );
-                    }
-                    Action::OutdentLine => {
-                        editor.record_action(
-                            RepeatableAction::Indent {
-                                count: 1,
-                                outdent: true,
-                            },
-                            1,
-                        );
-                    }
-                    Action::Paste => {
-                        editor.record_action(
-                            RepeatableAction::Paste {
-                                register: '"',
-                                after_cursor: true,
-                            },
-                            1,
-                        );
-                    }
-                    _ => {}
+        }
+
+        if editor.insert_buffer.is_none() && !enters_insert_mode(action) && modifies_buffer {
+            match action {
+                Action::Backspace => {
+                    editor.record_action(
+                        RepeatableAction::DeleteChars {
+                            count: 1,
+                            direction: DeleteDirection::Left,
+                        },
+                        1,
+                    );
                 }
+                Action::DeleteCharForward => {
+                    editor.record_action(
+                        RepeatableAction::DeleteChars {
+                            count: 1,
+                            direction: DeleteDirection::Right,
+                        },
+                        1,
+                    );
+                }
+                Action::DeleteCurrentLine => {
+                    editor.record_action(RepeatableAction::DeleteLine, 1);
+                }
+                Action::DeleteToEndOfLine => {
+                    editor.record_action(RepeatableAction::DeleteToLineEnd, 1);
+                }
+                Action::DeleteInsideWord => {
+                    editor.record_action(RepeatableAction::DeleteWordForward, 1);
+                }
+                Action::IndentLine => {
+                    editor.record_action(
+                        RepeatableAction::Indent {
+                            count: 1,
+                            outdent: false,
+                        },
+                        1,
+                    );
+                }
+                Action::OutdentLine => {
+                    editor.record_action(
+                        RepeatableAction::Indent {
+                            count: 1,
+                            outdent: true,
+                        },
+                        1,
+                    );
+                }
+                Action::Paste => {
+                    editor.record_action(
+                        RepeatableAction::Paste {
+                            register: '"',
+                            after_cursor: true,
+                        },
+                        1,
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -1854,10 +1908,76 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.comp.on_edit();
         }
         Action::DeleteCharForward => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::delete_char_forward(win, buf);
+            let is_brief_selecting =
+                editor.mode() == Mode::Brief && editor.active_window().visual_anchor.is_some();
+
+            if is_brief_selecting {
+                // Delete the selection (without yanking to clipboard)
+                let mode = Mode::Visual;
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, mode)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    buf.rope.remove(start_char..end_char);
+                    buf.modified = true;
+                    let new_line = buf.rope.char_to_line(start_char);
+                    win.row = new_line;
+                    win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
+                    win.clamp_cursor(buf);
+                    buf.parse_syntax();
+                }
+                editor.active_window_mut().visual_anchor = None;
+            } else {
+                let (win, buf) = editor.active_window_and_buf_mut();
+                let (row, col) = (win.row, win.col);
+                editing::delete_char_forward(win, buf);
+            }
             editor.comp.on_edit();
+        }
+        Action::BriefCopySelection => {
+            if editor.active_window().visual_anchor.is_some() {
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, Mode::Visual)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = false;
+                    editor.set_status_msg("Copied selection", MessageKind::Info);
+                }
+                editor.active_window_mut().visual_anchor = None;
+            }
+            // If no selection, do nothing (NOP)
+        }
+
+        Action::BriefCutSelection => {
+            if editor.active_window().visual_anchor.is_some() {
+                let range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    win.get_selection_range(buf, Mode::Visual)
+                };
+                if let Some((start_char, end_char)) = range {
+                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
+                    editor.clipboard = Some(text);
+                    editor.clipboard_is_block = false;
+
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    buf.rope.remove(start_char..end_char);
+                    buf.modified = true;
+                    let new_line = buf.rope.char_to_line(start_char);
+                    win.row = new_line;
+                    win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
+                    win.clamp_cursor(buf);
+                    buf.parse_syntax();
+                    editor.set_status_msg("Cut selection", MessageKind::Info);
+                }
+                editor.active_window_mut().visual_anchor = None;
+                editor.comp.on_edit();
+            }
+            // If no selection, do nothing (NOP)
         }
         Action::DeleteCurrentLine => {
             let line_text = editor.line_text(editor.active_row());
@@ -2421,6 +2541,28 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             win.desired_col = 0;
 
             editor.comp.on_edit();
+        }
+        Action::CommandEnterRegisterMode => {
+            editor.pending_register = true;
+        }
+        Action::CommandInsertFilename => {
+            let text = editor.active_filename().unwrap_or("").to_string();
+            editor.insert_command_text(&text);
+            editor.pending_register = false;
+        }
+        Action::CommandInsertWord => {
+            let text = editor.get_word_under_cursor().unwrap_or_default();
+            editor.insert_command_text(&text);
+            editor.pending_register = false;
+        }
+        Action::CommandInsertLine => {
+            // Vim uses 1-based line numbers for : commands
+            let row = editor.active_row() + 1;
+            editor.insert_command_text(&row.to_string());
+            editor.pending_register = false;
+        }
+        Action::CommandCancelRegister => {
+            editor.pending_register = false;
         }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//

@@ -697,7 +697,76 @@ impl Editor {
 
 impl Editor {
     pub fn ingest_completion_response(&mut self, id: usize, items: Vec<String>) {
-        self.comp.on_response(id, items);
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+        let mode = self.mode();
+        // Extract what context_allows needs without holding a borrow into self
+        let rope_len = self.buf().rope.len_chars();
+        let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
+        let filename = self.buf().filename.clone();
+
+        // Re-implement the context check inline to avoid passing &Buffer
+        // while self.comp is mutably borrowed
+        let context_ok = {
+            if rope_len <= 1 {
+                false
+            } else {
+                let c = col.min(line_chars.len());
+                if c < line_chars.len() {
+                    let next = line_chars[c];
+                    if next.is_alphanumeric() || next == '_' || next == ')' {
+                        false
+                    } else if c > 0 && line_chars[c - 1] == ')' {
+                        false
+                    } else {
+                        let min_prefix = 4;
+                        let mut prefix_len = 0;
+                        let mut i = c;
+                        while i > 0 {
+                            let ch = line_chars[i - 1];
+                            if ch.is_alphanumeric() || ch == '_' {
+                                prefix_len += 1;
+                                i -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        prefix_len >= min_prefix
+                    }
+                } else if c > 0 && line_chars[c - 1] == ')' {
+                    false
+                } else {
+                    let min_prefix = 4;
+                    let mut prefix_len = 0;
+                    let mut i = c;
+                    while i > 0 {
+                        let ch = line_chars[i - 1];
+                        if ch.is_alphanumeric() || ch == '_' {
+                            prefix_len += 1;
+                            i -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    prefix_len >= min_prefix
+                }
+            }
+        };
+
+        if id != self.comp.request_id {
+            return;
+        }
+        if !context_ok {
+            self.comp.reset_to_idle();
+            return;
+        }
+        if items.is_empty() {
+            self.comp.reset_to_idle();
+            return;
+        }
+        self.comp.set_active(items);
     }
 
     pub fn on_edit(&mut self) {
@@ -721,9 +790,19 @@ impl Editor {
         self.comp.last_edit_time = std::time::Instant::now();
     }
 
+    // set_completions — extract buf data before calling comp:
     pub fn set_completions(&mut self, items: Vec<String>) {
         let id = self.comp.request_id;
-        self.comp.on_response(id, items);
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+        let mode = self.mode();
+        let rope_len = self.buf().rope.len_chars();
+        let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
+        // drop buf borrow here, then call on_response with owned data
+        // but since set_completions bypasses context check, just use set_active:
+        self.comp.set_active(items);
     }
 
     /// Poll the completion machine on every tick.

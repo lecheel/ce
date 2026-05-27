@@ -12,49 +12,49 @@ use crate::ed::editor::Editor;
 use crate::ed::mode::{MessageKind, Mode};
 
 /// Render the command line or status message.
+/// Render the command line or status message.
 pub fn draw_command_line(f: &mut Frame, area: Rect, editor: &Editor) {
     let text = match editor.mode() {
-        Mode::Command => {
+        Mode::Command | Mode::Search => {
             let cmd = editor.command();
-            if cmd.is_empty() {
-                Line::from(vec![Span::styled(
-                    ":",
+            let before_cursor: String = cmd.chars().take(editor.command_cursor).collect();
+            let after_cursor: String = cmd.chars().skip(editor.command_cursor).collect();
+
+            let prefix_str = match editor.mode() {
+                Mode::Search => "/",
+                _ => ":",
+            };
+
+            let mut spans = vec![Span::styled(
+                prefix_str,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )];
+
+            // Text before the cursor
+            spans.push(Span::styled(
+                before_cursor,
+                Style::default().fg(Color::White),
+            ));
+
+            // Inject the '^' register prompt visually at the cursor position
+            if editor.pending_register {
+                spans.push(Span::styled(
+                    "^",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
-                )])
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        ":",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(cmd.to_string(), Style::default().fg(Color::White)),
-                ])
+                ));
             }
-        }
-        Mode::Search => {
-            let cmd = editor.command();
-            if cmd.is_empty() {
-                Line::from(vec![Span::styled(
-                    "/",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )])
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        "/",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(cmd.to_string(), Style::default().fg(Color::White)),
-                ])
-            }
+
+            // Text after the cursor
+            spans.push(Span::styled(
+                after_cursor,
+                Style::default().fg(Color::White),
+            ));
+
+            Line::from(spans)
         }
         _ => {
             // If active suggestions are present, render them here on the very bottom line

@@ -1,5 +1,5 @@
 //! Central editor state and key dispatch.
-// use crate::keybind::bindings::Action;
+use crate::keybind::bindings::Action;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -132,6 +132,7 @@ pub struct Editor {
     pub cmd_waiting_register: bool,
     pub command_cursor: usize,
     pub needs_initial_scroll: bool,
+    pub pending_register: bool,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -217,6 +218,7 @@ impl Editor {
             llm: crate::ai::llama::llm::LlmState::new(),
             cmd_waiting_register: false,
             needs_initial_scroll: true,
+            pending_register: false,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -609,6 +611,30 @@ impl Editor {
 
 impl Editor {
     pub fn handle_key(&mut self, key: KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        // ── Register Mode Intercept ────────────────────────────────────
+        // If we are in the Ctrl-r register prompt, catch the next key here
+        // before it goes through the normal key resolution.
+        if self.pending_register {
+            let action = match (self.mode(), key.code) {
+                (Mode::Command | Mode::Search, KeyCode::Char('%')) => {
+                    Some(Action::CommandInsertFilename)
+                }
+                (Mode::Command | Mode::Search, KeyCode::Char('w'))
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    Some(Action::CommandInsertWord)
+                }
+                _ => Some(Action::CommandCancelRegister), // Any other key cancels register mode
+            };
+
+            if let Some(act) = action {
+                crate::keybind::bindings::execute_action(self, act);
+            }
+            return; // Key fully handled, skip normal resolution
+        }
+
         if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
@@ -1312,6 +1338,12 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// Helper to inject text at the current command cursor position
+    pub fn insert_command_text(&mut self, text: &str) {
+        self.command.insert_str(self.command_cursor, text);
+        self.command_cursor += text.len();
     }
 }
 
