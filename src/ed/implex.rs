@@ -911,7 +911,7 @@ impl Editor {
             if !to_insert.is_empty() {
                 buf.rope.insert(insert_offset, &to_insert);
             }
-            buf.modified = true;
+            buf.mark_modified();
             buf.parse_syntax();
         }
         {

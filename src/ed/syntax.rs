@@ -158,13 +158,19 @@ impl SyntaxState {
 
         if let Some(tree) = &self.tree {
             let root = tree.root_node();
-            Self::collect_highlights(root, row, &mut char_styles);
+            // Pass line_text into collect_highlights
+            Self::collect_highlights(root, row, line_text, &mut char_styles);
         }
         char_styles
     }
 
-    fn collect_highlights(node: Node, row: usize, char_styles: &mut Vec<Option<Style>>) {
-        // Prune branches that don't intersect the target row
+    // Update signature to include line_text
+    fn collect_highlights(
+        node: Node,
+        row: usize,
+        line_text: &str,
+        char_styles: &mut Vec<Option<Style>>,
+    ) {
         if node.start_position().row > row || node.end_position().row < row {
             return;
         }
@@ -173,12 +179,17 @@ impl SyntaxState {
             let start_col = if node.start_position().row < row {
                 0
             } else {
-                node.start_position().column
+                // Convert byte offset to char offset
+                let byte = node.start_position().column.min(line_text.len());
+                line_text[..byte].chars().count()
             };
+
             let end_col = if node.end_position().row > row {
                 char_styles.len()
             } else {
-                node.end_position().column.min(char_styles.len())
+                // Convert byte offset to char offset
+                let byte = node.end_position().column.min(line_text.len());
+                line_text[..byte].chars().count().min(char_styles.len())
             };
 
             for i in start_col..end_col {
@@ -186,11 +197,10 @@ impl SyntaxState {
             }
         }
 
-        // Recurse into children. Child styles will overwrite parent styles,
-        // giving us correct "most specific node wins" behavior.
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            Self::collect_highlights(child, row, char_styles);
+            // Pass line_text recursively
+            Self::collect_highlights(child, row, line_text, char_styles);
         }
     }
 
@@ -535,64 +545,167 @@ fn get_language(id: &str) -> Option<tree_sitter::Language> {
     }
 }
 
-// ed/syntax.rs
-// Synced with Catppuccin Mocha palette from highlight.rs
-
 #[rustfmt::skip]
 fn style_for_kind(kind: &str) -> Option<Style> {
     match kind {
-        // Keywords (Mauve)
-        "fn" | "let" | "mut" | "if" | "else" | "return" | "struct" | "enum" | "impl" | "pub"
-        | "use" | "mod" | "match" | "loop" | "while" | "for" | "in" | "break" | "continue"
-        | "async" | "await" | "dyn" | "trait" | "where" | "ref" | "as" | "type" | "const"
-        | "static" | "unsafe" | "extern" | "crate" | "super" | "self" | "true" | "false"
-        | "def" | "class" | "import" | "from" | "try" | "except" | "finally" | "with" | "yield"
-        | "lambda" | "pass" | "raise" | "global" | "nonlocal" | "assert" | "del" | "not"
-        | "and" | "or" | "is" => Some(
+        // ── Keywords (Mauve #cb6af7, bold) ──────────────────────────────
+        "fn" | "let" | "mut" | "if" | "else" | "return"
+        | "struct" | "enum" | "impl" | "pub" | "use" | "mod"
+        | "match" | "loop" | "while" | "for" | "in"
+        | "break" | "continue" | "async" | "await" | "dyn"
+        | "trait" | "where" | "ref" | "as" | "type" | "const"
+        | "static" | "unsafe" | "extern" | "crate" | "super"
+        | "move" | "true" | "false"
+        // Python
+        | "def" | "class" | "import" | "from" | "try" | "except"
+        | "finally" | "with" | "yield" | "lambda" | "pass"
+        | "raise" | "global" | "nonlocal" | "assert" | "del"
+        | "not" | "and" | "or" | "is"
+        // JS/TS
+        | "var" | "extends" | "new" | "typeof" | "instanceof"
+        | "interface" | "implements" | "readonly" | "declare"
+        | "default" => Some(
             Style::default()
                 .fg(Color::Rgb(203, 166, 247))
                 .add_modifier(Modifier::BOLD),
         ),
-        // Strings (Green)
+
+        // ── self / Self / this (Pink #f38ba8) ───────────────────────────
+        "self" | "Self" | "this" => Some(
+            Style::default().fg(Color::Rgb(243, 139, 168))
+        ),
+
+        // ── Lifetimes (Light Magenta #f5c2e7) ───────────────────────────
+        "lifetime" => Some(
+            Style::default().fg(Color::Rgb(245, 194, 231))
+        ),
+
+        // ── Macros (Yellow #f9e2af) ──────────────────────────────────────
+        "macro_invocation" | "macro_definition" => Some(
+            Style::default().fg(Color::Rgb(249, 226, 175))
+        ),
+
+        // ── Strings (Green #a6e3a1) ──────────────────────────────────────
         "string"
         | "string_content"
         | "raw_string_literal"
         | "string_literal"
-        | "interpreted_string_literal" => Some(Style::default().fg(Color::Rgb(166, 227, 161))),
-        // Types/Structs/Enums (Sapphire)
-        "type_identifier" | "struct_item" | "enum_item" | "impl_item" | "class_definition" => {
-            Some(Style::default().fg(Color::Rgb(52, 155, 235)))
-        }
-        // Comments (Overlay0)
-        "comment" | "line_comment" | "block_comment" => Some(
+        | "interpreted_string_literal"
+        | "char_literal" => Some(
+            Style::default().fg(Color::Rgb(166, 227, 161))
+        ),
+
+        // ── Escape sequences (Light Pink #eba0ac) ───────────────────────
+        "escape_sequence" => Some(
+            Style::default().fg(Color::Rgb(235, 160, 172))
+        ),
+
+        // ── Numbers (Orange #bf5c26) ─────────────────────────────────────
+        "integer_literal" | "float_literal" | "number"
+        | "integer" | "float" => Some(
+            Style::default().fg(Color::Rgb(191, 92, 38))
+        ),
+
+        // ── Booleans (Peach #fab387) ─────────────────────────────────────
+        "boolean_literal" => Some(
+            Style::default().fg(Color::Rgb(250, 179, 135))
+        ),
+
+        // ── Type identifiers (Sapphire #349beb) ─────────────────────────
+        "type_identifier"
+        | "struct_item"
+        | "enum_item"
+        | "impl_item"
+        | "trait_item"
+        | "class_definition"
+        | "type_alias" => Some(
+            Style::default().fg(Color::Rgb(52, 155, 235))
+        ),
+
+        // ── Function / method definitions (Cyan #82d7fa) ─────────────────
+        "function_item"
+        | "function_definition"
+        | "method_definition"
+        | "function_signature_item" => Some(
+            Style::default().fg(Color::Rgb(130, 215, 250))
+        ),
+
+        // ── Function / method calls (Light Cyan #74c7ec) ─────────────────
+        "call_expression"
+        | "method_call_expression" => Some(
+            Style::default().fg(Color::Rgb(116, 199, 236))
+        ),
+
+        // ── Constants (Peach #fab387) ────────────────────────────────────
+        "const_item"
+        | "static_item"
+        | "enum_variant" => Some(
+            Style::default().fg(Color::Rgb(250, 179, 135))
+        ),
+
+        // ── Properties / fields (Off-white #cdd6f4) ──────────────────────
+        "field_identifier"
+        | "property_identifier"
+        | "shorthand_field_identifier"
+        | "field_declaration" => Some(
+            Style::default().fg(Color::Rgb(205, 214, 244))
+        ),
+
+        // ── Operators (Blue #89b4fa) ──────────────────────────────────────
+        "operator"
+        | "unary_operator"
+        | "binary_operator"
+        | "assignment_operator" => Some(
+            Style::default().fg(Color::Rgb(137, 180, 250))
+        ),
+
+        // ── Delimiters / punctuation (Grayish Blue #9399b2) ──────────────
+        "{" | "}" | "(" | ")" | "[" | "]"
+        | "," | "." | ";" | ":" | "::"
+        | "->" | "=>" | "|" => Some(
+            Style::default().fg(Color::Rgb(147, 153, 178))
+        ),
+
+        // ── Attributes (Muted Gray #6c7086) ──────────────────────────────
+        "attribute_item"
+        | "inner_attribute_item"
+        | "attribute" => Some(
+            Style::default().fg(Color::Rgb(108, 112, 134))
+        ),
+
+        // ── Labels (Warm Yellow #fadc96) ─────────────────────────────────
+        "label" => Some(
+            Style::default().fg(Color::Rgb(250, 220, 150))
+        ),
+
+        // ── Comments (Overlay0 #5e6978, italic) ──────────────────────────
+        "comment"
+        | "line_comment"
+        | "block_comment" => Some(
             Style::default()
                 .fg(Color::Rgb(94, 105, 120))
                 .add_modifier(Modifier::ITALIC),
         ),
-        // Numbers (Orange/Rust)
-        "integer_literal" | "float_literal" | "number" => {
-            Some(Style::default().fg(Color::Rgb(191, 92, 38)))
-        }
-        // Properties/Fields (Text/Off-white)
-        "field_identifier" | "property_identifier" | "shorthand_field_identifier" => {
-            Some(Style::default().fg(Color::Rgb(205, 214, 244)))
-        }
 
-        // ── Git Diff / Patch Kinds ──────────────────────────────────────────
-        // Plus lines/additions (Green)
+        // ── Doc comments (Lighter slate #73718d, italic) ─────────────────
+        "doc_comment" => Some(
+            Style::default()
+                .fg(Color::Rgb(115, 125, 145))
+                .add_modifier(Modifier::ITALIC),
+        ),
+
+        // ── Git diff kinds (unchanged from before) ───────────────────────
         "added_line" | "addition" => Some(
             Style::default().fg(Color::Rgb(166, 227, 161))
         ),
-        // Minus lines/deletions (Red)
         "deleted_line" | "deletion" => Some(
             Style::default().fg(Color::Rgb(243, 139, 168))
         ),
-        // Chunk range/hunk headers (Mauve)
         "hunk_header" => Some(
             Style::default().fg(Color::Rgb(203, 166, 247))
         ),
-        // Diff commands, indexes, file paths, and general metadata headers (Blue)
-        "command" | "index" | "old_file" | "new_file" | "file_change" | "header" => Some(
+        "command" | "index" | "old_file" | "new_file"
+        | "file_change" | "header" => Some(
             Style::default()
                 .fg(Color::Rgb(137, 180, 250))
                 .add_modifier(Modifier::BOLD)

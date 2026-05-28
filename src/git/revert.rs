@@ -120,7 +120,7 @@ pub fn revert_hunk_at_cursor(
             }
             buf.rope.insert(start_char, &insert_text);
 
-            buf.modified = true;
+            buf.mark_modified();
             buf.parse_syntax(); // Triggers incremental syntax tree update
 
             win.row = min_new_line;

@@ -227,7 +227,7 @@ impl Editor {
                             let current_len = buf.rope.len_chars();
                             buf.rope
                                 .insert(current_len, &format!("\nLLM: {}\n", response_text));
-                            buf.modified = true;
+                            buf.mark_modified();
                             buf.parse_syntax();
                             total_lines = buf.len_lines();
                         }
@@ -260,7 +260,7 @@ impl Editor {
                             let current_len = buf.rope.len_chars();
                             buf.rope
                                 .insert(current_len, &format!("\nSystem Error: {}\n", err));
-                            buf.modified = true;
+                            buf.mark_modified();
                             buf.parse_syntax();
                         }
 
@@ -325,37 +325,7 @@ impl Editor {
         );
     }
 
-    /// Handles special keys when focused on an LlmInput buffer.
-    pub fn handle_llm_input_buffer_key(&mut self, key: &KeyEvent) -> Option<CommandResult> {
-        let is_llm_input = {
-            let win = self.active_window();
-            self.buf_by_id(win.buffer_id())
-                .map(|b| b.kind == BufferKind::LlmInput)
-                .unwrap_or(false)
-        };
-
-        if !is_llm_input {
-            return None;
-        }
-
-        // 'q' in normal mode closes the LLM session
-        if self.mode == Mode::Normal && key.code == KeyCode::Char('q') {
-            return Some(self.llm_close_split_session());
-        }
-
-        // Enter submits the prompt in any typing/normal mode, unless Ctrl or Shift is held
-        if key.code == KeyCode::Enter {
-            if key.modifiers.contains(KeyModifiers::SHIFT)
-                || key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                return None; // Let standard insert mode insert a newline
-            } else {
-                return Some(self.llm_send_input_buffer());
-            }
-        }
-
-        None
-    }
+    // handke_llm_input_buffer_key move to ed/handle_key.rs
 
     pub fn llm_send_input_buffer(&mut self) -> CommandResult {
         let input = self.buf().rope.to_string();
@@ -364,7 +334,7 @@ impl Editor {
         let input_bid = self.active_window().buffer_id();
         if let Some(buf) = self.buf_mut_by_id(input_bid) {
             buf.rope = ropey::Rope::from_str("");
-            buf.modified = true;
+            buf.mark_modified();
             buf.parse_syntax();
         }
 
@@ -384,6 +354,30 @@ impl Editor {
         CommandResult::Handled
     }
 
+    /// Close the LLM buffer view by switching to a normal buffer.
+    /// Used when 'q' is pressed in an LLM buffer but there's no split to close.
+    /// Unlike `llm_close_split_session`, this will NOT quit the app if it's
+    /// the only window.
+    pub fn llm_close_buffer(&mut self) {
+        if !matches!(self.buf().kind, BufferKind::Llm | BufferKind::LlmInput) {
+            return;
+        }
+
+        let target_id = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::Normal && b.filename.is_some())
+            .or_else(|| self.buffers.iter().find(|b| b.kind == BufferKind::Normal))
+            .map(|b| b.id);
+
+        let target_id = match target_id {
+            Some(id) => id,
+            None => self.buffers.first().map(|b| b.id).unwrap_or(0),
+        };
+
+        self.switch_window_to_buffer(target_id);
+    }
+
     /// Handles sending data from the general interactive prompt
     pub fn llm_send_from_prompt(&mut self, input: String) -> CommandResult {
         // Append prompt silently to the background history buffer
@@ -393,7 +387,7 @@ impl Editor {
             let current_len = buf.rope.len_chars();
             buf.rope
                 .insert(current_len, &format!("\nUser: {}\n", input));
-            buf.modified = true;
+            buf.mark_modified();
             buf.parse_syntax();
             total_lines = buf.len_lines();
         }

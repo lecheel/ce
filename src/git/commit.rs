@@ -236,7 +236,7 @@ impl Editor {
 
         if let Some(buf) = self.buf_mut_by_id(commit_buf_id) {
             buf.rope = Rope::from_str(&content);
-            buf.modified = true;
+            buf.mark_modified();
         }
 
         // Move cursor to the top
@@ -266,7 +266,7 @@ impl Editor {
                     "# Error generating commit message:\n# {}\n\n# Press q/Esc to cancel",
                     error
                 ));
-                buf.modified = true;
+                buf.mark_modified();
             }
         }
 

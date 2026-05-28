@@ -120,7 +120,7 @@ pub fn insert_char(win: &mut Window, buf: &mut Buffer, ch: char) {
     buf.rope.insert(insert_pos, &ch_str);
     win.col += char_width;
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
 
     // 3. Perform incremental update
     let edit = tree_sitter::InputEdit {
@@ -156,7 +156,7 @@ pub fn insert_newline(win: &mut Window, buf: &mut Buffer) {
     win.row += 1;
     win.col = indent_width;
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
 }
 
 /// Insert a newline at the end of the current line (vim `o`).
@@ -183,7 +183,7 @@ pub fn insert_newline_below(win: &mut Window, buf: &mut Buffer) {
     win.row += 1;
     win.col = indent_width;
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
 }
 
 /// Insert a newline at the start of the current line (vim `O`).
@@ -205,7 +205,7 @@ pub fn insert_newline_above(win: &mut Window, buf: &mut Buffer) {
     // Cursor stays on the same row index, which is now the new blank line.
     win.col = indent_width;
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
 }
 
 /// Insert a tab (4 spaces).
@@ -247,7 +247,7 @@ pub fn backspace(win: &mut Window, buf: &mut Buffer) {
             buf.rope.remove(line_start + start..line_start + end);
             win.col -= width;
             win.desired_col = win.col;
-            buf.modified = true;
+            buf.mark_modified();
 
             // 3. Perform incremental update
             let edit = tree_sitter::InputEdit {
@@ -282,7 +282,7 @@ pub fn backspace(win: &mut Window, buf: &mut Buffer) {
         win.row -= 1;
         win.col = prev_line_width;
         win.desired_col = win.col;
-        buf.modified = true;
+        buf.mark_modified();
 
         // 3. Perform incremental update
         let edit = tree_sitter::InputEdit {
@@ -320,7 +320,7 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
 
             // 2. Perform mutation
             buf.rope.remove(line_start + start..line_start + end);
-            buf.modified = true;
+            buf.mark_modified();
 
             // 3. Perform incremental update
             let edit = tree_sitter::InputEdit {
@@ -347,7 +347,7 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
 
         // 2. Perform mutation
         buf.rope.remove(newline_pos..newline_pos + 1);
-        buf.modified = true;
+        buf.mark_modified();
 
         // 3. Perform incremental update
         let edit = tree_sitter::InputEdit {
@@ -373,7 +373,7 @@ pub fn delete_current_line(win: &mut Window, buf: &mut Buffer) {
         buf.rope.insert(0, "\n");
         win.col = 0;
         win.desired_col = win.col;
-        buf.modified = true;
+        buf.mark_modified();
         return;
     }
 
@@ -385,7 +385,7 @@ pub fn delete_current_line(win: &mut Window, buf: &mut Buffer) {
         win.row = buf.len_lines() - 1;
     }
     win.col = win.col.min(buf.line_char_len(win.row));
-    buf.modified = true;
+    buf.mark_modified();
     // Use Way 1: Force a full parse
     buf.parse_syntax();
 }
@@ -412,7 +412,7 @@ pub fn delete_word_forward(win: &mut Window, buf: &mut Buffer) {
         let line_start = buf.rope.line_to_char(win.row);
         win.col = col_from_char_offset(&new_line, absolute_start - line_start);
         win.desired_col = win.col;
-        buf.modified = true;
+        buf.mark_modified();
     }
 }
 
@@ -438,7 +438,7 @@ pub fn delete_word_backward(win: &mut Window, buf: &mut Buffer) {
         let line_start = buf.rope.line_to_char(win.row);
         win.col = col_from_char_offset(&final_line, absolute_start - line_start);
         win.desired_col = win.col;
-        buf.modified = true;
+        buf.mark_modified();
     }
 }
 
@@ -458,7 +458,7 @@ pub fn delete_to_end_of_line(win: &mut Window, buf: &mut Buffer) {
 
     buf.rope.remove(del_start..line_start + line_char_len);
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
 }
 
 /// Indent the current line by one level (4 spaces).
@@ -471,7 +471,7 @@ pub fn indent_line(win: &mut Window, buf: &mut Buffer) {
     buf.rope.insert(line_start, indent);
     win.col += display_width(indent);
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
 }
 
 /// Outdent the current line by up to one level.
@@ -487,7 +487,7 @@ pub fn outdent_line(win: &mut Window, buf: &mut Buffer) {
         buf.rope.remove(line_start..line_start + to_remove);
         win.col = win.col.saturating_sub(to_remove);
         win.desired_col = win.col;
-        buf.modified = true;
+        buf.mark_modified();
     }
 }
 
@@ -505,7 +505,7 @@ pub fn paste_text(win: &mut Window, buf: &mut Buffer, text: &str) {
     let text_width = display_width(text);
     win.col += text_width;
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
     buf.parse_syntax();
 }
 
@@ -525,7 +525,7 @@ pub fn paste_line_below(win: &mut Window, buf: &mut Buffer, text: &str) {
     win.row = next_line_row;
     win.col = 0;
     win.desired_col = win.col;
-    buf.modified = true;
+    buf.mark_modified();
     buf.parse_syntax();
 }
 

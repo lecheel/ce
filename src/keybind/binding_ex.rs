@@ -598,7 +598,7 @@ pub fn delete_block(editor: &mut Editor) {
         }
     }
 
-    buf.modified = true;
+    buf.mark_modified();
     buf.parse_syntax();
 
     // disjoint mutable borrow to safely position and clamp cursor
@@ -637,6 +637,6 @@ pub fn paste_block(editor: &mut Editor, text: &str) {
         buf.rope.insert(insert_offset, line_text);
     }
 
-    buf.modified = true;
+    buf.mark_modified();
     buf.parse_syntax();
 }

@@ -1468,7 +1468,7 @@ impl Editor {
                 buf.rope.insert(insert_char, &reverted_text);
             }
 
-            buf.modified = true;
+            buf.mark_modified();
             buf.parse_syntax();
 
             // Position cursor at start of reverted region

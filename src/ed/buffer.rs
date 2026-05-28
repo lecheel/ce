@@ -93,6 +93,17 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// Mark the buffer as modified, but only if it's a normal editable buffer.
+    /// Special buffers (GitLog, Ripgrep, LLM, etc.) never get marked dirty.
+    #[inline]
+    pub fn mark_modified(&mut self) {
+        if self.kind == BufferKind::Normal
+            || self.kind == BufferKind::LlmInput
+            || self.kind == BufferKind::GitCommit
+        {
+            self.modified = true;
+        }
+    }
     // ---- Constructor ----
     /// Way 1: Fallback/Full parse trigger
     pub fn parse_syntax(&mut self) {

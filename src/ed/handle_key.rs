@@ -1,15 +1,16 @@
 use crate::ed::editor::PositionInfo;
 use crate::ed::MessageKind;
+use crate::ed::Mode;
 use crate::event::KeyEvent;
 use crate::Config;
 use crate::Editor;
 use crossterm::event::KeyCode;
+use crossterm::event::KeyModifiers;
 
 impl Editor {
     // ═══════════════════════════════════════════════════════════════════
     // Ripgrep key handler
     // ═══════════════════════════════════════════════════════════════════
-
     pub fn handle_ripgrep_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Enter => {
@@ -20,9 +21,58 @@ impl Editor {
                 self.ripgrep_close_buffer();
                 true
             }
-            _ => false, // Fall through to inherit normal navigation
+            _ => false, // Inherits j, k, G, /, etc.
         }
     }
+
+    pub fn handle_llm_key(&mut self, key: KeyEvent) -> bool {
+        // Only intercept '>' and 'q' in Normal/Brief modes.
+        // In Insert mode, they should fall through to be typed as characters.
+        if matches!(self.mode, Mode::Insert) {
+            return false;
+        }
+
+        match key.code {
+            // '>' enters command mode with '> ' pre-filled (equivalent to typing :> )
+            KeyCode::Char('>') if key.modifiers.is_empty() => {
+                self.enter_command();
+                for ch in "> ".chars() {
+                    self.push_command(ch);
+                }
+                true
+            }
+            // 'q' closes the LLM view
+            KeyCode::Char('q') if key.modifiers.is_empty() => {
+                if self.windows.len() > 1 {
+                    self.llm_close_split_session();
+                } else {
+                    self.llm_close_buffer();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn handle_llm_input_key(&mut self, key: KeyEvent) -> bool {
+        // First, try shared LLM keys (>, q). They are mode-gated inside handle_llm_key.
+        if self.handle_llm_key(key) {
+            return true;
+        }
+
+        // Input-pane-specific: Enter sends the buffer content
+        if key.code == KeyCode::Enter {
+            if !key.modifiers.contains(KeyModifiers::SHIFT)
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                self.llm_send_input_buffer();
+                return true;
+            }
+        }
+
+        false
+    }
+
     // -- Handle Marks Key Events --
     pub fn handle_marks_key(&mut self, key: KeyEvent) {
         match key.code {

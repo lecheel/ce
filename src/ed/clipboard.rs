@@ -256,7 +256,7 @@ impl Editor {
         let (win, buf) = self.active_window_and_buf_mut();
         buf.push_undo(win.row, win.col);
         buf.rope.remove(start..end);
-        buf.modified = true;
+        buf.mark_modified();
 
         // Reposition cursor to start of deleted region
         let new_row = buf.rope.char_to_line(start);

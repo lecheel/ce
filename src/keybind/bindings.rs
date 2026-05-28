@@ -1387,7 +1387,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let pad = " ".repeat(c1 - line_len);
                     let off = buf.rope.line_to_char(r1) + line_len;
                     buf.rope.insert(off, &pad);
-                    buf.modified = true;
+                    buf.mark_modified();
                 }
                 win.col = c1;
 
@@ -1432,7 +1432,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let pad = " ".repeat(insert_col - line_len);
                     let off = buf.rope.line_to_char(r1) + line_len;
                     buf.rope.insert(off, &pad);
-                    buf.modified = true;
+                    buf.mark_modified();
                 }
                 win.col = insert_col;
 
@@ -1495,7 +1495,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     editor.clipboard_is_block = false;
                     let (win, buf) = editor.active_window_and_buf_mut();
                     buf.rope.remove(start_char..end_char);
-                    buf.modified = true;
+                    buf.mark_modified();
                     let new_line = buf.rope.char_to_line(start_char);
                     win.row = new_line;
                     win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
@@ -1526,7 +1526,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 if let Some((start_char, end_char)) = range {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     buf.rope.remove(start_char..end_char);
-                    buf.modified = true;
+                    buf.mark_modified();
                     let new_line = buf.rope.char_to_line(start_char);
                     win.row = new_line;
                     win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
@@ -1902,7 +1902,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
 
                     let text = buf.rope.slice(start_char..end_char).to_string();
                     buf.rope.remove(start_char..end_char);
-                    buf.modified = true;
+                    buf.mark_modified();
                     buf.parse_syntax();
                     text
                 }; // win and buf dropped here
@@ -1991,7 +1991,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 if let Some((start_char, end_char)) = range {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     buf.rope.remove(start_char..end_char);
-                    buf.modified = true;
+                    buf.mark_modified();
                     let new_line = buf.rope.char_to_line(start_char);
                     win.row = new_line;
                     win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
@@ -2037,7 +2037,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
 
                     let (win, buf) = editor.active_window_and_buf_mut();
                     buf.rope.remove(start_char..end_char);
-                    buf.modified = true;
+                    buf.mark_modified();
                     let new_line = buf.rope.char_to_line(start_char);
                     win.row = new_line;
                     win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
@@ -2509,7 +2509,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 win.row = 0;
                 win.col = 0;
                 win.desired_col = 0;
-                buf.modified = true;
+                buf.mark_modified();
             }
 
             editor.paste_from_system_clipboard();
@@ -2615,7 +2615,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             };
 
             buf.rope.insert(start_char, &replacement);
-            buf.modified = true;
+            buf.mark_modified();
             buf.parse_syntax();
 
             // Move to next line (clamped to the end of the buffer)
@@ -2688,7 +2688,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             let off = buf.rope.line_to_char(r) + col;
                             buf.rope.insert(off, &typed_text);
                         }
-                        buf.modified = true;
+                        buf.mark_modified();
                         buf.parse_syntax();
                     }
                 }

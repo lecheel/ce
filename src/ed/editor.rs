@@ -770,15 +770,6 @@ impl Editor {
             return;
         }
 
-        // ── Intercept for LLM Input Buffer overrides ──────────────────
-        if self.buf().kind == BufferKind::LlmInput {
-            if let Some(res) = self.handle_llm_input_buffer_key(&key) {
-                if matches!(res, crate::ed::ext::CommandResult::Handled) {
-                    return;
-                }
-            }
-        }
-
         // ── Pending bookmark / quickmark input ──────────────────────────
         if self.pending_input != PendingInput::None
             && matches!(self.mode, Mode::Normal | Mode::Visual | Mode::VisualLine)
@@ -877,6 +868,10 @@ impl Editor {
                 BufferKind::GitCommit => self.handle_git_commit_key(key),
                 BufferKind::GitStatus => self.handle_git_status_key(key),
                 BufferKind::CheckHealth => self.handle_checkhealth_key(key),
+
+                // ── LLM Buffers ──────────────────────────────────────────
+                BufferKind::Llm => self.handle_llm_key(key),
+                BufferKind::LlmInput => self.handle_llm_input_key(key),
                 _ => false,
             };
             if handled {
@@ -1077,7 +1072,7 @@ impl Editor {
             win.row = row;
             win.col = start;
             win.col = win.col.min(buf.line_char_len(win.row));
-            buf.modified = true;
+            buf.mark_modified();
 
             if change {
                 self.enter_insert();
@@ -1109,7 +1104,7 @@ impl Editor {
             win.col = sc;
             // PANIC-FIX: clamp cursor after mutation
             win.col = win.col.min(buf.line_char_len(win.row));
-            buf.modified = true;
+            buf.mark_modified();
 
             if change {
                 self.enter_insert();
@@ -1242,7 +1237,7 @@ impl Editor {
                         let off = buf.rope.line_to_char(r) + col;
                         buf.rope.insert(off, &typed_text);
                     }
-                    buf.modified = true;
+                    buf.mark_modified();
                     buf.parse_syntax();
                 }
             }
