@@ -765,7 +765,7 @@ impl Editor {
         }
 
         // WhichKey is a passive overlay, don't intercept keys for it!
-        if self.popup.is_open() && self.popup.kind != Some(PopupKind::WhichKey) {
+        if self.popup.is_open() && self.popup.kind != Some(PopupKind::Whichkey) {
             self.handle_popup_key(key);
             return;
         }
