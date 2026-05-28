@@ -1027,8 +1027,9 @@ impl Editor {
     pub fn ensure_cursor_visible(&mut self, viewport_height: usize) {
         let w = self.active_window().position.width;
         let gutter = self.active_gutter_width();
+        let offset = self.effective_scroll_offset();
         self.active_window_mut()
-            .ensure_cursor_visible(viewport_height, w, 2, gutter);
+            .ensure_cursor_visible(viewport_height, w, offset, gutter);
     }
 
     /// Re-snap the active window's scroll so the cursor is visible
@@ -1036,10 +1037,11 @@ impl Editor {
     pub fn snap_cursor_to_viewport(&mut self) {
         let h = self.active_window().position.height;
         let w = self.active_window().position.width;
+        let offset = self.effective_scroll_offset();
         let gutter = self.active_gutter_width();
         if h > 0 && w > 0 {
             self.active_window_mut()
-                .ensure_cursor_visible(h, w, 2, gutter);
+                .ensure_cursor_visible(h, w, offset, gutter);
         }
     }
 
@@ -1148,10 +1150,11 @@ impl Editor {
         let est_height = old_height.saturating_sub(1) / 2;
         let est_width = self.active_window().position.width; // Preserve width
         let gutter = self.active_gutter_width();
+        let offset = self.effective_scroll_offset();
         if est_height > 0 {
             for win in &mut self.windows {
                 if win.id == cur_win_id || win.id == new_win_id {
-                    win.ensure_cursor_visible(est_height, est_width, 2, gutter);
+                    win.ensure_cursor_visible(est_height, est_width, offset, gutter);
                 }
             }
         }
@@ -1198,10 +1201,11 @@ impl Editor {
         let est_width = old_width.saturating_sub(1) / 2;
         let est_height = self.active_window().position.height; // Preserve height
         let gutter = self.active_gutter_width();
+        let offset = self.effective_scroll_offset();
         if est_width > 0 {
             for win in &mut self.windows {
                 if win.id == cur_win_id || win.id == new_win_id {
-                    win.ensure_cursor_visible(est_height, est_width, 2, gutter);
+                    win.ensure_cursor_visible(est_height, est_width, offset, gutter);
                 }
             }
         }

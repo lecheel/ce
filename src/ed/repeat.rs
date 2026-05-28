@@ -101,7 +101,7 @@ pub struct LastAction {
 
 pub trait RepeatExt {
     /// Repeat the last action (dot command)
-    fn repeat_last_action(&mut self) -> CommandResult;
+    fn repeat_last_action(&mut self, explicit_count: usize) -> CommandResult;
 
     /// Record an action for potential repetition
     fn record_action(&mut self, action: RepeatableAction, count: usize);
@@ -111,34 +111,45 @@ pub trait RepeatExt {
 }
 
 impl RepeatExt for Editor {
-    fn repeat_last_action(&mut self) -> CommandResult {
+    fn repeat_last_action(&mut self, explicit_count: usize) -> CommandResult {
         let action = self.last_action.action.clone();
-        let original_count = self.current_count;
-        self.current_count *= self.last_action.count;
+
+        // Vim rules for count with dot:
+        // If a count is given to `.` (e.g. `3.`), it overrides the original count.
+        // Otherwise, the original count (e.g. from `2dd`) is used.
+        let effective_count = if explicit_count > 1 {
+            explicit_count
+        } else {
+            self.last_action.count
+        };
+
+        // Inject the effective count so execute_action's loops work correctly
+        self.current_count = effective_count;
 
         let action_to_process = match action {
             RepeatableAction::BufferNext => {
-                self.current_count = original_count;
                 self.switch_next_buffer();
+                self.current_count = 0; // reset since we bypass execute_action
                 return CommandResult::Handled;
             }
             RepeatableAction::BufferPrev => {
-                self.current_count = original_count;
                 self.switch_prev_buffer();
+                self.current_count = 0;
                 return CommandResult::Handled;
             }
             RepeatableAction::QuickfixNext => {
-                self.current_count = original_count;
                 self.quickfix_next();
+                self.current_count = 0;
                 return CommandResult::Handled;
             }
             RepeatableAction::QuickfixPrev => {
-                self.current_count = original_count;
                 self.quickfix_prev();
+                self.current_count = 0;
                 return CommandResult::Handled;
             }
             RepeatableAction::IndentTs { count: _ } => {
                 self.set_status_msg("Cannot repeat indent_ts yet", MessageKind::Error);
+                self.current_count = 0;
                 return CommandResult::Handled;
             }
             RepeatableAction::DeleteLine => Action::DeleteCurrentLine,
@@ -148,6 +159,7 @@ impl RepeatExt for Editor {
                     "Delete to start of line not supported yet",
                     MessageKind::Error,
                 );
+                self.current_count = 0;
                 return CommandResult::NotHandled;
             }
             RepeatableAction::DeleteWordForward => Action::DeleteInsideWord,
@@ -159,9 +171,11 @@ impl RepeatExt for Editor {
                     let (win, buf) = self.active_window_and_buf_mut();
                     let (row, col) = (win.row, win.col);
                     buf.push_undo(row, col);
-                    crate::ed::editing::paste_text(win, buf, &text);
+                    for _ in 0..effective_count {
+                        crate::ed::editing::paste_text(win, buf, &text);
+                    }
                 }
-                self.current_count = original_count;
+                self.current_count = 0;
                 return CommandResult::Handled;
             }
             RepeatableAction::DeleteChars { direction, .. } => {
@@ -182,37 +196,20 @@ impl RepeatExt for Editor {
             }
             RepeatableAction::JoinLines { .. } => {
                 self.set_status_msg("Join lines not supported yet", MessageKind::Error);
+                self.current_count = 0;
                 return CommandResult::NotHandled;
             }
-            // RepeatableAction::RipgrepNextResult | RepeatableAction::QuickfixNext => {
-            // self.current_count = original_count;
-            // return self.quickfix_next();
-            // }
-            // RepeatableAction::RipgrepPrevResult | RepeatableAction::QuickfixPrev => {
-            // self.current_count = original_count;
-            // return self.quickfix_prev();
-            // }
-            // RepeatableAction::LlmQuickAction { preset } => {
-            // self.current_count = original_count;
-            // let status_msg = match preset {
-            // LlmPreset::CheckEnglish => "Checking English",
-            // LlmPreset::TranslateToChinese => "Translating → 中文",
-            // LlmPreset::TranslateToEnglish => "Translating → English",
-            // LlmPreset::Explain => "Explaining",
-            // LlmPreset::Summarize => "Summarizing",
-            // _ => "Processing",
-            // };
-            // return self.llm_quick_action(preset, status_msg);
-            // }
             _ => {
                 self.set_status_msg("Cannot repeat this action", MessageKind::Error);
+                self.current_count = 0;
                 return CommandResult::NotHandled;
             }
         };
 
-        // Execute the mapped Action through standard bindings pipeline
+        // Execute the mapped Action through standard bindings pipeline.
+        // execute_action will consume `self.current_count` and reset it to 0.
         crate::keybind::bindings::execute_action(self, action_to_process);
-        self.current_count = original_count;
+
         CommandResult::Handled
     }
 

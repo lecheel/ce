@@ -32,6 +32,10 @@ fn default_llm_port() -> u16 {
     8080
 }
 
+fn default_scroll_offset() -> usize {
+    0 // Default to 0 to maintain current behavior
+}
+
 // Helper to default LLM system prompt
 fn default_llm_system_prompt() -> String {
     "You are a helpful, concise coding assistant inside a terminal text editor. Provide clear, accurate answers. Use markdown code blocks when providing code examples. Keep responses relatively brief.".to_string()
@@ -144,11 +148,15 @@ pub struct Config {
     pub git_gutter_enabled: bool,
     #[serde(default = "default_true")]
     pub bookmarks_enabled: bool,
+    #[serde(default = "default_false")]
+    pub bookmark_popup_goto: bool,
     #[serde(default)]
     pub search_wrap_enabled: bool,
     // ---- Formatting Feature Toggle ----
     #[serde(default = "default_false")]
     pub format_on_save: bool,
+    #[serde(default = "default_scroll_offset")]
+    pub scroll_offset: usize,
 
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
@@ -178,8 +186,10 @@ impl Default for Config {
             relative_line_numbers: true,
             git_gutter_enabled: true,
             bookmarks_enabled: true,
+            bookmark_popup_goto: false,
             search_wrap_enabled: false,
             show_startup_hints: true,
+            scroll_offset: 0,
             format_on_save: false,
         }
     }
@@ -241,6 +251,7 @@ impl Config {
                 search_wrap_enabled: false,
                 bookmarks_enabled: true,
                 show_startup_hints: true,
+                scroll_offset: 0,
                 format_on_save: false,
                 ..Default::default()
             }

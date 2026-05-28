@@ -223,7 +223,7 @@ impl Editor {
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
             repeat_pending: false,
-            current_count: 1,
+            current_count: 0,
             insert_buffer: None,
             quit_prompt: QuitPrompt::None,
         };
@@ -301,6 +301,18 @@ impl Editor {
                     });
                 }
             }
+        }
+
+        // 3. Inject the last jump position as the `` mark
+        if let Some((r, c)) = self.active_window().last_jump {
+            let buf = self.buf();
+            entries.push(crate::popup::MarkEntry {
+                ch: '`',
+                row: r,
+                col: c,
+                buffer_id: buf.id,
+                buffer_name: buf.display_name(),
+            });
         }
 
         // Sort entries by file, then by row so they appear in logical order
@@ -684,6 +696,25 @@ impl Editor {
         }
         */
 
+        // ── Count prefix for Normal / Visual modes ──────────────────
+        if matches!(
+            self.mode,
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+        ) {
+            if let KeyCode::Char(c) = key.code {
+                if key.modifiers.is_empty() && c.is_ascii_digit() {
+                    let digit = c.to_digit(10).unwrap() as usize;
+                    if digit == 0 && self.current_count == 0 {
+                        // Let '0' fall through to be handled as MoveLineStart
+                    } else {
+                        self.current_count = self.current_count * 10 + digit;
+                        self.set_status_msg(&format!("{}", self.current_count), MessageKind::Info);
+                        return; // Key consumed
+                    }
+                }
+            }
+        }
+
         // ── Intercept for Pending Git Actions ────────────────────────
         if self.pending_git_action != PendingGitAction::None {
             self.handle_git_action_prompt_key(key);
@@ -885,6 +916,11 @@ impl Editor {
                 handled = true;
             }
 
+            if self.current_count > 0 {
+                self.current_count = 0; // Reset count on Esc
+                handled = true;
+            }
+
             let is_selecting = matches!(
                 self.mode,
                 Mode::Visual | Mode::VisualLine | Mode::VisualBlock
@@ -958,6 +994,96 @@ impl Editor {
             let win = self.active_window();
             (win.row, win.col)
         };
+
+        // ── Word text object: use traditional boundary scanning (not Tree-sitter) ──
+        if obj == TextObject::Word {
+            let buf = self.buf();
+            if row >= buf.len_lines() {
+                self.set_status_msg("No text object found", MessageKind::Error);
+                return;
+            }
+
+            let line_text = buf.line_text(row);
+            let chars: Vec<char> = line_text.chars().collect();
+            if chars.is_empty() {
+                self.set_status_msg("No text object found", MessageKind::Error);
+                return;
+            }
+
+            let c = col.min(chars.len().saturating_sub(1));
+            let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+
+            let (start, end) = if is_word_char(chars[c]) {
+                // On a word character — select the whole word
+                let mut s = c;
+                while s > 0 && is_word_char(chars[s - 1]) {
+                    s -= 1;
+                }
+                let mut e = c + 1;
+                while e < chars.len() && is_word_char(chars[e]) {
+                    e += 1;
+                }
+
+                // dw behavior: include trailing whitespace
+                if !inside {
+                    while e < chars.len() && chars[e].is_whitespace() {
+                        e += 1;
+                    }
+                }
+                (s, e)
+            } else if chars[c].is_whitespace() {
+                // On whitespace — select contiguous whitespace
+                let mut s = c;
+                while s > 0 && chars[s - 1].is_whitespace() {
+                    s -= 1;
+                }
+                let mut e = c + 1;
+                while e < chars.len() && chars[e].is_whitespace() {
+                    e += 1;
+                }
+                (s, e)
+            } else {
+                // On punctuation — select contiguous punctuation
+                let ch = chars[c];
+                let mut s = c;
+                while s > 0 && chars[s - 1] == ch {
+                    s -= 1;
+                }
+                let mut e = c + 1;
+                while e < chars.len() && chars[e] == ch {
+                    e += 1;
+                }
+
+                // dw behavior: include trailing whitespace
+                if !inside {
+                    while e < chars.len() && chars[e].is_whitespace() {
+                        e += 1;
+                    }
+                }
+                (s, e)
+            };
+
+            let (win, buf) = self.active_window_and_buf_mut();
+            let line_start = buf.rope.line_to_char(row);
+            let start_offset = line_start + start;
+            let end_offset = line_start + end;
+
+            if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                self.set_status_msg("No text object found", MessageKind::Error);
+                return;
+            }
+
+            buf.rope.remove(start_offset..end_offset);
+            win.row = row;
+            win.col = start;
+            win.col = win.col.min(buf.line_char_len(win.row));
+            buf.modified = true;
+
+            if change {
+                self.enter_insert();
+            }
+            return;
+        }
 
         if let Some((sr, sc, er, ec)) = self.buf().syntax.text_object_range(row, col, obj, inside) {
             let (win, buf) = self.active_window_and_buf_mut();
@@ -1344,6 +1470,17 @@ impl Editor {
     pub fn insert_command_text(&mut self, text: &str) {
         self.command.insert_str(self.command_cursor, text);
         self.command_cursor += text.len();
+    }
+
+    /// Returns the configured scroll offset, capped to half the
+    /// active viewport height so it can never trap the cursor.
+    pub fn effective_scroll_offset(&self) -> usize {
+        let offset = self.config.scroll_offset;
+        if offset == 0 {
+            return 0;
+        }
+        let half_viewport = self.active_window().position.height / 2;
+        offset.min(half_viewport)
     }
 }
 

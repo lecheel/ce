@@ -43,6 +43,13 @@ impl Editor {
                 if let Some(ref p) = self.popup.marks {
                     if let Some(entry) = p.entries.get(p.selected).cloned() {
                         self.popup.close();
+
+                        // Special case: `` (ping-pong to last jump position)
+                        if entry.ch == '`' {
+                            self.jump_last_position();
+                            return;
+                        }
+
                         self.active_window_mut().save_jump_position();
 
                         // Switch to the mark's buffer if it's not the current one
@@ -62,12 +69,20 @@ impl Editor {
                     }
                 }
             }
-            KeyCode::Char(c) if c.is_ascii_lowercase() => {
+            // Allow pressing the mark letter directly (e.g. 'a' or '`')
+            KeyCode::Char(c) if c.is_ascii_lowercase() || c == '`' => {
                 // Quick jump by pressing the mark letter directly
                 if let Some(ref p) = self.popup.marks {
                     // Find the first mark matching the letter
                     if let Some(entry) = p.entries.iter().find(|e| e.ch == c).cloned() {
                         self.popup.close();
+
+                        // Special case: `` (ping-pong to last jump position)
+                        if entry.ch == '`' {
+                            self.jump_last_position();
+                            return;
+                        }
+
                         self.active_window_mut().save_jump_position();
 
                         // Switch to the mark's buffer if it's not the current one

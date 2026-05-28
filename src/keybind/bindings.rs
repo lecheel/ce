@@ -205,6 +205,7 @@ pub enum Action {
 
     // Text Objects
     DeleteInsideWord,
+    DeleteWordForward,
     ChangeInsideWord,
     DeleteInsideQuotes,
     ChangeInsideQuotes,
@@ -380,6 +381,25 @@ impl Action {
         }
     }
 
+    /// Returns true if this action is a "jump" motion that should update
+    /// the jump-back register for `` (backtick) ping-pong.
+    pub fn is_jump(&self) -> bool {
+        matches!(
+            self,
+            Action::MoveToFirstLine
+                | Action::MoveToLastLine
+                | Action::PageUp
+                | Action::PageDown
+                | Action::SearchNext
+                | Action::SearchPrev
+                | Action::SearchCurrentWord
+                | Action::MatchBracket
+                | Action::HunkNext
+                | Action::HunkPrev // Note: BookmarkGoto and JumpLastPosition handle their own
+                                   // jump-back saving internally, so they are excluded here.
+        )
+    }
+
     /// Returns true if this action modifies the buffer text.
     /// Used to gate expensive operations like syntax parsing.
     pub fn modifies_buffer(&self) -> bool {
@@ -400,6 +420,7 @@ impl Action {
                 | Action::AcceptCompletion
                 | Action::Paste
                 | Action::DeleteInsideWord
+                | Action::DeleteWordForward
                 | Action::ChangeInsideWord
                 | Action::DeleteInsideQuotes
                 | Action::ChangeInsideQuotes
@@ -514,6 +535,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         (":", Action::EnterCommand),
         // Line operations
         ("d d", Action::DeleteCurrentLine),
+        ("y w", Action::YankCurrentWord),
         ("d $", Action::DeleteToEndOfLine),
         ("y y", Action::YankCurrentLine),
         (">", Action::IndentLine),
@@ -545,6 +567,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("ctrl+w k", Action::FocusWindowUp),
         ("ctrl+w l", Action::FocusWindowRight),
         // Text Objects
+        ("d w", Action::DeleteWordForward),
         ("d i w", Action::DeleteInsideWord),
         ("c i w", Action::ChangeInsideWord),
         ("d i \"", Action::DeleteInsideQuotes),
@@ -931,6 +954,19 @@ fn exits_insert_mode(action: Action) -> bool {
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
 
+    // ── Consume count prefix ─────────────────────────────────────────
+    let count = editor.current_count.max(1);
+    editor.current_count = 0;
+    if count > 1 {
+        editor.clear_status_msg(); // Clear the "3" from the status bar
+    }
+
+    // ── Save jump position for big movements ─────────────────────────
+    // Records where the cursor was *before* the jump so `` can ping-pong back.
+    if action.is_jump() {
+        editor.active_window_mut().save_jump_position();
+    }
+
     let pre_captured_insert: Option<String> =
         if action == Action::ExitMode || action == Action::EnterNormal {
             editor.insert_buffer.clone()
@@ -1116,6 +1152,16 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
         }
 
+        // ── RECORD NON-INSERT MODIFICATIONS FOR DOT REPEAT ─────────────────
+        // When the editor is NOT in an active insert session (no text buffered),
+        // and the action is a non‑insert‑mode editing command that modifies the buffer,
+        // we record it as a repeatable action. This allows the dot ('.') command
+        // to replay deletions, line operations, indentation, etc. without needing
+        // to emulate a full Insert‑mode sequence.
+        //
+        // Actions that *enter* insert mode (e.g., 'i', 'a', 'ciw') are handled
+        // separately by the insert_buffer tracking logic above. This block only
+        // captures atomic editing commands that are executed directly in Normal mode.
         if editor.insert_buffer.is_none() && !enters_insert_mode(action) && modifies_buffer {
             match action {
                 Action::Backspace => {
@@ -1124,7 +1170,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             count: 1,
                             direction: DeleteDirection::Left,
                         },
-                        1,
+                        count,
                     );
                 }
                 Action::DeleteCharForward => {
@@ -1133,17 +1179,20 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             count: 1,
                             direction: DeleteDirection::Right,
                         },
-                        1,
+                        count,
                     );
                 }
                 Action::DeleteCurrentLine => {
-                    editor.record_action(RepeatableAction::DeleteLine, 1);
+                    editor.record_action(RepeatableAction::DeleteLine, count);
                 }
                 Action::DeleteToEndOfLine => {
                     editor.record_action(RepeatableAction::DeleteToLineEnd, 1);
                 }
                 Action::DeleteInsideWord => {
-                    editor.record_action(RepeatableAction::DeleteWordForward, 1);
+                    editor.record_action(RepeatableAction::DeleteWordForward, count);
+                }
+                Action::DeleteWordForward => {
+                    editor.record_action(RepeatableAction::DeleteWordForward, count);
                 }
                 Action::IndentLine => {
                     editor.record_action(
@@ -1151,7 +1200,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             count: 1,
                             outdent: false,
                         },
-                        1,
+                        count,
                     );
                 }
                 Action::OutdentLine => {
@@ -1160,7 +1209,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             count: 1,
                             outdent: true,
                         },
-                        1,
+                        count,
                     );
                 }
                 Action::Paste => {
@@ -1169,7 +1218,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                             register: '"',
                             after_cursor: true,
                         },
-                        1,
+                        count,
                     );
                 }
                 _ => {}
@@ -1527,7 +1576,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveLeft => {
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_left(win, buf);
+                for _ in 0..count {
+                    movement::move_left(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1535,7 +1586,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveRight => {
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_right(win, buf);
+                for _ in 0..count {
+                    movement::move_right(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1543,7 +1596,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveUp => {
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_up(win, buf);
+                for _ in 0..count {
+                    movement::move_up(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1551,7 +1606,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveDown => {
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_down(win, buf);
+                for _ in 0..count {
+                    movement::move_down(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1559,7 +1616,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveWordForward => {
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_word_forward(win, buf);
+                for _ in 0..count {
+                    movement::move_word_forward(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1567,7 +1626,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveWordBackward => {
             {
                 let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_word_backward(win, buf);
+                for _ in 0..count {
+                    movement::move_word_backward(win, buf);
+                }
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1716,10 +1777,19 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // Text Objects
         // ---------------------------------------------------------------
         Action::DeleteInsideWord => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Word, true, false);
+            for _ in 0..count {
+                editor.edit_text_object(crate::ed::syntax::TextObject::Word, true, false);
+            }
+        }
+        Action::DeleteWordForward => {
+            for _ in 0..count {
+                editor.edit_text_object(crate::ed::syntax::TextObject::Word, false, false);
+            }
         }
         Action::ChangeInsideWord => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Word, true, true);
+            for _ in 0..count {
+                editor.edit_text_object(crate::ed::syntax::TextObject::Word, true, true);
+            }
         }
         Action::DeleteInsideQuotes => {
             editor.edit_text_object(crate::ed::syntax::TextObject::Quotes, true, false);
@@ -1930,9 +2000,10 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
                 editor.active_window_mut().visual_anchor = None;
             } else {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                let (row, col) = (win.row, win.col);
-                editing::delete_char_forward(win, buf);
+                for _ in 0..count {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    editing::delete_char_forward(win, buf);
+                }
             }
             editor.comp.on_edit();
         }
@@ -1980,11 +2051,15 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             // If no selection, do nothing (NOP)
         }
         Action::DeleteCurrentLine => {
-            let line_text = editor.line_text(editor.active_row());
-            editor.clipboard = Some(format!("{}\n", line_text));
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::delete_current_line(win, buf);
+            let mut deleted_text = String::new();
+            for _ in 0..count {
+                let line_text = editor.line_text(editor.active_row());
+                deleted_text.push_str(&line_text);
+                deleted_text.push('\n');
+                let (win, buf) = editor.active_window_and_buf_mut();
+                editing::delete_current_line(win, buf);
+            }
+            editor.clipboard = Some(deleted_text);
             editor.comp.on_edit();
         }
         Action::DeleteToEndOfLine => {
@@ -2331,7 +2406,17 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.set_status_msg("Mark: press a letter (a-z)", MessageKind::Info);
         }
         Action::BookmarkGoto => {
-            editor.open_marks_popup();
+            if editor.config.bookmark_popup_goto {
+                // Rich UI mode: open the popup immediately
+                editor.open_marks_popup();
+            } else {
+                // Vim mode: wait for the next key (a-z or `)
+                editor.pending_input = PendingInput::GotoBookmark;
+                editor.set_status_msg(
+                    "Mark: press a letter (a-z) or ` to jump back",
+                    MessageKind::Info,
+                );
+            }
         }
         Action::JumpLastPosition => {
             editor.jump_last_position();
@@ -2764,9 +2849,22 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
                 editor.active_window_mut().visual_anchor = None;
             } else {
-                let line_text = editor.line_text(editor.active_row());
-                editor.clipboard = Some(format!("{}\n", line_text));
-                editor.set_status_msg("Yanked 1 line", MessageKind::Info);
+                let mut yanked_text = String::new();
+                {
+                    let win = editor.active_window();
+                    let buf = editor.buf();
+                    let end_row = (win.row + count).min(buf.len_lines());
+                    for r in win.row..end_row {
+                        yanked_text.push_str(&buf.line_text(r));
+                        yanked_text.push('\n');
+                    }
+                }
+                editor.clipboard = Some(yanked_text);
+                if count > 1 {
+                    editor.set_status_msg(&format!("Yanked {} lines", count), MessageKind::Info);
+                } else {
+                    editor.set_status_msg("Yanked 1 line", MessageKind::Info);
+                }
             }
         }
         Action::YankCurrentWord => {
@@ -2901,7 +2999,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // Vim Dot Repeat
         // ---------------------------------------------------------------
         Action::RepeatLastChange => {
-            editor.repeat_last_action();
+            editor.repeat_last_action(count);
         }
     }
 }
