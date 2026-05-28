@@ -38,7 +38,7 @@ impl Editor {
 
             KeyCode::Backspace | KeyCode::Left => {
                 if let Some(picker) = &mut self.popup.file_picker {
-                    if picker.filter.is_empty() {
+                    if picker.list.filter.is_empty() {
                         picker.go_up();
                     }
                     // else handled by dispatch_list_nav's filter_pop

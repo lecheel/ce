@@ -7,16 +7,16 @@ use crossterm::event::KeyCode;
 
 impl crate::popup::FilterableList for BufferList {
     fn move_up(&mut self) {
-        BufferList::move_up(self)
+        self.list.move_up()
     }
     fn move_down(&mut self) {
-        BufferList::move_down(self)
+        self.list.move_down()
     }
     fn filter_pop(&mut self) {
-        BufferList::filter_pop(self)
+        self.list.filter_pop()
     }
     fn filter_push(&mut self, c: char) {
-        BufferList::filter_push(self, c)
+        self.list.filter_push(c)
     }
 }
 
@@ -31,7 +31,7 @@ impl Editor {
                 true
             }
             KeyCode::Char('q') | KeyCode::Esc => {
-                self.popup.buffer_list = None;
+                self.popup.close();
                 true
             }
             _ => false,
@@ -40,9 +40,9 @@ impl Editor {
 
     fn buffer_list_enter(&mut self) {
         if let Some(ref p) = self.popup.buffer_list {
-            if let Some(entry) = p.entries.get(p.selected) {
+            if let Some(entry) = p.list.entries.get(p.list.selected) {
                 let bid = entry.id;
-                self.popup.buffer_list = None;
+                self.popup.close();
                 self.switch_window_to_buffer(bid);
                 self.set_status_msg("Switched buffer", MessageKind::Info);
             }

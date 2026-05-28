@@ -22,7 +22,7 @@ impl Editor {
 
         let entries = self.mru_manager.get_entries();
         let mut popup = crate::popup::mru::MruPopup::new(entries, repo_root, repo_only);
-        popup.apply_filter();
+        popup.list.apply_filter();
         self.popup.mru = Some(popup);
     }
 
@@ -39,7 +39,7 @@ impl Editor {
 
         match key.code {
             KeyCode::Esc => {
-                self.popup.mru = None;
+                self.popup.close();
             }
             KeyCode::Home => {
                 if let Some(ref mut mru) = self.popup.mru {
@@ -57,7 +57,7 @@ impl Editor {
                 }
             }
             KeyCode::Enter => {
-                self.popup.mru = None;
+                self.popup.close();
                 if let Some(entry) = selected_entry {
                     let path_str = entry.path.to_string_lossy().to_string();
                     self.open_buffer(Some(path_str));

@@ -17,7 +17,7 @@ impl Editor {
     pub fn handle_guide_popup_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.popup.guide = None;
+                self.popup.close();
             }
             KeyCode::Up => {
                 if let Some(ref mut p) = self.popup.guide {
@@ -36,7 +36,7 @@ impl Editor {
                     .as_ref()
                     .and_then(|p| p.selected_entry())
                     .cloned();
-                self.popup.guide = None;
+                self.popup.close();
 
                 if let Some(entry) = entry_data {
                     let target_path = std::path::PathBuf::from(&entry.file);

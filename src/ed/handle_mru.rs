@@ -44,7 +44,7 @@ impl Editor {
 
         match key.code {
             KeyCode::Esc => {
-                self.popup.mru = None;
+                self.popup.close();
             }
 
             KeyCode::Up => {
@@ -82,7 +82,7 @@ impl Editor {
 
             // Selects and opens the file
             KeyCode::Enter => {
-                self.popup.mru = None;
+                self.popup.close();
                 if let Some(entry) = selected_entry {
                     let path_str = entry.path.to_string_lossy().to_string();
                     self.open_buffer(Some(path_str));

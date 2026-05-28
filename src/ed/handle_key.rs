@@ -294,7 +294,7 @@ impl Editor {
     pub fn handle_function_list_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.popup.function_list = None;
+                self.popup.close();
             }
             KeyCode::Up => {
                 if let Some(ref mut p) = self.popup.function_list {
@@ -315,7 +315,7 @@ impl Editor {
                 };
 
                 // Close the popup
-                self.popup.function_list = None;
+                self.popup.close();
 
                 if let Some(line_idx) = target_line {
                     let (win, buf) = self.active_window_and_buf_mut();

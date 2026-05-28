@@ -1053,7 +1053,7 @@ impl Editor {
     pub fn handle_git_hunk_popup_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.popup.git_hunk = None;
+                self.popup.close();
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref mut p) = self.popup.git_hunk {
@@ -1085,7 +1085,7 @@ impl Editor {
                         self.set_status_msg("No added/modified lines to yank", MessageKind::Info);
                     }
                 }
-                self.popup.git_hunk = None;
+                self.popup.close();
             }
             KeyCode::Char('-') => {
                 // Yank the deleted lines (those starting with '-')
@@ -1108,7 +1108,7 @@ impl Editor {
                         self.set_status_msg("No deleted lines to yank", MessageKind::Info);
                     }
                 }
-                self.popup.git_hunk = None;
+                self.popup.close();
             }
             _ => {}
         }

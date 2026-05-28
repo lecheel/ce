@@ -1,6 +1,6 @@
 [package]
 name = "ce"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Mini vim buffer editor with Codeium AI ghost-text completions and multi-buffer support"
 

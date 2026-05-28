@@ -2,10 +2,23 @@
 //! Function list popup overlay for quick navigation of functions/methods in a buffer.
 
 use crate::ed::buffer::Buffer;
+use crate::popup::filtered_list::{EntryFilter, FilteredList};
 use crate::popup::Scrollable;
 use ropey::Rope;
-use std::collections::HashMap;
 
+impl EntryFilter for FunctionEntry {
+    fn match_query(&self, query: &str) -> Option<Vec<usize>> {
+        let q = query.to_lowercase();
+        if self.name.to_lowercase().contains(&q)
+            || self.kind.to_lowercase().contains(&q)
+            || self.signature.to_lowercase().contains(&q)
+        {
+            Some(Vec::new()) // matched, no highlight indices
+        } else {
+            None
+        }
+    }
+}
 /// A single function/method entry found in the buffer.
 #[derive(Debug, Clone)]
 pub struct FunctionEntry {
@@ -41,151 +54,84 @@ impl FunctionEntry {
     }
 }
 
-/// Popup that lists all functions/methods in the current buffer for quick navigation.
 #[derive(Debug, Clone)]
 pub struct FunctionListPopup {
-    pub all_entries: Vec<FunctionEntry>,
-    pub filtered: Vec<usize>,
-    pub selected: usize,
-    pub scroll: usize,
-    pub filter: String,
+    pub list: FilteredList<FunctionEntry>,
 }
 
 impl FunctionListPopup {
     pub fn new(mut entries: Vec<FunctionEntry>) -> Self {
-        // Count how many times each function name appears
+        use std::collections::HashMap;
         let mut counts = HashMap::new();
         for entry in &entries {
             *counts.entry(entry.name.clone()).or_insert(0) += 1;
         }
-
-        // Mark entries as duplicates if their name appears more than once
         for entry in &mut entries {
             if let Some(&count) = counts.get(&entry.name) {
                 entry.is_duplicate = count > 1;
             }
         }
-
-        let filtered: Vec<usize> = (0..entries.len()).collect();
         Self {
-            all_entries: entries,
-            filtered,
-            selected: 0,
-            scroll: 0,
-            filter: String::new(),
+            list: FilteredList::new(entries),
         }
     }
 
     pub fn selected_entry(&self) -> Option<&FunctionEntry> {
-        self.filtered
-            .get(self.selected)
-            .and_then(|&i| self.all_entries.get(i))
-    }
-
-    fn apply_filter(&mut self) {
-        self.filtered.clear();
-        let query = self.filter.to_lowercase();
-        for (i, entry) in self.all_entries.iter().enumerate() {
-            if query.is_empty()
-                || entry.name.to_lowercase().contains(&query)
-                || entry.kind.to_lowercase().contains(&query)
-                || entry.signature.to_lowercase().contains(&query)
-            {
-                self.filtered.push(i);
-            }
-        }
-        if self.selected >= self.filtered.len() && !self.filtered.is_empty() {
-            self.selected = self.filtered.len() - 1;
-        }
-        self.clamp_scroll(20);
+        self.list.selected_entry()
     }
 
     pub fn filter_push(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-        self.scroll = 0;
-        self.apply_filter();
+        self.list.filter_push(c);
     }
-
     pub fn filter_pop(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
-        self.scroll = 0;
-        self.apply_filter();
+        self.list.filter_pop();
     }
-
     pub fn filter_clear(&mut self) {
-        self.filter.clear();
-        self.selected = 0;
-        self.scroll = 0;
-        self.apply_filter();
+        self.list.filter_clear();
     }
-
     pub fn filter_is_empty(&self) -> bool {
-        self.filter.is_empty()
+        self.list.filter_is_empty()
     }
-
-    pub fn clamp_scroll(&mut self, visible_height: usize) {
-        if self.scroll > self.selected {
-            self.scroll = self.selected;
-        }
-        if self.selected >= self.scroll + visible_height {
-            self.scroll = self.selected - visible_height + 1;
-        }
-    }
-
     pub fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-            self.clamp_scroll(20);
-        }
+        self.list.move_up();
     }
-
     pub fn move_down(&mut self) {
-        if self.selected + 1 < self.filtered.len() {
-            self.selected += 1;
-            self.clamp_scroll(20);
-        }
+        self.list.move_down();
     }
 }
 
 impl Scrollable for FunctionListPopup {
     fn selected(&self) -> usize {
-        self.selected
+        self.list.selected()
     }
-
     fn selected_mut(&mut self) -> &mut usize {
-        &mut self.selected
+        self.list.selected_mut()
     }
-
     fn scroll_mut(&mut self) -> &mut usize {
-        &mut self.scroll
+        self.list.scroll_mut()
     }
-
     fn len(&self) -> usize {
-        self.filtered.len()
+        self.list.len()
     }
-
     fn visible_rows(&self) -> usize {
-        20
+        self.list.visible_rows()
     }
 }
 
 /// Calculate optimal width based on content (but respect max_width)
 pub fn calculate_popup_width(popup: &FunctionListPopup, max_width: usize) -> usize {
-    if popup.filtered.is_empty() {
-        return 80; // reasonable default
+    if popup.list.filtered.is_empty() {
+        return 80;
     }
 
     let mut max_kind_len = 0;
     let mut max_name_len = 0;
-    for &idx in popup.filtered.iter() {
-        if let Some(entry) = popup.all_entries.get(idx) {
+    for &idx in popup.list.filtered.iter() {
+        if let Some(entry) = popup.list.entries.get(idx) {
             max_kind_len = max_kind_len.max(entry.kind.len().min(20));
             max_name_len = max_name_len.max(entry.name.len().min(50));
         }
     }
-    // width = kind(20) + 2 spaces + name(50) + 2 spaces + line number (~10) + 2 margins
     let width = 20 + 2 + 50 + 2 + 10 + 2 + 30;
     width.min(max_width)
 }

@@ -11,7 +11,7 @@ impl Editor {
 
         match key.code {
             KeyCode::Esc => {
-                self.popup.function_list = None;
+                self.popup.close();
             }
 
             KeyCode::Enter => {
@@ -20,7 +20,7 @@ impl Editor {
                     .function_list
                     .as_ref()
                     .and_then(|p| p.selected_entry().map(|e| e.line));
-                self.popup.function_list = None;
+                self.popup.close();
 
                 if let Some(line_idx) = target_line {
                     let (win, buf) = self.active_window_and_buf_mut();
