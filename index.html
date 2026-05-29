@@ -401,12 +401,14 @@
       <ul>
         <li><code>buffer.rs</code> — Rope-backed Buffer, UndoSnapshot, file I/O, rustfmt on .rs save, active bookmarks, and Git change states</li>
         <li><code>window.rs</code> — Independent viewports, <code>desired_col</code> (curswant), LayoutNode binary tree, WindowPosition, <code>get_selection_range()</code> selection calculations</li>
-        <li><code>editor.rs</code> — Request versioning, history I/O, buffer word cache refresh, QuitPrompt, Brief/Vim mode state, and <code>get_word_under_cursor()</code> helper routines</li>
+        <li><code>editor.rs</code> — Request versioning, history I/O, buffer word cache refresh, QuitPrompt, Brief/Vim mode state, <code>Ctrl+R</code> register mode intercept, and precise undo boundary tracking</li>
         <li><code>movement.rs</code> — hjkl, word, line, page (viewport-aware) movement free-functions</li>
-        <li><code>editing.rs</code> — Auto-indent Enter, soft-tab, indent/outdent, paste helpers, desired_col sync, and fine-grained AST updates</li>
-        <li><code>repeat.rs</code> — Vim dot repeat (<code>.</code>) engine leveraging structured <code>RepeatableAction</code> payloads and automated scale multipliers</li>
+        <li><code>editing.rs</code> — Auto-indent Enter, soft-tab, indent/outdent, paste helpers, desired_col sync, multi-byte safe newline handling, and fine-grained AST updates</li>
+        <li><code>repeat.rs</code> — Vim dot repeat (<code>.</code>) engine leveraging structured <code>RepeatableAction</code> payloads, intelligent insert session grouping, and automated scale multipliers</li>
         <li><code>gutter.rs</code> — Absolute/relative line numbers, colored Git diff gutter signs, visual bookmarks</li>
-        <li><code>syntax.rs</code> — Tree-sitter integration, scope detection, highlighting, and quote/brace/parameter text objects</li>
+        <li><code>syntax.rs</code> — Tree-sitter integration, scope detection, Catppuccin Mocha highlighting, text objects, and AST-driven bracket matching (<code>%</code>)</li>
+        <li><code>tag.rs</code> — Ctag/gentag integration manager for definition lookups, persistent caching, and tag stack back-navigation</li>
+        <li><code>handle/subst.rs</code> — Interactive substitution (<code>:%s/foo/bar/gc</code>) with prefix search, character boundary safety, and multi-candidate confirmations</li>
         <li><code>ext.rs</code> — EditorExt trait (plugin hook stubs)</li>
       </ul>
     </div>
@@ -415,7 +417,8 @@
       <ul>
         <li><code>state.rs</code> — CompletionMachine: ghost-text, cycling, 400 ms throttle, request IDs</li>
         <li><code>provider.rs</code> — <code>CompletionProvider</code> async trait (backend-agnostic)</li>
-        <li>Contextual guards: blocks mid-word, next-to-<code>)</code>, and before-<code>)</code> positions</li>
+        <li>Contextual guards: blocks mid-word, next-to-<code>)</code>, before-<code>)</code>, and <strong>minimum 4-char prefix length</strong></li>
+        <li>Stale response rejection: <code>on_edit()</code> invalidates in-flight requests; <code>on_response()</code> re-validates cursor position</li>
         <li><code>find_prefix_overlap()</code> prevents character duplication on accept</li>
       </ul>
     </div>
@@ -430,10 +433,10 @@
     <div class="arch-box mod-render">
       <div class="box-title"><span class="dot"></span> render/ — UI</div>
       <ul>
-        <li><code>buffer_view.rs</code> — Render active windows with styled line display utilizing <code>gutter.rs</code> for dynamic sidebar layout, visual selection overlay, and on-screen query highlights</li>
+        <li><code>buffer_view.rs</code> — Render active windows with styled line display utilizing <code>gutter.rs</code> for dynamic sidebar layout, visual selection overlay, indent guides, and on-screen query highlights</li>
         <li><code>tabs.rs</code> — Multi-buffer tab bar (hidden when single buffer)</li>
         <li><code>statusbar.rs</code> — Mode pill, filename with Fish-style contraction, <code>[+]</code>, row:col, lang, <code>Struct::fn()</code> scope, Codeium spinner/OK/OFF</li>
-        <li><code>command_line.rs</code> — <code>:</code> command + top-5 candidate preview OR status message. Layout: very bottom line.</li>
+        <li><code>command_line.rs</code> — <code>:</code> command + top-5 candidate preview OR status message. Layout: very bottom line. Supports visual <code>^</code> rendering for <code>Ctrl+R</code> register insertions.</li>
         <li><code>helpers.rs</code> — CJK-aware char width, digit count, language display names, and Fish-style path contracting algorithm</li>
       </ul>
     </div>
@@ -442,8 +445,9 @@
     <div class="arch-box mod-key">
       <div class="box-title"><span class="dot"></span> keybind/ — Keybindings</div>
       <ul>
-        <li><code>actions.rs</code> — EditorAction enum (pure data, no UI deps)</li>
-        <li><code>bindings.rs</code> — Action enum, format_key, resolve_sequence, resolve_single_key, Brief Alt-key layer, and bracket normalizer</li>
+        <li><code>bindings.rs</code> — Action enum with <code>strum</code> derive macros for auto-generated <code>snake_case</code> names and declarative aliases. Format_key, resolve_sequence, resolve_single_key.</li>
+        <li><code>palette_defaults.rs</code> — Compile-time default descriptions for the command palette.</li>
+        <li><code>desc_override.rs</code> — Load user overrides from <code>~/.config/ce/desc.json</code> via <code>:gen_desc</code>.</li>
         <li>Leader Key dynamic multi-key sequences with mapleader override support</li>
         <li>Unified Namespaced configuration: <code>keybindings.normal</code>, <code>keybindings.insert</code>, <code>keybindings.visual</code>, <code>keybindings.global</code></li>
         <li>Text Objects: <code>diw</code>, <code>ci"</code>, <code>di(</code>, <code>ci{</code>, etc.</li>
@@ -460,9 +464,10 @@
     <div class="arch-box mod-repl">
       <div class="box-title"><span class="dot"></span> repl/ — Command REPL</div>
       <ul>
-        <li><code>command.rs</code> — :q :q! :w :wq :x :e :new :ls :bn :bp :bd :b N :config :vocab :vim :brief :sp :vs :on :gs :stash</li>
+        <li><code>command.rs</code> — :q :q! :w :wq :x :e :new :ls :bn :bp :bd :b N :config :vocab :vim :brief :sp :vs :on :gs :stash :tig :gen_desc :mru :mru! :command_palette :scankey :guide :checkhealth :diffthis :gd :sort :%s :tag :retag</li>
         <li>Tab path completion with <code>./</code> and <code>../</code> relative prefix preservation</li>
         <li>Command name prefix completion via <code>complete_command()</code>, integrated with persistent history search</li>
+        <li>Visual range execution support (e.g., <code>:'<,'>s/foo/bar/g</code>, <code>:'<,'>sort</code>)</li>
       </ul>
     </div>
     <div class="arch-box mod-popup">
@@ -471,6 +476,9 @@
         <li><code>mod.rs</code> — PopupState, PopupItem, PopupKind (Completion/CommandPalette/Hover/Custom)</li>
         <li>Centered floating config dashboard — runtime Serde JSON bool reflection + Space toggle</li>
         <li>Bottom-right Which-Key hint with compact modifier notation (s+, c+, a+), synced with 30-char min width and unified theme colors</li>
+        <li>Command Palette with <code>desc.json</code> user overrides, fuzzy matching, and <code>:gen_desc</code> auto-generation</li>
+        <li>Advanced Marks navigation popup with fuzzy search anchors for instant filtering/jumping</li>
+        <li>Tag Candidates popup for disambiguating multiple matches on <code>C-]</code></li>
       </ul>
     </div>
 
@@ -479,6 +487,7 @@
       <div class="box-title"><span class="dot"></span> git/ — Git State Machinery</div>
       <ul>
         <li><code>status.rs</code> — Git status screen parser. Retains raw 2-character columns (prevents whitespace-trimming bugs) to map Stage Changes, Unstage Changes, Untracked, Branches, and Stashes.</li>
+        <li><code>log.rs</code> — Configurable tig-like viewer. Supports limits (<code>:tig</code> defaults to 10, <code>:tig 0</code> for all, <code>:tig 20</code> for N).</li>
         <li><code>PendingGitAction</code> — Safety intercept dialog state-machine. Generates warning prompts on-screen for checkout and pop actions.</li>
         <li>Automatic file buffer reloading, active syntax parsing, gutter diff updates, and window cursor clamping upon successful branch checkouts.</li>
       </ul>
@@ -488,6 +497,26 @@
 
 <!-- KNOWN ISSUES / FIXES -->
 <h2><span class="icon">🐛</span> Known Issues &amp; Fixes</h2>
+
+<div class="callout fixed">
+  <strong>Fixed — 1-char ghost text / Stale Async Completion Bug</strong><br>
+  Pressing backspace quickly after typing could leave 1-character ghost text because stale in-flight responses were accepted. Fixed by incrementing <code>request_id</code> on every edit (invalidating old requests) and re-checking the 4-char minimum prefix context inside <code>on_response()</code> before rendering.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Brief Mode Undo Grouping Gaps</strong><br>
+  In Brief mode, undoing a line deletion would also undo all previous typing. Fixed by implementing an undo boundary state machine: continuous typing (InsertChar, Backspace, Newline) merges into a single undo block, while discrete commands (DeleteCurrentLine, Paste, ToggleComment) push a new snapshot. The recording engine properly flushes the insert buffer when interrupted by destructive actions.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Ctrl+C / Ctrl+X cancelling Brief selection instead of acting on it</strong><br>
+  Pressing copy/cut while text was selected via <code>Alt+L</code> cleared the selection instead of copying/cutting it. Fixed by adding <code>DeleteCurrentLine</code> and <code>YankCurrentLine</code> to the selection preservation list, and updating their execution logic to detect the visual anchor and act only on the highlighted text.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Match Bracket (%) breaking Brief selection</strong><br>
+  Pressing <code>%</code> to jump to a matching brace cancelled the visual anchor. Fixed by adding <code>Action::MatchBracket</code> to the Brief selection preservation list, allowing the cursor to jump to the matching brace while keeping the initial anchor, effectively selecting the block contents.
+</div>
 
 <div class="callout fixed">
   <strong>Fixed — Git Status parsing column shifts</strong><br>
@@ -500,28 +529,8 @@
 </div>
 
 <div class="callout fixed">
-  <strong>Fixed — Esc key unresponsive in Visual modes</strong><br>
-  In <code>bindings.rs</code>, <code>Action::ExitMode</code> lacked match arms for <code>Mode::Visual</code> and <code>Mode::VisualLine</code>, so pressing <code>Esc</code> in Visual modes did nothing. Fixed by adding a branch to transition back to Normal mode and clear the selection anchor.
-</div>
-
-<div class="callout fixed">
   <strong>Fixed — Custom Leader immediately executes unique actions (AutoAction bug)</strong><br>
   In <code>keybind/bindings.rs</code>, if only one keybinding matched the pressed leader key prefix (e.g., <code>, q q</code>), <code>resolve_sequence()</code> returned <code>AutoAction</code>, instantly firing the command on the first keypress. Fixed by returning <code>ResolveResult::Pending</code> on all partial prefix matches, allowing the user to complete their custom sequences.
-</div>
-
-<div class="callout fixed">
-  <strong>Fixed — Double mutable borrow compiler conflict on Undo</strong><br>
-  In <code>keybind/bindings.rs</code>, attempting to simultaneously mutably borrow the buffer (to pop undo states) and the active window (to restore cursor coordinates) caused compiler errors. Fixed by leveraging the editor's disjoint borrow helper <code>active_window_and_buf_mut()</code>.
-</div>
-
-<div class="callout fixed">
-  <strong>Fixed — Codeium ghost text never shows after first request</strong><br>
-  In <code>comp/state.rs</code>, <code>set_completions()</code> and <code>cancel_pending()</code> previously did not clear <code>last_checked_pos</code>. After the first request fired for position <code>(row, col)</code>, <code>last_checked_pos</code> was permanently set, causing <code>maybe_request()</code> to return <code>None</code> for all future ticks at the same cursor position. Fixed by ensuring position state is correctly cleared upon receiving a response or cancellation.
-</div>
-
-<div class="callout fixed">
-  <strong>Fixed — Inline [1/8] overwriting ghost text</strong><br>
-  The completion indicator <code>[idx/total]</code> rendered inline on the cursor line was overwriting the end of ghost text. It has been removed from <code>buffer_view.rs</code>. Completion counts and candidates are now exclusively shown in the bottom command line area, leaving ghost text clean and uninterrupted.
 </div>
 
 <div class="callout fixed">
@@ -530,18 +539,18 @@
 </div>
 
 <div class="callout fixed">
-  <strong>Fixed — Syntax highlighting not applying</strong><br>
-  <code>Buffer::new()</code> and <code>open_file()</code> never called <code>parse_syntax()</code>, so the syntax tree was always <code>None</code> on startup. Additionally, the catch-all arm <code>Action::InsertChar(_) | Backspace | ... => parse_syntax()</code> in <code>execute_action</code> was unreachable because those variants were already matched by earlier arms. Fixed by adding <code>parse_syntax()</code> calls on buffer load and moving the parse call to the end of <code>execute_action</code>.
-</div>
-
-<div class="callout fixed">
   <strong>Fixed — Command Line and Status Bar swapped</strong><br>
   The command/message line and the status bar positions were inverted compared to standard Vim layout. The command/message line now correctly sits at the very bottom of the screen, with the status bar immediately above it.
 </div>
 
 <div class="callout fixed">
-  <strong>Fixed — Which-Key and Config popups not rendering</strong><br>
-  The <code>draw_config_popup</code> and <code>draw_key_sequence_hint</code> functions existed but were never called from the main <code>render::draw()</code> function. They have been added to the render pipeline.
+  <strong>Fixed — Multi-byte character (Emoji) corruption on Enter</strong><br>
+  Pressing Enter in the middle or end of a line containing emojis (like 🔴) corrupted the buffer, and pressing Enter at the end of a line merged the next line into it. Fixed by using character-based indexing (<code>.chars()</code>) instead of byte-based slicing during line splitting, and explicitly preserving the original trailing newline character during Rope manipulation.
+</div>
+
+<div class="callout fixed">
+  <strong>Fixed — Visual selection dismissed when entering Command mode</strong><br>
+  Pressing <code>:</code> from Visual mode to run <code>:'<,'>s/foo/bar/g</code> immediately cleared the visual highlight. Fixed by saving and restoring the <code>visual_anchor</code> across the mode transition, and updating the renderer to keep displaying the visual highlight while in Command mode if an anchor exists.
 </div>
 
 <!-- EVENT FLOW -->
@@ -576,8 +585,7 @@
     <div class="flow-node" style="border-color:var(--accent);">render::<br>draw()</div>
   </div>
   <p class="flow-label" style="margin-top:.8rem;">
-    KeyPress-only filter applied at input thread. Stale completions discarded by Request ID versioning.
-    Local completions read pre-cached <code>buffer_words</code> + <code>vocab_words</code> + active-line delta scan — zero rope I/O on each keystroke. Ghost text only renders in Insert and Brief modes.
+    KeyPress-only filter applied at input thread. Stale completions discarded by Request ID versioning. Context guards enforce 4-char minimum prefix. Local completions read pre-cached <code>buffer_words</code> + <code>vocab_words</code> + active-line delta scan — zero rope I/O on each keystroke. Ghost text only renders in Insert and Brief modes.
   </p>
 </div>
 
@@ -587,13 +595,19 @@
 <div class="feature-grid">
   <div class="feature-card">
     <h4>⌨️ Vim-like Modal Editing</h4>
-    <p>Normal (hjkl, dd, yy, u, x, gg, G), Insert (direct typing, soft-tabs, auto-indent on Enter), Visual/Visual-Line (styled overlays with hardware cursor tracking), Command (<code>:</code> prefix), Brief (always-insert). Transitions: i/I/a/A/o/O enter insert, <code>gi</code> enters Brief, <code>v</code>/<code>V</code> enter Visual selections, Esc returns to Normal with cursor-left adjustment.</p>
+    <p>Normal (hjkl, dd, yy, u, x, gg, G), Insert (direct typing, soft-tabs, auto-indent on Enter), Visual/Visual-Line/Visual-Block (styled overlays with hardware cursor tracking), Command (<code>:</code> prefix), Brief (always-insert). Transitions: i/I/a/A/o/O enter insert, <code>gi</code> enters Brief, <code>v</code>/<code>V</code>/<code>Ctrl+v</code> enter Visual selections, Esc returns to Normal with cursor-left adjustment. Unified bookmark system: <code>m</code> sets named marks (<code>a-z</code>), <code>`</code> opens a navigable marks popup. <code>%</code> jumps to matching bracket using Tree-sitter AST.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>📐 Visual Block Mode &amp; Column Editing</h4>
+    <p><code>Ctrl+v</code> enters rectangular visual selection. <code>I</code> inserts at the start of the block on every selected line (column insert). <code>A</code> appends after the block on every selected line. After typing, Esc replicates the typed text to all rows of the block. Supports yank (<code>y</code>), delete (<code>d</code>/<code>x</code>), and change (<code>c</code>) for rectangular regions.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
   <div class="feature-card">
     <h4>🚀 Brief Mode (Always-Insert)</h4>
-    <p>An alternative editing mode where all printable keys insert text, and commands are accessed via <code>Alt</code> shortcuts (e.g., <code>Alt+s</code> save, <code>Alt+d</code> delete line, <code>Alt+u</code> undo, <code>Alt+x</code> exit to Vim). <code>F9</code> opens the command line. Esc clears ghost text but stays in Brief. Set <code>"init_mode": "brief"</code> in config to start in Brief mode. Switch modes with <code>:vim</code> and <code>:brief</code>.</p>
+    <p>An alternative editing mode where all printable keys insert text, and commands are accessed via <code>Alt</code> and <code>Ctrl</code> shortcuts. Features inline visual selection via <code>Alt+L</code> (extend with Shift+Nav), <code>Ctrl+C</code>/<code>Ctrl+X</code>/<code>Ctrl+V</code> for copy/cut/paste (acts on selection if active, else NOP for C/X, normal paste for V), <code>Alt+Y</code> for yanking the current word (or active selection), <code>Alt+M</code> for auto-incrementing named bookmarks, and <code>Alt+J</code> for mark jumps. <code>Alt+G</code> or <code>F9</code> opens the command line. Esc clears ghost text but stays in Brief. Set <code>"init_mode": "brief"</code> in config to start in Brief mode. Switch modes with <code>:vim</code> and <code>:brief</code>. Intelligent undo grouping separates continuous typing from discrete destructive commands.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
@@ -604,14 +618,14 @@
   </div>
 
   <div class="feature-card">
-    <h4>📄 Multi-Buffer Editing</h4>
-    <p>Open multiple files as separate buffers with tab bar (hidden for single buffer, <code>[+]</code> modified flag). Commands: <code>:e &lt;path&gt;</code>, <code>:bn</code>/<code>:bp</code>, <code>:bd</code>, <code>:ls</code>, <code>:b N</code>. <code>refresh_buffer_words()</code> is triggered on every open/switch/close for accurate local autocomplete.</p>
+    <h4>📄 Multi-Buffer Editing &amp; MRU</h4>
+    <p>Open multiple files as separate buffers with tab bar (hidden for single buffer, <code>[+]</code> modified flag). Commands: <code>:e &lt;path&gt;</code>, <code>:bn</code>/<code>:bp</code>, <code>:bd</code>, <code>:ls</code>, <code>:b N</code>. <code>:mru</code> opens a fuzzy-searchable recent files popup (defaults to repo-scoped files; <code>:mru!</code> or <code>:mruall</code> shows global history). <code>refresh_buffer_words()</code> is triggered on every open/switch/close for accurate local autocomplete.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
   <div class="feature-card">
     <h4>🤖 AI Ghost-Text Completions (Codeium)</h4>
-    <p>Completions from local Codeium LSP via gRPC-JSON gateway. Inline ghost text with prefix-overlap dedup and suffix-overlap trimming (no inline [1/8] clutter). Tab or Right-Arrow accepts; Ctrl+N/P or Up/Down (when ghost active) cycles candidates. Contextual guards block mid-word, <code>)</code>-adjacent triggers. Works reliably in both Insert and Brief modes.</p>
+    <p>Completions from local Codeium LSP via gRPC-JSON gateway. Inline ghost text with prefix-overlap dedup and suffix-overlap trimming (no inline [1/8] clutter). Tab or Right-Arrow accepts; Ctrl+N/P or Up/Down (when ghost active) cycles candidates. Contextual guards block mid-word, <code>)</code>-adjacent triggers, and enforce a 4-character minimum prefix. Stale requests are strictly discarded by ID. Works reliably in both Insert and Brief modes.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
@@ -623,13 +637,31 @@
 
   <div class="feature-card">
     <h4>🌳 Tree-sitter Syntax &amp; Text Objects</h4>
-    <p>Incremental Tree-sitter parsing for Rust, Python, JS/TS. Syntax-aware highlighting with correct "most specific node wins" logic. Text objects: <code>diw/ciw</code>, <code>di"/ci"</code>, <code>di(/ci(</code>, <code>di{/ci{</code>, <code>di[/ci]</code>, <code>dif/cif</code>. Contextual scope (e.g., <code>Struct::fn</code> or <code>Enum</code>) displayed dynamically on the status bar right.</p>
+    <p>Incremental Tree-sitter parsing for Rust, Python, JS/TS. Syntax-aware highlighting (Catppuccin Mocha palette) with correct "most specific node wins" logic. Text objects: <code>diw/ciw</code>, <code>di"/ci"</code>, <code>di(/ci(</code>, <code>di{/ci{</code>, <code>di[/ci]</code>, <code>dif/cif</code>. AST-driven bracket matching via <code>%</code> (skips brackets in strings/comments). Contextual scope (e.g., <code>Struct::fn</code> or <code>Enum</code>) displayed dynamically on the status bar right.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
   <div class="feature-card">
-    <h4>🔍 Vim-style Search &amp; Highlighting</h4>
-    <p>Forward search with <code>/</code> and navigation via <code>n</code>/<code>N</code> with Vim-compliant wrap-around behavior (controlled by <code>search_wrap_enabled</code> in config). Pressing <code>*</code> grabs the word under/after the cursor and jumps directly to its next occurrence. Matches are highlighted on-screen with high-contrast yellow background.</p>
+    <h4>🔍 Vim-style Search &amp; Substitution</h4>
+    <p>Forward search with <code>/</code> and navigation via <code>n</code>/<code>N</code> with Vim-compliant wrap-around behavior (controlled by <code>search_wrap_enabled</code> in config). Pressing <code>*</code> grabs the word under/after the cursor and jumps directly to its next occurrence. Matches are highlighted on-screen with high-contrast yellow background. <code>:noh</code> clears highlights. Interactive substitution via <code>:%s/old/new/gc</code> (with <code>y/n/a/q</code> prompt), visual range support <code>:'<,'>s/old/new/g</code>, and single-line <code>:s/old/new/</code>. Character-boundary safe (handles multi-byte chars/emojis correctly).</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🏷️ Tag Navigation (Ctags)</h4>
+    <p>Jump to symbol definitions using <code>C-]</code> (tag under cursor) or <code>:tag &lt;name&gt;</code>. If multiple matches exist, a bottom-up popup lets you select the exact target. <code>C-t</code> jumps back through the tag stack. <code>:retag</code> regenerates the tags file using <code>gentag</code> or <code>ctags -R</code>. Tag files are cached with stale-modification-time checks for performance.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🔢 Line Sorting</h4>
+    <p>Sort lines via <code>:sort</code> (whole file) or <code>:'<,'>sort</code> (visual selection). Supports reverse (<code>:sort!</code> or <code>:sort r</code>), unique (<code>:sort u</code>), and case-insensitive (<code>:sort i</code>) flags. Correctly replaces the exact line range in the Rope without duplicating trailing newlines.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>🔖 Unified Marks &amp; Advanced Bookmarks</h4>
+    <p>Unified mark storage bridging Vim and Brief. <code>m</code> (Vim) and <code>Alt+M</code> (Brief) automatically assign the next available letter (<code>a-z</code>) and toggle off if the line is already marked. <code>`</code> (Vim) and <code>Alt+J</code> (Brief) open a searchable marks popup listing all marks across open buffers. Type to fuzzy-filter by filename or mark character, acting as a search anchor to jump instantly without scrolling. Visual gutter icons (★) sync instantly with mark state.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
@@ -640,26 +672,32 @@
   </div>
 
   <div class="feature-card">
-    <h4>🐙 Interactive Git Workspace Safety</h4>
-    <p>Dedicated <code>*git-status*</code> buffer. Renders staged changes (no-symbol green), unstaged changes (bracketed yellow), untracked files (red), branch history (active starred), and the last 10 stashes. Protected by a prompt-level safety flow (<code>y/n</code>) for switches and pops.</p>
+    <h4>🐙 Interactive Git Workspace &amp; Log</h4>
+    <p>Dedicated <code>*git-status*</code> buffer. Renders staged changes (no-symbol green), unstaged changes (bracketed yellow), untracked files (red), branch history (active starred), and the last 10 stashes. Protected by a prompt-level safety flow (<code>y/n</code>) for switches and pops. <code>:tig</code> opens a tig-like log viewer (defaults to 10 commits, <code>:tig 0</code> shows all, <code>:tig 20</code> limits to N).</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
   <div class="feature-card">
     <h4>🐙 Git Gutter Diff &amp; Gutter Display</h4>
-    <p>A unified gutter rendering system with support for absolute or hybrid relative line numbers, colored Git diff columns (green ┃ for additions, yellow ┃ for edits, red ┵ for removals), and visual bookmarks (represented by purple stars ★), all togglable dynamically with custom shortcuts.</p>
+    <p>A unified gutter rendering system with support for absolute or hybrid relative line numbers, colored Git diff columns (green ┃ for additions, yellow ┃ for edits, red ┵ for removals), visual bookmarks (represented by purple stars ★), and indentation guidelines (│), all togglable dynamically with custom shortcuts.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
   <div class="feature-card">
     <h4>↩️ Vim Dot Repeat (<code>.</code>)</h4>
-    <p>A structural, state-preserving repeat mechanism. Using a <code>RepeatAction</code> enum, the editor tracks and replicates standalone normal mode modifications (e.g., <code>dd</code>, <code>x</code>), insert typing sessions (including multi-line edits), and complex text object changes (like <code>ciw</code>).</p>
+    <p>A structural, state-preserving repeat mechanism. Using a <code>RepeatAction</code> enum, the editor tracks and replicates standalone normal mode modifications (e.g., <code>dd</code>, <code>x</code>), insert typing sessions (including multi-line edits), and complex text object changes (like <code>ciw</code>). Properly flushes insert buffers when interrupted by destructive actions.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
   <div class="feature-card">
-    <h4>📋 Which-Key Popup</h4>
-    <p>Bottom-right floating popup shows downstream keys available for the current pending sequence. Compact modifier notation (shift+ → s+, ctrl+ → c+, alt+ → a+). Scans both default actions and user config keybindings. Toggled via <code>space t</code> or <code>:config</code> → popup_enabled.</p>
+    <h4>📋 Command Palette &amp; Overridable Descriptions</h4>
+    <p>VSCode-style command palette (<code>F2</code> or <code>Ctrl+Alt+P</code>) with fuzzy search. Action names are auto-derived from <code>strum</code> snake_case. Compile-time descriptions can be fully overridden via <code>~/.config/ce/desc.json</code>. Use <code>:gen_desc</code> to auto-generate a fully populated default file to edit.</p>
+    <span class="tag tag-done">Complete</span>
+  </div>
+
+  <div class="feature-card">
+    <h4>📝 Toggle Commenter</h4>
+    <p>Language-aware line commenting (<code>gcc</code> in Normal, <code>Ctrl+/</code> in Insert/Brief). Automatically detects comment prefixes (<code>//</code>, <code>#</code>, <code>--</code>, <code>;;</code>, etc.) and preserves leading indentation. Automatically advances the cursor to the next line for rapid block commenting.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
@@ -671,7 +709,7 @@
 
   <div class="feature-card">
     <h4>↩️ Register Copy-Paste &amp; Undo</h4>
-    <p>Yank current line via <code>yy</code> (or as side-effect of <code>dd</code>) into a unified clipboard register. Paste below current line via <code>space p v</code>. Line-yanked text (ends with <code>\n</code>) uses <code>paste_line_below()</code>; char-yanked text uses inline <code>paste_text()</code>. Per-buffer undo stack: 500 rope snapshots, reverted via <code>u</code>.</p>
+    <p>Yank current line via <code>yy</code> (or as side-effect of <code>dd</code>) into a unified clipboard register. Paste below current line via <code>p</code>. Line-yanked text (ends with <code>\n</code>) uses <code>paste_line_below()</code>; char-yanked text uses inline <code>paste_text()</code>. Per-buffer undo stack with intelligent boundary tracking. <code>Ctrl+R</code> in command line inserts register specials (<code>%</code> filename, <code>Ctrl+W</code> word, <code>Ctrl+L</code> line number).</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
@@ -688,8 +726,8 @@
   </div>
 
   <div class="feature-card">
-    <h4>📝 Persistent Command History</h4>
-    <p>Command mode input is logged to <code>~/.config/ce/history.txt</code> (max 500 entries, dedup consecutive). Up/Down arrows navigate backward/forward; on reaching the bottom, the pre-navigation draft is restored from <code>cmd_temp_input</code>. History is loaded at startup.</p>
+    <h4>📝 Persistent &amp; Separated History</h4>
+    <p>Command mode input (<code>:</code>) is logged to <code>~/.config/ce/history.txt</code>. Search mode input (<code>/</code>) is logged separately to <code>~/.config/ce/search_history.txt</code>. Up/Down arrows navigate backward/forward scoped to the active mode. History is loaded at startup.</p>
     <span class="tag tag-done">Complete</span>
   </div>
 
@@ -731,6 +769,7 @@
     <h4>CLI &amp; Config</h4>
     <p><strong>clap 4</strong> (derive) — path args + auth/status subcommands.<br>
     <strong>serde / serde_json</strong> — JSON reflection for config toggle dashboard + API types.<br>
+    <strong>strum</strong> — Enum string conversions, auto-snake_case, and declarative alias definitions for Actions.<br>
     <strong>dirs</strong> — cross-platform config/cache/home/data paths.<br>
     <strong>uuid</strong> — session ID and auth state generation.<br>
     <strong>anyhow</strong> — error handling throughout.</p>
@@ -747,15 +786,19 @@
       <code>h j k l</code> move · <code>w b</code> word · <code>0 $</code> line start/end<br>
       <code>g g</code> first line · <code>G</code> last line · <code>PageUp/PageDown</code> viewport scroll<br>
       <code>i I a A o O</code> enter insert · <code>g i</code> enter brief · <code>:</code> enter command<br>
-      <code>x</code> delete char · <code>dd</code> delete line (yanks) · <code>yy</code> yank line<br>
+      <code>x</code> / <code>Delete</code> delete char · <code>dd</code> delete line (yanks) · <code>yy</code> yank line<br>
       <code>d$</code> delete to end · <code>diw/ciw</code> inside word · <code>di"/ci"</code> inside quotes<br>
       <code>di(/ci(</code> inside parens · <code>di{/ci{</code> inside braces · <code>di[/ci[</code> inside brackets<br>
       <code>dif/cif</code> inside function · <code>u</code> undo · <code>&gt;</code> indent · <code>&lt;</code> outdent<br>
+      <code>%</code> match bracket (AST-aware) · <code>gcc</code> toggle line comment<br>
+      <code>m</code> set auto-increment mark (a-z) · <code>`</code> open marks popup (type to search/filter anchors)<br>
+      <code>C-]</code> jump to tag under cursor · <code>C-t</code> jump back from tag<br>
       <code>Tab / Right</code> accept ghost (if visible)<br>
       <code>Alt+d</code> delete current line (global)<br>
       <code>space w</code> save · <code>space q</code> quit · <code>space Q</code> force quit<br>
       <code>space p v</code> paste · <code>space t</code> toggle which-key popup<br>
-      <code>Ctrl+w s/v</code> split · <code>Ctrl+w h/j/k/l/w</code> focus · <code>Ctrl+w q</code> close
+      <code>Ctrl+w s/v</code> split · <code>Ctrl+w h/j/k/l/w</code> focus · <code>Ctrl+w q</code> close<br>
+      <code>Ctrl+v</code> enter Visual Block mode · <code>I</code> (in Visual Block) column insert · <code>A</code> column append
     </p>
   </div>
   <div class="feature-card">
@@ -767,22 +810,31 @@
       <code>Home/End</code> · <code>Left/Right</code> move cursor<br>
       <code>Up/Down</code> — cycle completions if ghost active, else move<br>
       <code>Ctrl+N / Ctrl+P</code> cycle completions<br>
-      <code>Alt+d</code> delete current line<br>
+      <code>Alt+d</code> delete current line · <code>Ctrl+/</code> toggle comment<br>
       <code>Esc</code> → Normal (cursor moves left 1 col)
     </p>
   </div>
   <div class="feature-card">
     <h4>Brief Mode (Always-Insert)</h4>
     <p>
-      Direct character input · <code>Backspace</code> · <code>Delete</code> · <code>Enter</code><br>
-      <code>Tab</code> accept ghost or insert soft-tab<br>
-      <code>Up/Down</code> cycle completions if ghost active, else move<br>
-      <code>F9</code> open command line · <code>Esc</code> clear ghost/status<br>
-      <code>Alt+x</code> / <code>Ctrl+c</code> → Normal mode<br>
-      <code>Alt+s</code> save · <code>Alt+q</code> quit · <code>Alt+d</code> delete line<br>
-      <code>Alt+u</code> undo · <code>Alt+y</code> yank · <code>Alt+p</code> paste<br>
-      <code>Alt+b/f</code> word back/forward · <code>Alt+a/e</code> line start/end<br>
-      <code>Alt+&lt;/&gt;</code> first/last line · <code>Alt+1-4</code> switch buffer
+      <strong>Core Typing &amp; Editing:</strong><br>
+      Direct character input · <code>Enter</code> newline · <code>Backspace</code> · <code>Delete</code> · <code>Tab</code> (Accept completion or insert tab) · <code>Ctrl+H</code> (Backspace compat)<br><br>
+      <strong>Cursor Movement:</strong><br>
+      <code>← ↑ ↓ →</code> move · <code>Home</code> / <code>End</code> line start/end · <code>PageUp</code> / <code>PageDown</code> scroll · <code>Alt+F</code> word forward<br><br>
+      <strong>Selection (Shift+Nav &amp; Alt+L):</strong><br>
+      <code>Alt+L</code> start/cancel selection · <code>Shift+← → ↑ ↓</code> extend selection · <code>Shift+Home</code> / <code>Shift+End</code> extend to line ends · <code>Shift+PageUp</code> / <code>Shift+PageDown</code> extend pages · <code>Alt+C</code> enter Visual Block mode · <code>%</code> extend selection to matching bracket<br><br>
+      <strong>Clipboard &amp; Yank:</strong><br>
+      <code>Ctrl+C</code> copy selection (NOP if none) · <code>Ctrl+X</code> cut selection (NOP if none) · <code>Ctrl+V</code> paste · <code>Alt+Y</code> yank current word (or active selection)<br><br>
+      <strong>Lines &amp; Deletion:</strong><br>
+      <code>Alt+D</code> delete current line · <code>Alt+K</code> delete to EOL · <code>Delete</code> (deletes selection if active, else char forward)<br><br>
+      <strong>File &amp; Window Management:</strong><br>
+      <code>Alt+W</code> save · <code>Alt+Q</code> quit · <code>Alt+E</code> file picker · <code>Alt+O</code> save as · <code>Alt+N</code> next window · <code>Alt+B</code> buffer list · <code>Alt+1-4</code> switch buffer 1-4<br><br>
+      <strong>Search, Marks &amp; Navigation:</strong><br>
+      <code>Alt+S</code> search · <code>Alt+G</code> / <code>F9</code> enter command mode (goto line) · <code>Alt+J</code> jump to mark popup · <code>Alt+M</code> toggle line mark · <code>Alt+&lt;</code> first line · <code>Alt+&gt;</code> last line<br><br>
+      <strong>Completion &amp; UI:</strong><br>
+      <code>Right</code> accept ghost text · <code>Up/Down</code> cycle completion (if ghost active, else move) · <code>Ctrl+N/P</code> cycle completion<br><br>
+      <strong>Undo &amp; Modes:</strong><br>
+      <code>Alt+U</code> undo · <code>Esc</code> clear ghost/status or cancel selection · <code>Alt+X</code> exit to Normal mode
     </p>
   </div>
   <div class="feature-card">
@@ -790,14 +842,21 @@
     <p>
       <code>:q</code> quit (dirty check) · <code>:q!</code> force quit · <code>:w</code> save · <code>:w &lt;path&gt;</code> save as<br>
       <code>:wq</code> / <code>:x</code> save &amp; quit · <code>:e &lt;path&gt;</code> open · <code>:e</code> / <code>:new</code> new buffer<br>
-      <code>:ls</code> / <code>:buffers</code> / <code>:files</code> list · <code>:b N</code> switch by index<br>
-      <code>:bn</code> / <code>:bnext</code> · <code>:bp</code> / <code>:bprev</code> · <code>:bd</code> / <code>:bdelete</code><br>
-      <code>:sp</code> / <code>:vs</code> split window · <code>:on</code> close other windows<br>
-      <code>:vim</code> switch to Vim (Normal) mode · <code>:brief</code> switch to Brief mode<br>
-      <code>:config</code> open settings dashboard · <code>:vocab &lt;word&gt;</code> add to wordlist<br>
-      <code>:gs</code> / <code>:gitstatus</code> open status panel · <code>:stash [msg]</code> push working changes<br>
-      <code>:prompt &lt;msg&gt;</code> / <code>:&gt; &lt;msg&gt;</code> direct LLM chat query<br>
-      <code>Up/Down</code> navigate command history · <code>Tab</code> complete command/path<br>
+      <code>:ls</code> list · <code>:b N</code> switch · <code>:bn</code> / <code>:bp</code> · <code>:bd</code><br>
+      <code>:sp</code> / <code>:vs</code> split · <code>:on</code> close other windows<br>
+      <code>:vim</code> switch to Vim mode · <code>:brief</code> switch to Brief mode<br>
+      <code>:config</code> settings · <code>:vocab &lt;word&gt;</code> add to wordlist · <code>:gen_desc</code> export palette desc<br>
+      <code>:mru</code> recent files (repo) · <code>:mru!</code> / <code>:mruall</code> (global)<br>
+      <code>:tig</code> git log (10) · <code>:tig 0</code> all · <code>:tig N</code> limit<br>
+      <code>:gs</code> git status · <code>:stash [msg]</code> push working changes<br>
+      <code>:sort</code> / <code>:'<,'>sort</code> sort lines (! reverse, u unique, i case-insensitive)<br>
+      <code>:%s/old/new/g</code> substitute (c flag for y/n/a/q confirm) · <code>:'<,'>s/old/new/g</code> visual range sub<br>
+      <code>:tag &lt;name&gt;</code> jump to tag · <code>:retag</code> regenerate tags · <code>:tags</code> tag info<br>
+      <code>:command_palette</code> · <code>:scankey</code> inspect any key binding<br>
+      <code>:guide</code> · <code>:guide sync</code> update help database<br>
+      <code>:checkhealth</code> · <code>:diffthis</code> / <code>:gd</code> Git diff viewer<br>
+      <code>Ctrl+R %</code> insert filename · <code>Ctrl+R Ctrl+W</code> insert word · <code>Ctrl+R Ctrl+L</code> insert line no<br>
+      <code>Up/Down</code> command/search history (persisted separately) · <code>Tab</code> complete command/path<br>
       <code>Esc</code> cancel and return to previous mode
     </p>
   </div>
@@ -825,22 +884,28 @@
     <ul>
       <li><span class="chk done"></span> Multi-buffer editing with tab bar</li>
       <li><span class="chk done"></span> Vim-like modal editing (Normal/Insert/Command/Brief)</li>
-      <li><span class="chk done"></span> Brief mode (Always-Insert, Alt-key commands, F9 for :cmd)</li>
+      <li><span class="chk done"></span> Brief mode (Always-Insert, Alt/Ctrl commands, F9 for :cmd, Alt+L visual select, Ctrl+C/X/V selection ops)</li>
       <li><span class="chk done"></span> Split window layouts (horizontal/vertical, focus, close)</li>
       <li><span class="chk done"></span> Smart cursor vertical movement (desired_col / curswant)</li>
-      <li><span class="chk done"></span> Undo stack per buffer (500 snapshots)</li>
+      <li><span class="chk done"></span> Undo stack per buffer with intelligent boundary tracking</li>
       <li><span class="chk done"></span> File I/O with rustfmt auto-format for .rs</li>
       <li><span class="chk done"></span> CJK-aware character width handling</li>
-      <li><span class="chk done"></span> Yank / Put (yy, dd, space p v)</li>
-      <li><span class="chk done"></span> Command history — persistent on-disk recall</li>
+      <li><span class="chk done"></span> Yank / Put (yy, dd, p, Ctrl+C/V/X in Brief)</li>
+      <li><span class="chk done"></span> Separated Command &amp; Search history — persistent on-disk recall</li>
       <li><span class="chk done"></span> Interactive dirty-buffer quit prompt (y/n/c)</li>
       <li><span class="chk done"></span> Viewport-aware PageUp/PageDown</li>
-      <li><span class="chk done"></span> Repeat (.) — last editing command</li>
-      <li><span class="chk"></span> <span class="priority-high">Redo (Ctrl+R)</span> — reverse of undo</li>
-      <li><span class="chk done"></span> Visual mode (v, V) — selection &amp; range ops</li>
+      <li><span class="chk done"></span> Repeat (.) — last editing command (structured state machine)</li>
+      <li><span class="chk done"></span> Unified Marks/Bookmarks with search anchor filtering</li>
+      <li><span="chk done"></span> AST-aware match bracket (%)</li>
+      <li><span class="chk done"></span> Language-aware toggle comment (gcc, Ctrl+/)</li>
+      <li><span class="chk done"></span> Ctrl+R register prompt in Command/Search modes</li>
+      <li><span class="chk done"></span> Visual mode (v, V, Ctrl+v) — selection, range ops, column insert/append</li>
       <li><span class="chk done"></span> Search (/ n N, *) — forward/backward text search</li>
-      <li><span class="chk"></span> <span class="priority-medium">Replace (:%s/old/new/g)</span></li>
-      <li><span class="chk"></span> <span class="priority-low">Count prefix (3j, 5dd)</span></li>
+      <li><span class="chk done"></span> Interactive Substitution (:%s/old/new/gc, visual range support)</li>
+      <li><span class="chk done"></span> Count prefix (3j, 5dd)</li>
+      <li><span class="chk done"></span> Tag Navigation (C-], C-t, :tag, :retag)</li>
+      <li><span class="chk done"></span> Line Sorting (:sort, visual range support)</li>
+      <li><span class="chk"></span> <span class="priority-high">Redo (Ctrl+R in Normal)</span> — reverse of undo</li>
     </ul>
   </div>
 
@@ -849,34 +914,37 @@
     <h4>🌳 Syntax &amp; Rendering</h4>
     <ul>
       <li><span class="chk done"></span> Tree-sitter syntax highlighting (Rust, Python, JS/TS)</li>
+      <li><span class="chk done"></span> Catppuccin Mocha color palette sync</li>
       <li><span class="chk done"></span> Text objects: diw, ci", di(, di{, di[, dif</li>
       <li><span class="chk done"></span> Scope extraction (Impl::function / Enum) in status bar</li>
       <li><span class="chk done"></span> Red block cursor in Normal, bar cursor in Insert/Brief</li>
       <li><span class="chk done"></span> Clean ghost text (removed inline [1/8] clutter)</li>
       <li><span class="chk done"></span> Standard Vim bottom layout (Command line at very bottom, Status bar above)</li>
-      <li><span class="chk done"></span> Which-key and Config popups rendering correctly</li>
+      <li><span class="chk done"></span> Which-Key and Config popups rendering correctly</li>
       <li><span class="chk done"></span> Dynamic Gutter — Bookmarks, Hybrid Relative numbers, Git sign columns</li>
       <li><span class="chk done"></span> Custom <code>gitstatus</code> buffer coloring</li>
-      <li><span class="chk"></span> <span class="priority-medium">Theme / Color scheme support</span></li>
-      <li><span class="chk"></span> <span class="priority-low">Indentation guides</span></li>
+      <li><span class="chk done"></span> Custom <code>gitlog</code> buffer coloring</li>
+      <li><span class="chk done"></span> Indentation guides (│)</li>
+      <li><span class="chk partial"></span> <span class="priority-medium">Theme / Color scheme support (Hardcoded Catppuccin Mocha currently)</span></li>
     </ul>
   </div>
 
-  <!-- Completion -->
+  <!-- Completion & LSP -->
   <div class="todo-card">
-    <h4>🟣 Completion System</h4>
+    <h4>🟣 Completion &amp; LSP</h4>
     <ul>
       <li><span class="chk done"></span> Ghost-text inline display with prefix-overlap dedup</li>
       <li><span class="chk done"></span> Tab / Right-Arrow accept · Ctrl+N/P cycle</li>
-      <li><span class="chk done"></span> 400 ms throttle + position dedup guard</li>
+      <li><span class="chk done"></span> 400 ms throttle + request ID versioning</li>
       <li><span class="chk done"></span> CompletionProvider async trait</li>
       <li><span class="chk done"></span> Top 5 candidates status-bar preview</li>
       <li><span class="chk done"></span> Local buffer autocomplete fallback (3-source merge)</li>
       <li><span class="chk done"></span> Persistent wordlist.txt via :vocab</li>
       <li><span class="chk done"></span> Works in both Insert and Brief modes</li>
-      <li><span class="chk done"></span> Fixed Codeium ghost text stalling — last_checked_pos now properly cleared</li>
-      <li><span class="chk"></span> <span class="priority-high">Popup-based completion dropdown</span></li>
-      <li><span class="chk"></span> <span class="priority-medium">Fuzzy filtering of candidates</span></li>
+      <li><span class="chk done"></span> Fixed 1-char ghost text / stale response bug (min 4-char prefix, on_response context check)</li>
+      <li><span class="chk done"></span> Command Palette with fuzzy matching &amp; desc.json overrides</li>
+      <li><span class="chk"></span> <span class="priority-medium">Go to Definition (LSP)</span> — complement/replace ctags</li>
+      <li><span class="chk"></span> <span class="priority-low">Hover documentation (K)</span></li>
     </ul>
   </div>
 
@@ -893,20 +961,23 @@
       <li><span class="chk done"></span> Destructive Git Stash pop with confirmation prompts</li>
       <li><span class="chk done"></span> State-machine prompt block (prevents key event leaks)</li>
       <li><span class="chk done"></span> Git diff gutters &amp; visual hunks overlay popup</li>
-      <li><span class="chk"></span> <span class="priority-medium">Interactive git staging tool</span></li>
+      <li><span class="chk done"></span> Configurable tig-like log viewer (<code>:tig</code>, <code>:tig 0</code>, <code>:tig N</code>)</li>
+      <li><span class="chk"></span> <span class="priority-medium">Merge conflict resolution markers &amp; helpers</span></li>
+      <li><span class="chk"></span> <span class="priority-low">Git blame inline popup</span></li>
     </ul>
   </div>
 
-  <!-- Popup -->
+  <!-- System & Lifecycle -->
   <div class="todo-card">
-    <h4>📋 Popup Menu System</h4>
+    <h4>💾 System &amp; Lifecycle</h4>
     <ul>
-      <li><span class="chk done"></span> PopupState / PopupItem / PopupKind types</li>
-      <li><span class="chk done"></span> Floating centered overlay with Clear background</li>
-      <li><span class="chk done"></span> Interactive Config reflection dashboard (Space toggle)</li>
-      <li><span class="chk done"></span> Bottom-right Which-Key popup with compact mods, synced with 30-char min width</li>
-      <li><span class="chk"></span> <span class="priority-medium">Command palette (Ctrl+Shift+P)</span></li>
-      <li><span class="chk"></span> <span class="priority-medium">Hover documentation (K)</span></li>
+      <li><span class="chk done"></span> Persistent Command and Search histories</li>
+      <li><span class="chk done"></span> Persistent cursor positions on quit (per-file MRU)</li>
+      <li><span class="chk done"></span> Bracketed Paste support (rapid terminal pastes)</li>
+      <li><span class="chk"></span> <span class="priority-high">Session management</span> — restore full window layout, open buffers, and splits on startup</li>
+      <li><span class="chk"></span> <span class="priority-medium">File watcher</span> — auto-reload buffers when files change on disk</li>
+      <li><span class="chk"></span> <span class="priority-medium">Swap file / recovery</span> — protect against crashes</li>
+      <li><span class="chk"></span> <span class="priority-low">Async file I/O</span> — non-blocking reads for massive files</li>
     </ul>
   </div>
 
@@ -926,14 +997,15 @@
       <li><span class="chk done"></span> Conventional git commit generation via Llama.cpp (<code>:gc</code> / <code>c</code>)</li>
       <li><span class="chk done"></span> Real-time LLM chat interface session (<code>:llm</code> / <code>:prompt</code>)</li>
       <li><span class="chk"></span> <span class="priority-medium">Alternative backends: ai::copilot, ai::local (Ollama)</span></li>
+      <li><span class="chk"></span> <span class="priority-low">Inline AI Chat / Refactoring instructions</span></li>
     </ul>
   </div>
 </div>
 
 <!-- FOOTER -->
 <div class="footer">
-  <p>codeium-editor v0.1.0 — Modular architecture · 11 modules (ed, comp, ai, render, keybind, config, repl, popup, git, main) · ~10,200 LOC</p>
-  <p style="margin-top:.3rem;">Rust 2021 · Tokio · Ratatui · Ropey · Tree-sitter · Codeium AI LSP + Local Llama.cpp LLM Backend</p>
+  <p>codeium-editor v0.2.0 — Modular architecture · 12 modules (ed, comp, ai, render, keybind, config, repl, popup, git, tag, main) · ~23,500 LOC</p>
+  <p style="margin-top:.3rem;">Rust 2021 · Tokio · Ratatui · Ropey · Tree-sitter · Strum · Codeium AI LSP + Local Llama.cpp LLM Backend</p>
 </div>
 
 </body>
