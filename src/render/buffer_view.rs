@@ -22,6 +22,19 @@ use crate::ed::mode::Mode;
 use crate::ed::window::{Window, WindowPosition};
 use crate::render::helpers::display_width;
 
+/// Describes what character occupies a given visual column in a line.
+#[derive(Debug)]
+enum VisualColContent {
+    /// A space character, carrying its char index in the line.
+    Space(usize),
+    /// The column falls inside a tab character.
+    Tab,
+    /// A non-whitespace character occupies the column.
+    NonSpace,
+    /// The column is past the end of the line.
+    PastEnd,
+}
+
 /// Returns the rope line index to render for a given virtual row,
 /// or `None` if this row is a padding filler.
 fn resolve_virtual_row(
@@ -68,6 +81,7 @@ fn styled_spans_from_highlights(
     highlights: &[Option<Style>],
     selected_mask: &[bool],
     search_mask: &[bool],
+    line_bg: Option<Color>, // <-- NEW parameter
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if chars.is_empty() {
@@ -81,10 +95,13 @@ fn styled_spans_from_highlights(
             .flatten()
             .unwrap_or(default_style);
         if selected_mask.get(idx).copied().unwrap_or(false) {
-            // Apply a nice dark slate blue selection background
             base = base.bg(Color::Rgb(40, 50, 80));
         } else if search_mask.get(idx).copied().unwrap_or(false) {
-            base = base.fg(Color::Black).bg(Color::Yellow); // Vim-yellow search highlight
+            base = base.fg(Color::Black).bg(Color::Yellow);
+        } else if base.bg.is_none() {
+            if let Some(bg) = line_bg {
+                base = base.bg(bg);
+            }
         }
         base
     };
@@ -177,6 +194,9 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
 // ═══════════════════════════════════════════════════════════════════
 // Single pane renderer
 // ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// Single pane renderer
+// ═══════════════════════════════════════════════════════════════════
 fn draw_pane(
     f: &mut Frame,
     area: Rect,
@@ -218,6 +238,32 @@ fn draw_pane(
     let mut rendered_cursor_x: u16 = 0;
     let mut rendered_cursor_y: u16 = 0;
 
+    // ── Pre-compute indent guide depths for all visible lines ──────
+    let tab_size = editor.config.tab_size.max(1);
+    let indent_guide_style = if is_active {
+        Style::default().fg(Color::Rgb(55, 55, 75))
+    } else {
+        Style::default().fg(Color::Rgb(40, 40, 55))
+    };
+
+    let mut line_info: Vec<(usize, bool)> = Vec::with_capacity(end.saturating_sub(scroll));
+    for vr in scroll..end {
+        let real_row_opt = resolve_virtual_row(buf.diff_alignment.as_ref(), head_pane, vr);
+        if let Some(i) = real_row_opt {
+            let text = buf.line_text(i);
+            let level = indent_level(&text, tab_size);
+            let blank = is_blank_line(&text);
+            line_info.push((level, blank));
+        } else {
+            line_info.push((0, true)); // padding row → treat as blank
+        }
+    }
+    let guide_depths: Vec<usize> = if editor.config.show_indent_guides {
+        compute_guide_depths(&line_info)
+    } else {
+        vec![0; line_info.len()]
+    };
+
     let is_block_cursor = (mode == Mode::Normal
         || mode == Mode::Search
         || mode == Mode::Visual
@@ -258,7 +304,7 @@ fn draw_pane(
 
         // OPTIMIZATION: Only collect and process characters that can fit in the viewport
         let max_visible_chars = (area.width as usize).saturating_mul(2).max(100);
-        let chars: Vec<char> = line_text
+        let mut chars: Vec<char> = line_text
             .chars()
             .skip(hscroll)
             .take(max_visible_chars)
@@ -274,7 +320,7 @@ fn draw_pane(
 
         let block_insert_col = editor.visual_block_insert_state.as_ref().map(|s| s.col);
 
-        let selected_mask: Vec<bool> = (0..chars.len())
+        let mut selected_mask: Vec<bool> = (0..chars.len())
             .map(|c_idx| {
                 if is_selecting {
                     let eval_mode = if block_insert_col.is_some() {
@@ -310,6 +356,17 @@ fn draw_pane(
 
         let gutter_spans = crate::ed::gutter::render_gutter_line(buf, win, i, &editor.config);
 
+        // ── Cursor Line Background Highlight ──────────────────────────
+        let line_bg = if is_cursor_line && editor.config.cursor_line_highlight {
+            Some(
+                editor
+                    .config
+                    .resolve_color(&editor.config.cursor_line_highlight_color),
+            )
+        } else {
+            None
+        };
+
         if is_cursor_line {
             let col = col.min(chars.len());
             let raw_line = buf.line_text(i);
@@ -326,6 +383,19 @@ fn draw_pane(
                 highlights.push(None);
             }
 
+            // ── Apply indent guides (cursor line) ──────────────────
+            apply_indent_guides(
+                &mut chars,
+                &mut highlights,
+                &mut selected_mask,
+                &mut search_mask,
+                &raw_line,
+                hscroll,
+                tab_size,
+                guide_depths[virtual_row - scroll],
+                indent_guide_style,
+            );
+
             let visual_before_len = display_width(&chars[..col].iter().collect::<String>()) as u16;
             let mut spans = gutter_spans;
 
@@ -337,6 +407,7 @@ fn draw_pane(
                 &highlights[..before_col],
                 &selected_mask[..before_col],
                 &search_mask[..before_col],
+                line_bg,
             ));
 
             // Ghost text
@@ -365,7 +436,15 @@ fn draw_pane(
             };
 
             if is_block_cursor {
-                let cursor_style = Style::default().fg(Color::Rgb(20, 20, 20)).bg(Color::Cyan);
+                // ── Use Configurable Cursor Colors ──────────────────
+                let fg_color = editor
+                    .config
+                    .resolve_color(&editor.config.cursor_text_color);
+                let bg_color = editor
+                    .config
+                    .resolve_color(&editor.config.cursor_highlight_color);
+                let cursor_style = Style::default().fg(fg_color).bg(bg_color);
+
                 if col < chars.len() {
                     spans.push(Span::styled(chars[col].to_string(), cursor_style));
                     let after_col = col.saturating_add(1);
@@ -375,6 +454,7 @@ fn draw_pane(
                         highlights.get(after_col..).unwrap_or(&[]),
                         selected_mask.get(after_col..).unwrap_or(&[]),
                         search_mask.get(after_col..).unwrap_or(&[]),
+                        line_bg,
                     ));
                 } else {
                     spans.push(Span::styled(" ".to_string(), cursor_style));
@@ -394,7 +474,20 @@ fn draw_pane(
                     highlights.get(col..).unwrap_or(&[]),
                     selected_mask.get(col..).unwrap_or(&[]),
                     search_mask.get(col..).unwrap_or(&[]),
+                    line_bg,
                 ));
+            }
+
+            // ── Pad line highlight to full viewport width ──────────
+            if let Some(bg) = line_bg {
+                let width_used: usize = spans.iter().map(|s| display_width(&s.content)).sum();
+                let padding_needed = (area.width as usize).saturating_sub(width_used);
+                if padding_needed > 0 {
+                    spans.push(Span::styled(
+                        " ".repeat(padding_needed),
+                        Style::default().bg(bg),
+                    ));
+                }
             }
 
             rendered.push(Line::from(spans));
@@ -424,6 +517,19 @@ fn draw_pane(
                 highlights.push(None);
             }
 
+            // ── Apply indent guides (non-cursor line) ──────────────
+            apply_indent_guides(
+                &mut chars,
+                &mut highlights,
+                &mut selected_mask,
+                &mut search_mask,
+                &raw_line,
+                hscroll,
+                tab_size,
+                guide_depths[virtual_row - scroll],
+                indent_guide_style,
+            );
+
             let mut spans = gutter_spans;
             spans.extend(styled_spans_from_highlights(
                 &chars,
@@ -431,11 +537,10 @@ fn draw_pane(
                 &highlights,
                 &selected_mask,
                 &search_mask,
+                line_bg, // Will be None for non-cursor lines
             ));
             rendered.push(Line::from(spans));
         }
-
-        let gutter_spans = crate::ed::gutter::render_gutter_line(buf, win, i, &editor.config);
     }
 
     // EOF padding (rows past end of virtual content)
@@ -577,4 +682,206 @@ pub fn is_char_selected_ex(
 
 pub fn is_char_selected(win: &Window, row: usize, col: usize, mode: Mode) -> bool {
     is_char_selected_ex(win, row, col, mode, None)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Indent Guide Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/// Compute the indent level of a line in units of `tab_size`.
+/// Leading spaces count 1 column each; tabs snap to the next
+/// `tab_size` boundary.
+fn indent_level(line_text: &str, tab_size: usize) -> usize {
+    let tab_size = tab_size.max(1);
+    let mut col = 0;
+    for ch in line_text.chars() {
+        match ch {
+            ' ' => col += 1,
+            '\t' => col = (col / tab_size + 1) * tab_size,
+            _ => break,
+        }
+    }
+    col / tab_size
+}
+
+/// True when the line contains only whitespace (or is empty).
+fn is_blank_line(line_text: &str) -> bool {
+    line_text.trim().is_empty()
+}
+
+/// Compute the effective guide depth for each visible line.
+///
+/// Non-blank lines use their own indent level. Blank lines inherit
+/// the **minimum** indent of the nearest non-blank neighbours above
+/// and below so that guides continue through empty lines inside an
+/// indented block.
+fn compute_guide_depths(levels: &[(usize, bool)]) -> Vec<usize> {
+    let n = levels.len();
+    let mut depths: Vec<usize> = levels.iter().map(|(l, _)| *l).collect();
+
+    for i in 0..n {
+        let (level, blank) = levels[i];
+        if blank && level == 0 {
+            let above = (0..i)
+                .rev()
+                .find_map(|j| {
+                    let (l, b) = levels[j];
+                    if !b && l > 0 {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            let below = (i + 1..n)
+                .find_map(|j| {
+                    let (l, b) = levels[j];
+                    if !b && l > 0 {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+
+            if above > 0 && below > 0 {
+                depths[i] = above.min(below);
+            } else if above > 0 {
+                // Still inside a block that ends below the viewport
+                depths[i] = above;
+            }
+            // below-only: block hasn't started yet — no guides
+        }
+    }
+
+    depths
+}
+
+/// Inspects a line of text and determines what occupies `visual_col`.
+fn visual_col_content(line_text: &str, visual_col: usize, tab_size: usize) -> VisualColContent {
+    let mut current_col = 0;
+    for (char_idx, ch) in line_text.char_indices() {
+        let width = if ch == '\t' {
+            tab_size - (current_col % tab_size)
+        } else {
+            display_width(&ch.to_string())
+        };
+
+        if current_col == visual_col {
+            log::debug!(
+                "VIS_COL: visual_col={} exactly matched char_idx={} ch='{}'",
+                visual_col,
+                char_idx,
+                ch
+            );
+            return if ch == ' ' {
+                VisualColContent::Space(char_idx)
+            } else if ch == '\t' {
+                VisualColContent::Tab
+            } else {
+                VisualColContent::NonSpace
+            };
+        }
+
+        // The visual column falls in the middle of a wide char or tab
+        if current_col < visual_col && current_col + width > visual_col {
+            log::debug!(
+                "VIS_COL: visual_col={} falls inside char_idx={} ch='{}' (cols {}..{})",
+                visual_col,
+                char_idx,
+                ch,
+                current_col,
+                current_col + width
+            );
+            return if ch == '\t' {
+                VisualColContent::Tab
+            } else {
+                VisualColContent::NonSpace // Wide CJK char
+            };
+        }
+        current_col += width;
+    }
+    log::debug!(
+        "VIS_COL: visual_col={} is PastEnd (line visual width={})",
+        visual_col,
+        current_col
+    );
+    VisualColContent::PastEnd
+}
+
+/// Apply indent guide characters to a line's character and style arrays.
+///
+/// For each indent level 1..=guide_depth the space at the visual column
+/// `level * tab_size - 1` is replaced with `│` and styled.
+///
+/// When the line is shorter than a guide position (truly empty line),
+/// the arrays are extended with blank padding so the guide can still
+/// be rendered — this makes guides continuous through blank lines.
+///
+/// If a guide position falls inside a tab or on a non-space character,
+/// the guide hides itself to avoid distorting alignment.
+/// Apply indent guide characters to a line's character and style arrays.
+///
+/// For each indent level 1..=guide_depth the space at the visual column
+/// `(level - 1) * tab_size` (the FIRST space of the indent block) is
+/// replaced with `│` and styled.
+///
+/// When the line is shorter than a guide position (truly empty line),
+/// the arrays are extended with blank padding so the guide can still
+/// be rendered — this makes guides continuous through blank lines.
+///
+/// If a guide position falls inside a tab or on a non-space character,
+/// the guide hides itself to avoid distorting alignment.
+fn apply_indent_guides(
+    chars: &mut Vec<char>,
+    highlights: &mut Vec<Option<Style>>,
+    selected_mask: &mut Vec<bool>,
+    search_mask: &mut Vec<bool>,
+    line_text: &str,
+    hscroll: usize,
+    tab_size: usize,
+    guide_depth: usize,
+    style: Style,
+) {
+    if guide_depth == 0 {
+        return;
+    }
+
+    for level in 1..=guide_depth {
+        // FIX: Draw the guide at the START of the indent level.
+        // Level 1 -> column 0, Level 2 -> column 4, Level 3 -> column 8, etc.
+        let abs_pos = (level - 1) * tab_size;
+
+        if abs_pos < hscroll {
+            continue;
+        }
+
+        let content = visual_col_content(line_text, abs_pos, tab_size);
+
+        match content {
+            VisualColContent::Space(char_idx) => {
+                let vp_pos = char_idx.saturating_sub(hscroll);
+                if vp_pos < chars.len() {
+                    chars[vp_pos] = '|';
+                    if vp_pos < highlights.len() {
+                        highlights[vp_pos] = Some(style);
+                    }
+                }
+            }
+            VisualColContent::PastEnd => {
+                let vp_pos = abs_pos - hscroll;
+                while chars.len() <= vp_pos {
+                    chars.push(' ');
+                    highlights.push(None);
+                    selected_mask.push(false);
+                    search_mask.push(false);
+                }
+                chars[vp_pos] = '|';
+                highlights[vp_pos] = Some(style);
+            }
+            VisualColContent::Tab | VisualColContent::NonSpace => {
+                // Hide guide: do nothing, don't disrupt tabs or non-space characters
+            }
+        }
+    }
 }

@@ -164,43 +164,54 @@ impl SyntaxState {
         char_styles
     }
 
-    // Update signature to include line_text
     fn collect_highlights(
-        node: Node,
+        root: Node,
         row: usize,
         line_text: &str,
         char_styles: &mut Vec<Option<Style>>,
     ) {
-        if node.start_position().row > row || node.end_position().row < row {
-            return;
-        }
+        let mut cursor = root.walk();
+        let mut done = false;
 
-        if let Some(style) = style_for_kind(node.kind()) {
-            let start_col = if node.start_position().row < row {
-                0
-            } else {
-                // Convert byte offset to char offset
-                let byte = node.start_position().column.min(line_text.len());
-                line_text[..byte].chars().count()
-            };
+        while !done {
+            let node = cursor.node();
 
-            let end_col = if node.end_position().row > row {
-                char_styles.len()
-            } else {
-                // Convert byte offset to char offset
-                let byte = node.end_position().column.min(line_text.len());
-                line_text[..byte].chars().count().min(char_styles.len())
-            };
+            if node.start_position().row <= row && node.end_position().row >= row {
+                // ── Node overlaps the target row ──────────────────────
+                if let Some(style) = style_for_kind(node.kind()) {
+                    let start_col = if node.start_position().row < row {
+                        0
+                    } else {
+                        let byte = node.start_position().column.min(line_text.len());
+                        line_text[..byte].chars().count()
+                    };
+                    let end_col = if node.end_position().row > row {
+                        char_styles.len()
+                    } else {
+                        let byte = node.end_position().column.min(line_text.len());
+                        line_text[..byte].chars().count().min(char_styles.len())
+                    };
+                    for i in start_col..end_col {
+                        char_styles[i] = Some(style);
+                    }
+                }
 
-            for i in start_col..end_col {
-                char_styles[i] = Some(style);
+                // ONLY descend into children when the parent overlaps
+                // the target row — children are always within the parent
+                // range, so non-overlapping parents have no relevant children.
+                if cursor.goto_first_child() {
+                    continue;
+                }
             }
-        }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            // Pass line_text recursively
-            Self::collect_highlights(child, row, line_text, char_styles);
+            // ── Node does NOT overlap, or has no children ────────────
+            // Skip to next sibling (prunes the entire subtree for
+            // non-overlapping nodes — this is the missing optimisation).
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    done = true;
+                    break;
+                }
+            }
         }
     }
 

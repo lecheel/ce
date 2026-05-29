@@ -175,7 +175,7 @@ pub fn insert_newline_below(win: &mut Window, buf: &mut Buffer) {
     win.col = line_end_col;
 
     let line_start = buf.rope.line_to_char(win.row);
-    let insert_pos = line_start + current_line_text.len();
+    let insert_pos = line_start + current_line_text.chars().count();
 
     let insert_text = format!("\n{}", leading_whitespace);
     buf.rope.insert(insert_pos, &insert_text);
@@ -197,12 +197,12 @@ pub fn insert_newline_above(win: &mut Window, buf: &mut Buffer) {
         .take_while(|c| c.is_whitespace())
         .collect();
     let indent_width = display_width(&leading_whitespace);
-
     let line_start = buf.rope.line_to_char(win.row);
-    let insert_text = format!("\n{}", leading_whitespace);
+    // Insert "indent\n" so the new blank line sits at win.row
+    // and the original line is pushed to win.row + 1.
+    let insert_text = format!("{}\n", leading_whitespace);
     buf.rope.insert(line_start, &insert_text);
-
-    // Cursor stays on the same row index, which is now the new blank line.
+    // win.row stays the same — the new blank line is now here.
     win.col = indent_width;
     win.desired_col = win.col;
     buf.mark_modified();
@@ -448,14 +448,14 @@ pub fn delete_to_end_of_line(win: &mut Window, buf: &mut Buffer) {
         return;
     }
     let line_start = buf.rope.line_to_char(win.row);
+    let line_text = buf.line_text(win.row);
     let line_char_len = buf.line_char_len(win.row);
-    let start_in_line = win.col;
-    let del_start = line_start + start_in_line;
-
-    if start_in_line >= line_char_len {
+    // Convert display col → char offset
+    let (start_char_offset, _) = find_grapheme_boundary(&line_text, win.col);
+    let del_start = line_start + start_char_offset;
+    if start_char_offset >= line_char_len {
         return;
     }
-
     buf.rope.remove(del_start..line_start + line_char_len);
     win.desired_col = win.col;
     buf.mark_modified();
@@ -516,11 +516,18 @@ pub fn paste_line_below(win: &mut Window, buf: &mut Buffer, text: &str) {
     }
     let next_line_row = win.row + 1;
     let insert_offset = if next_line_row >= buf.len_lines() {
+        // Ensure the rope ends with \n before appending
+        let last = buf.rope.len_chars();
+        if last > 0 {
+            let last_char = buf.rope.char(last - 1);
+            if last_char != '\n' {
+                buf.rope.insert(last, "\n");
+            }
+        }
         buf.rope.len_chars()
     } else {
         buf.rope.line_to_char(next_line_row)
     };
-
     buf.rope.insert(insert_offset, text);
     win.row = next_line_row;
     win.col = 0;

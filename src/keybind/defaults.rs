@@ -63,6 +63,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         (":", Action::EnterCommand),
         // Line operations
         ("d d", Action::DeleteCurrentLine),
+        ("d G", Action::DeleteToEndOfFile),
         ("y w", Action::YankCurrentWord),
         ("d $", Action::DeleteToEndOfLine),
         ("y y", Action::YankCurrentLine),

@@ -36,6 +36,26 @@ fn default_scroll_offset() -> usize {
     0 // Default to 0 to maintain current behavior
 }
 
+fn default_tab_size() -> usize {
+    4
+}
+
+fn default_cursor_highlight_color() -> String {
+    "Cyan".to_string()
+}
+
+fn default_cursor_text_color() -> String {
+    "Black".to_string()
+}
+
+fn default_cursor_line_highlight() -> bool {
+    false
+}
+
+fn default_cursor_line_highlight_color() -> String {
+    "Rgb(40, 40, 55)".to_string()
+}
+
 // Helper to default LLM system prompt
 fn default_llm_system_prompt() -> String {
     "You are a helpful, concise coding assistant inside a terminal text editor. Provide clear, accurate answers. Use markdown code blocks when providing code examples. Keep responses relatively brief.".to_string()
@@ -157,7 +177,19 @@ pub struct Config {
     pub format_on_save: bool,
     #[serde(default = "default_scroll_offset")]
     pub scroll_offset: usize,
-
+    #[serde(default = "default_true")]
+    pub show_indent_guides: bool,
+    #[serde(default = "default_tab_size")]
+    pub tab_size: usize,
+    // ---- Cursor Style ----
+    #[serde(default = "default_cursor_highlight_color")]
+    pub cursor_highlight_color: String,
+    #[serde(default = "default_cursor_text_color")]
+    pub cursor_text_color: String,
+    #[serde(default = "default_cursor_line_highlight")]
+    pub cursor_line_highlight: bool,
+    #[serde(default = "default_cursor_line_highlight_color")]
+    pub cursor_line_highlight_color: String,
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
 }
@@ -180,7 +212,10 @@ impl Default for Config {
             llm_port: 8080,
             llm_api_key: None,
             llm_system_prompt: default_llm_system_prompt(),
-
+            cursor_highlight_color: "Cyan".to_string(),
+            cursor_text_color: "Black".to_string(),
+            cursor_line_highlight: false,
+            cursor_line_highlight_color: "Rgb(40, 40, 55)".to_string(),
             // Gutter Defaults
             line_numbers_enabled: true,
             relative_line_numbers: true,
@@ -190,6 +225,8 @@ impl Default for Config {
             search_wrap_enabled: false,
             show_startup_hints: true,
             scroll_offset: 0,
+            show_indent_guides: true,
+            tab_size: 4,
             format_on_save: false,
         }
     }
@@ -244,7 +281,10 @@ impl Config {
                 llm_port: 8080,
                 llm_api_key: None,
                 llm_system_prompt: default_llm_system_prompt(),
-
+                cursor_line_highlight: false,
+                cursor_line_highlight_color: "Rgb(40, 40, 55)".to_string(),
+                cursor_highlight_color: "Cyan".to_string(),
+                cursor_text_color: "Black".to_string(),
                 line_numbers_enabled: true,
                 relative_line_numbers: true,
                 git_gutter_enabled: true,
@@ -252,6 +292,8 @@ impl Config {
                 bookmarks_enabled: true,
                 show_startup_hints: true,
                 scroll_offset: 0,
+                show_indent_guides: true,
+                tab_size: 4,
                 format_on_save: false,
                 ..Default::default()
             }
@@ -341,5 +383,38 @@ impl Config {
             log::warn!("Failed to parse desc.json: {e}");
             DescOverrides::default()
         })
+    }
+    /// Resolve a color name string to a ratatui Color.
+    pub fn resolve_color(&self, name: &str) -> ratatui::style::Color {
+        match name.trim() {
+            "Black" => ratatui::style::Color::Black,
+            "Red" => ratatui::style::Color::Red,
+            "Green" => ratatui::style::Color::Green,
+            "Yellow" => ratatui::style::Color::Yellow,
+            "Blue" => ratatui::style::Color::Blue,
+            "Magenta" => ratatui::style::Color::Magenta,
+            "Cyan" => ratatui::style::Color::Cyan,
+            "White" => ratatui::style::Color::White,
+            "Gray" | "DarkGray" => ratatui::style::Color::DarkGray,
+            "LightRed" => ratatui::style::Color::LightRed,
+            "LightGreen" => ratatui::style::Color::LightGreen,
+            "LightYellow" => ratatui::style::Color::LightYellow,
+            "LightBlue" => ratatui::style::Color::LightBlue,
+            "LightMagenta" => ratatui::style::Color::LightMagenta,
+            "LightCyan" => ratatui::style::Color::LightCyan,
+            s if s.starts_with("Rgb(") && s.ends_with(')') => {
+                let inner = &s[4..s.len() - 1];
+                let parts: Vec<u8> = inner
+                    .split(',')
+                    .filter_map(|p| p.trim().parse::<u8>().ok())
+                    .collect();
+                if parts.len() == 3 {
+                    ratatui::style::Color::Rgb(parts[0], parts[1], parts[2])
+                } else {
+                    ratatui::style::Color::Cyan
+                }
+            }
+            _ => ratatui::style::Color::Cyan,
+        }
     }
 }

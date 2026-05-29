@@ -41,13 +41,18 @@ impl Editor {
                     if picker.list.filter.is_empty() {
                         picker.go_up();
                     }
-                    // else handled by dispatch_list_nav's filter_pop
                 }
             }
 
             KeyCode::Tab => {
                 if let Some(picker) = &mut self.popup.file_picker {
                     picker.toggle_flat();
+                }
+            }
+
+            KeyCode::Home => {
+                if let Some(picker) = &mut self.popup.file_picker {
+                    picker.go_home();
                 }
             }
 

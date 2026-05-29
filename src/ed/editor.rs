@@ -721,6 +721,15 @@ impl Editor {
             return;
         }
 
+        // ── Intercept for Error Popup ──────────────────────────────────
+        if self.popup.error.is_some() {
+            if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
+                self.popup.error = None;
+                self.popup.kind = None;
+            }
+            return;
+        }
+
         // Intercept for FilePicker first
         if self.popup.file_picker.is_some() {
             self.handle_file_picker_key(key);
@@ -1476,6 +1485,20 @@ impl Editor {
         }
         let half_viewport = self.active_window().position.height / 2;
         offset.min(half_viewport)
+    }
+    /// Display a message: single-line → status bar, multi-line → error popup (max 5 lines).
+    pub fn show_message(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        if msg.lines().count() > 1 {
+            self.popup.open_error(&msg);
+        } else {
+            self.set_status_msg(&msg, MessageKind::Error);
+        }
+    }
+
+    /// Display an error: multi-line → error popup, single-line → status bar.
+    pub fn show_error(&mut self, err: anyhow::Error) {
+        self.show_message(err.to_string());
     }
 }
 

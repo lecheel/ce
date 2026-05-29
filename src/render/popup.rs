@@ -53,6 +53,12 @@ fn popup_width(screen: Rect) -> u16 {
 pub fn draw_popup(f: &mut Frame, editor: &Editor) {
     let screen = f.area();
 
+    // ── Error popup: always on top, dismiss with Esc ──────────────
+    if editor.popup.error.is_some() {
+        draw_error(f, editor, screen);
+        return;
+    }
+
     // 0. Intercept BufferList
     if editor.popup.buffer_list.is_some() {
         draw_buffer_list(f, editor, screen);
@@ -600,6 +606,7 @@ fn draw_file_picker(f: &mut Frame, editor: &Editor, screen: Rect) {
         Span::styled(" flat ", Style::default().fg(Color::DarkGray)),
         Span::styled("<BS>", Style::default().fg(Color::Yellow)),
         Span::styled(" Up/Filter ", Style::default().fg(Color::DarkGray)),
+        Span::styled("<Home>", Style::default().fg(Color::Yellow)),
     ]);
 
     let outer_block = Block::default()
@@ -1604,4 +1611,68 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
 
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_error(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.error {
+        Some(p) => p,
+        None => return,
+    };
+
+    let width = popup_width(screen);
+    let max_height = (screen.height / 2).max(10) as usize;
+    let content_height = popup.lines.len().min(max_height.saturating_sub(2));
+    let total_height = (content_height as u16).saturating_add(2); // +2 for borders
+
+    // Anchor: bottom of screen, grow upward (2 rows margin for status bar)
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = screen.height.saturating_sub(total_height).saturating_sub(2);
+
+    let area = clamp(
+        screen,
+        Rect {
+            x,
+            y,
+            width,
+            height: total_height,
+        },
+    );
+
+    let dark_yellow = Color::Rgb(120, 90, 18);
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            " Error ",
+            Style::default()
+                .fg(dark_yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " [Esc] close ",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(dark_yellow))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+
+    let mut list_items = Vec::new();
+    for line in &popup.lines {
+        list_items.push(ListItem::new(Line::from(Span::styled(
+            format!(" {}", line),
+            Style::default().fg(dark_yellow),
+        ))));
+    }
+
+    // Pad to content_height so the block doesn't collapse
+    while list_items.len() < content_height {
+        list_items.push(ListItem::new(Line::from("")));
+    }
+
+    let list_widget = List::new(list_items);
+
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(list_widget, inner);
 }

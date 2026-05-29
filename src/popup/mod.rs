@@ -85,6 +85,7 @@ pub enum PopupKind {
     Guide,
     GitHunk,
     FunctionList,
+    Error, // Added for multi-line error redirection
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +106,24 @@ pub enum PopupContent {
         action_label: String,
         raw_label: String,
     },
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Error Popup
+// ═══════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone)]
+pub struct ErrorPopup {
+    pub lines: Vec<String>,
+}
+
+impl ErrorPopup {
+    /// Create a new error popup from a multi-line message.
+    /// Truncates to a maximum of 5 lines.
+    pub fn new(message: &str) -> Self {
+        let lines: Vec<String> = message.lines().take(5).map(|l| l.to_string()).collect();
+        Self { lines }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -131,6 +150,7 @@ pub struct PopupState {
     pub guide: Option<guide::GuidePopup>,
     pub command_palette: Option<CommandPalettePopup>,
     pub content: Option<PopupContent>,
+    pub error: Option<ErrorPopup>,
 }
 
 impl PopupState {
@@ -154,6 +174,7 @@ impl PopupState {
             marks: None,
             guide: None,
             command_palette: None,
+            error: None,
         }
     }
 
@@ -168,6 +189,7 @@ impl PopupState {
             || self.marks.is_some()
             || self.guide.is_some()
             || self.command_palette.is_some()
+            || self.error.is_some()
     }
 
     pub fn close(&mut self) {
@@ -188,6 +210,13 @@ impl PopupState {
         self.marks = None;
         self.guide = None;
         self.command_palette = None;
+        self.error = None; // Added to fully clear error state
+    }
+
+    pub fn open_error(&mut self, message: impl Into<String>) {
+        self.close();
+        self.error = Some(ErrorPopup::new(&message.into()));
+        self.kind = Some(PopupKind::Error);
     }
 
     pub fn open_config(&mut self, items: Vec<PopupItem>, selected: usize) {

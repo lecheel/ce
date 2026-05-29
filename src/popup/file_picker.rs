@@ -27,6 +27,7 @@ impl EntryFilter for FileEntry {
 pub struct FilePicker {
     pub list: FilteredList<FileEntry>,
     pub cwd: PathBuf,
+    pub initial_cwd: PathBuf,
     pub flat: bool,
     pub last_error: Option<String>,
 }
@@ -77,7 +78,8 @@ impl FilePicker {
         let effective_cwd = Self::resolve_initial_cwd(initial_path);
         let mut picker = FilePicker {
             list: FilteredList::new(Vec::new()),
-            cwd: effective_cwd,
+            cwd: effective_cwd.clone(),
+            initial_cwd: effective_cwd,
             flat,
             last_error: None,
         };
@@ -255,5 +257,19 @@ impl FilePicker {
         self.list.selected = 0;
         self.list.scroll = 0;
         self.list.apply_filter();
+    }
+
+    pub fn go_home(&mut self) {
+        // 1. Try to jump to the Git repository root
+        // 2. Fallback to the initial directory the editor/picker started in
+        let target = crate::git::gutter::find_git_root(&self.cwd)
+            .unwrap_or_else(|| self.initial_cwd.clone());
+
+        let canonical = Self::canonicalize_dir(&target);
+        if canonical != self.cwd {
+            self.cwd = canonical;
+            self.list.filter_clear();
+            self.refresh_entries();
+        }
     }
 }

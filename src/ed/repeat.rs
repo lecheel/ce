@@ -39,6 +39,7 @@ pub enum RepeatableAction {
     DeleteLine,
     /// Delete to end of line (d$)
     DeleteToLineEnd,
+    DeleteToEndOfFile,
     /// Delete to start of line (d0 / Ctrl-U in insert)
     DeleteToLineStart,
     /// Delete word forward (dw)

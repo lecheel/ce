@@ -2110,6 +2110,52 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::CommandCancelRegister => {
             editor.pending_register = false;
         }
+        Action::DeleteToEndOfFile => {
+            // Save current position
+            let start_row = editor.active_window().row;
+            let start_col = editor.active_window().col;
+
+            // Apply count prefix: move cursor down (count-1) lines first,
+            // but never beyond the last line.
+            if count > 1 {
+                let (win, buf) = editor.active_window_and_buf_mut();
+                let target_row = (start_row + count - 1).min(buf.len_lines().saturating_sub(1));
+                win.row = target_row;
+                win.col = win.col.min(buf.line_char_len(target_row));
+            }
+
+            // Now delete from current line to end of file.
+            let (win, buf) = editor.active_window_and_buf_mut();
+            let from_row = win.row;
+            let total_lines = buf.len_lines();
+            if from_row >= total_lines {
+                // Already at EOF – nothing to delete.
+                return;
+            }
+
+            let start_char = buf.rope.line_to_char(from_row);
+            let end_char = buf.rope.len_chars(); // to end of buffer
+
+            let deleted = buf.rope.slice(start_char..end_char).to_string();
+            buf.rope.remove(start_char..end_char);
+            buf.mark_modified();
+
+            // Yank into default register
+            // editor.clipboard = Some(deleted);
+            // editor.clipboard_is_block = false;
+
+            // Put cursor at the first line (now EOF) and column 0
+            win.row = from_row.min(buf.len_lines().saturating_sub(1));
+            win.col = 0;
+            win.desired_col = 0;
+            win.clamp_cursor(buf);
+
+            buf.parse_syntax();
+            editor.comp.on_edit();
+
+            // Record for dot repeat (if needed)
+            editor.record_action(RepeatableAction::DeleteToEndOfFile, 1);
+        }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
@@ -2262,21 +2308,29 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // File / lifecycle
         // ---------------------------------------------------------------
         Action::Save => {
-            if let Err(e) = editor.save_active_buffer() {
-                editor.set_status_msg(&format!("Save failed: {}", e), MessageKind::Error);
-            } else {
-                let name = editor.active_filename().unwrap_or("?").to_string();
-                editor.set_status_msg(&format!("Saved {}", name), MessageKind::Success);
-                editor.refresh_buffer_words();
-                {
-                    let max_row = editor.buf().len_lines().saturating_sub(1);
-                    let safe_row = editor.active_window().row.min(max_row);
-                    let max_col = editor.buf().line_char_len(safe_row);
-                    let win = editor.active_window_mut();
-                    win.row = safe_row;
-                    win.col = win.col.min(max_col);
-                    win.desired_col = win.col;
+            match editor.save_active_buffer() {
+                Ok(Some(_warning)) => {
+                    // Warning already displayed by save_active_buffer()
+                    // (multi-line → error popup, single-line → status bar)
                 }
+                Ok(None) => {
+                    let name = editor.active_filename().unwrap_or("?").to_string();
+                    editor.set_status_msg(&format!("Saved {}", name), MessageKind::Success);
+                }
+                Err(_e) => {
+                    // Error already displayed by save_active_buffer()
+                    // (multi-line → error popup, single-line → status bar)
+                }
+            }
+            editor.refresh_buffer_words();
+            {
+                let max_row = editor.buf().len_lines().saturating_sub(1);
+                let safe_row = editor.active_window().row.min(max_row);
+                let max_col = editor.buf().line_char_len(safe_row);
+                let win = editor.active_window_mut();
+                win.row = safe_row;
+                win.col = win.col.min(max_col);
+                win.desired_col = win.col;
             }
         }
         Action::SaveAs => {

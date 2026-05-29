@@ -150,9 +150,25 @@ pub struct MruPopup {
 impl MruPopup {
     pub fn new(entries: Vec<MruEntry>, repo_root: Option<PathBuf>, repo_only: bool) -> Self {
         let all = entries.clone();
-        let mut list = FilteredList::new(entries);
+
+        // ── FIX: Pre-filter entries if repo_only is requested ──────────
+        let initial_entries: Vec<MruEntry> = if repo_only {
+            entries
+                .iter()
+                .filter(|e| match &repo_root {
+                    Some(root) => e.path.starts_with(root),
+                    None => true,
+                })
+                .cloned()
+                .collect()
+        } else {
+            entries
+        };
+
+        let mut list = FilteredList::new(initial_entries);
         list.wraps = true;
         list.visible_height = 23;
+
         MruPopup {
             list,
             sort_by_frequency: false,

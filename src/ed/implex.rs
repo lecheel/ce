@@ -10,7 +10,7 @@ use crate::ed::MessageKind;
 use crate::ed::Mode;
 use crate::render::helpers::digit_count;
 use crate::Editor;
-use anyhow::Result;
+// use anyhow::Result;
 
 const MAX_WINDOWS: usize = 8;
 
@@ -1717,11 +1717,25 @@ impl Editor {
         self.set_status(&msg, MessageKind::Info);
     }
 
-    pub fn save_active_buffer(&mut self) -> Result<()> {
+    pub fn save_active_buffer(&mut self) -> anyhow::Result<Option<String>> {
         let format_on_save = self.config.format_on_save;
-        self.buf_mut().save_file(format_on_save)?;
-        self.refresh_buffer_words();
-        Ok(())
+        let result = self.buf_mut().save_file(format_on_save);
+
+        // ── Route warnings/errors to the correct UI element ────────
+        // Multi-line → Error popup, Single-line → Status bar
+        match &result {
+            Ok(Some(warning)) => {
+                self.show_message(warning.clone());
+            }
+            Err(e) => {
+                self.show_message(e.to_string());
+            }
+            Ok(None) => {
+                // Save succeeded with no warnings — no message needed
+            }
+        }
+
+        result
     }
 
     pub fn set_active_filename(&mut self, path: String) {

@@ -225,7 +225,7 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn save_file(&mut self, format_on_save: bool) -> Result<()> {
+    pub fn save_file(&mut self, format_on_save: bool) -> Result<Option<String>> {
         // ── Reject saves for special buffers ────────────────────────
         if self.kind != BufferKind::Normal {
             anyhow::bail!("Cannot save a special buffer");
@@ -237,56 +237,97 @@ impl Buffer {
                 let text = self.rope.to_string();
                 std::fs::write(&path, &text).with_context(|| format!("Cannot write {}", path))?;
 
+                let mut warning = None;
+
                 if format_on_save {
                     if path.ends_with(".rs") {
-                        let output = std::process::Command::new("rustfmt")
+                        match std::process::Command::new("rustfmt")
                             .arg("--edition")
                             .arg("2021")
                             .arg(&path)
                             .output()
-                            .context("Failed to execute rustfmt. Is it installed?")?;
-
-                        if output.status.success() {
-                            self.open_file(&path)?;
-                        } else {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            anyhow::bail!("Saved but rustfmt failed:\n{}", stderr)
+                        {
+                            Ok(output) if output.status.success() => {
+                                if let Err(e) = self.open_file(&path) {
+                                    warning = Some(format!(
+                                        "Saved, but failed to reload after rustfmt: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                warning = Some(format!("Saved, rustfmt failed: {}", stderr.trim()));
+                            }
+                            Err(e) => {
+                                warning = Some(format!("Saved, but rustfmt not found: {}", e));
+                            }
                         }
                     } else if path.ends_with(".py") || path.ends_with(".pyi") {
-                        let ruff_result = std::process::Command::new("ruff")
+                        let formatted = match std::process::Command::new("ruff")
                             .args(["format", &path])
-                            .output();
-
-                        let output = match ruff_result {
-                            Ok(o) if o.status.success() => o,
+                            .output()
+                        {
+                            Ok(o) if o.status.success() => Some(o),
                             Ok(o) => {
-                                let stderr = String::from_utf8_lossy(&o.stderr);
-                                anyhow::bail!("Saved but ruff format failed:\n{}", stderr)
+                                let ruff_err =
+                                    String::from_utf8_lossy(&o.stderr).trim().to_string();
+                                // ruff failed — try black as fallback
+                                match std::process::Command::new("black").arg(&path).output() {
+                                    Ok(bo) if bo.status.success() => Some(bo),
+                                    Ok(bo) => {
+                                        let black_err =
+                                            String::from_utf8_lossy(&bo.stderr).trim().to_string();
+                                        warning = Some(format!(
+                                            "Saved, but ruff ({}) and black ({}) both failed",
+                                            ruff_err, black_err
+                                        ));
+                                        None
+                                    }
+                                    Err(_) => {
+                                        warning = Some(format!(
+                                            "Saved, but ruff ({}) failed and black not found",
+                                            ruff_err
+                                        ));
+                                        None
+                                    }
+                                }
                             }
                             Err(_) => {
-                                let black_output = std::process::Command::new("black")
-                                    .arg(&path)
-                                    .output()
-                                    .context(
-                                        "Neither ruff nor black found. \
-                                         Install one for .py auto-formatting.",
-                                    )?;
-
-                                if black_output.status.success() {
-                                    black_output
-                                } else {
-                                    let stderr = String::from_utf8_lossy(&black_output.stderr);
-                                    anyhow::bail!("Saved but black failed:\n{}", stderr)
+                                // ruff not found — try black
+                                match std::process::Command::new("black").arg(&path).output() {
+                                    Ok(bo) if bo.status.success() => Some(bo),
+                                    Ok(bo) => {
+                                        let black_err =
+                                            String::from_utf8_lossy(&bo.stderr).trim().to_string();
+                                        warning =
+                                            Some(format!("Saved, but black failed: {}", black_err));
+                                        None
+                                    }
+                                    Err(_) => {
+                                        warning = Some(
+                                            "Saved, but neither ruff nor black found for formatting"
+                                                .to_string(),
+                                        );
+                                        None
+                                    }
                                 }
                             }
                         };
 
-                        self.open_file(&path)?;
+                        if let Some(_output) = formatted {
+                            if let Err(e) = self.open_file(&path) {
+                                warning = Some(format!(
+                                    "Saved, but failed to reload after formatting: {}",
+                                    e
+                                ));
+                            }
+                        }
                     }
                 }
 
                 self.modified = false;
-                Ok(())
+                Ok(warning)
             }
             None => anyhow::bail!("No filename — use :w <path>"),
         }

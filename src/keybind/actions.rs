@@ -32,6 +32,7 @@ pub enum Action {
     DeleteCharForward,
     DeleteCurrentLine,
     DeleteToEndOfLine,
+    DeleteToEndOfFile,
     InsertNewline,
     InsertNewlineBelow,
     InsertNewlineAbove,
@@ -305,6 +306,7 @@ impl Action {
                 | Action::DeleteCharForward
                 | Action::DeleteCurrentLine
                 | Action::DeleteToEndOfLine
+                | Action::DeleteToEndOfFile
                 | Action::InsertNewline
                 | Action::InsertNewlineBelow
                 | Action::InsertNewlineAbove
