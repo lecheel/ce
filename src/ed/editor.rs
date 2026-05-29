@@ -144,6 +144,8 @@ pub struct Editor {
     pub prev_search_query: Option<String>,
     pub saved_visual_range: Option<(usize, usize)>,
     pub hunk_cache: Option<crate::ed::implex::HunkCache>,
+    pub window_nav_pending: bool,
+    pub close_window_nav_pending: bool,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -243,6 +245,8 @@ impl Editor {
             prev_search_query: None,
             saved_visual_range: None,
             hunk_cache: None,
+            window_nav_pending: false,
+            close_window_nav_pending: false,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -670,6 +674,55 @@ impl Editor {
                 crate::keybind::bindings::execute_action(self, act);
             }
             return; // Key fully handled, skip normal resolution
+        }
+
+        //-- handle_key (anchor dont removed) --//
+        // ── Window Navigation Mode Intercept ────────────────────────────
+        if self.window_nav_pending {
+            let action = match key.code {
+                KeyCode::Char('h') | KeyCode::Left => Some(Action::FocusWindowLeft),
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::FocusWindowDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::FocusWindowUp),
+                KeyCode::Char('l') | KeyCode::Right => Some(Action::FocusWindowRight),
+                KeyCode::Char('w') => Some(Action::FocusNextWindow),
+                KeyCode::Char('q') => Some(Action::CloseWindow),
+                KeyCode::Char('o') => Some(Action::OnlyWindow),
+                KeyCode::Char('s') => Some(Action::SplitHorizontal),
+                KeyCode::Char('v') => Some(Action::SplitVertical),
+                KeyCode::Esc => None, // Explicit cancel
+                _ => None,            // Invalid key cancels the mode
+            };
+
+            // Always consume and exit window navigation mode after 1 keypress
+            self.window_nav_pending = false;
+            self.clear_status_msg();
+
+            if let Some(act) = action {
+                crate::keybind::bindings::execute_action(self, act);
+            }
+
+            return; // Key fully handled
+        }
+
+        // ── Close Window Navigation Mode Intercept ──────────────────────
+        if self.close_window_nav_pending {
+            let action = match key.code {
+                KeyCode::Char('h') | KeyCode::Left => Some(Action::CloseWindowLeft),
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::CloseWindowDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::CloseWindowUp),
+                KeyCode::Char('l') | KeyCode::Right => Some(Action::CloseWindowRight),
+                KeyCode::Char('d') | KeyCode::Char('q') => Some(Action::CloseWindow),
+                KeyCode::Esc => None,
+                _ => None,
+            };
+
+            self.close_window_nav_pending = false;
+            self.clear_status_msg();
+
+            if let Some(act) = action {
+                crate::keybind::bindings::execute_action(self, act);
+            }
+            return;
         }
 
         if key.kind != crossterm::event::KeyEventKind::Press {

@@ -145,6 +145,8 @@ pub fn resolve_single_key(
                 KeyCode::Backspace => Some(Action::Backspace),
                 KeyCode::Delete => Some(Action::DeleteCharForward),
                 KeyCode::Enter => Some(Action::InsertNewline),
+                KeyCode::F(1) => Some(Action::EnterWindowNav),
+                KeyCode::F(2) => Some(Action::EnterCloseWindowNav),
                 KeyCode::F(9) => Some(Action::EnterCommand),
                 KeyCode::Tab => {
                     if ghost_active {
@@ -1392,6 +1394,32 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // ---------------------------------------------------------------
         // Window management
         // ---------------------------------------------------------------
+        Action::EnterWindowNav => {
+            editor.window_nav_pending = true;
+            editor.set_status_msg(
+                "WINDOW: h/j/k/l=move  s=hsplit  v=vsplit  o=only  q=close  Esc=cancel",
+                MessageKind::Info,
+            );
+        }
+        Action::EnterCloseWindowNav => {
+            editor.close_window_nav_pending = true;
+            editor.set_status_msg(
+                "CLOSE WINDOW: h/j/k/l=close dir  d/q=close current  Esc=cancel",
+                MessageKind::Info,
+            );
+        }
+        Action::CloseWindowLeft => {
+            editor.close_window_left();
+        }
+        Action::CloseWindowRight => {
+            editor.close_window_right();
+        }
+        Action::CloseWindowUp => {
+            editor.close_window_up();
+        }
+        Action::CloseWindowDown => {
+            editor.close_window_down();
+        }
         Action::SplitHorizontal => {
             editor.split_horizontal();
         }

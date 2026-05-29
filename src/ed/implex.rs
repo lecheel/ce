@@ -14,6 +14,13 @@ use crate::Editor;
 
 const MAX_WINDOWS: usize = 8;
 
+enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// A single hunk boundary computed from git2::Patch.
 #[derive(Debug, Clone)]
 pub struct HunkRange {
@@ -1567,6 +1574,59 @@ impl Editor {
         self.focus_window_directional(0, 1);
     }
 
+    pub fn close_window_left(&mut self) {
+        self.close_window_in_direction(FocusDir::Left);
+    }
+    pub fn close_window_right(&mut self) {
+        self.close_window_in_direction(FocusDir::Right);
+    }
+    pub fn close_window_up(&mut self) {
+        self.close_window_in_direction(FocusDir::Up);
+    }
+    pub fn close_window_down(&mut self) {
+        self.close_window_in_direction(FocusDir::Down);
+    }
+
+    /// Shared logic: Find the window ID in a specific direction.
+    fn find_window_in_direction(&self, direction: FocusDir) -> Option<usize> {
+        let cur_pos = self.active_window().position;
+        let cur_id = self.active_window().id;
+        let mut best_id: Option<usize> = None;
+        let mut best_distance: isize = isize::MAX;
+
+        for win in &self.windows {
+            if win.id == cur_id || !win.position.is_visible() {
+                continue;
+            }
+            let p = win.position;
+
+            let (is_adjacent, distance) = match direction {
+                FocusDir::Left => (
+                    (p.x + p.width <= cur_pos.x) && p.overlaps_vertically(&cur_pos),
+                    cur_pos.x as isize - (p.x + p.width) as isize,
+                ),
+                FocusDir::Right => (
+                    (p.x >= cur_pos.x + cur_pos.width) && p.overlaps_vertically(&cur_pos),
+                    p.x as isize - (cur_pos.x + cur_pos.width) as isize,
+                ),
+                FocusDir::Up => (
+                    (p.y + p.height <= cur_pos.y) && p.overlaps_horizontally(&cur_pos),
+                    cur_pos.y as isize - (p.y + p.height) as isize,
+                ),
+                FocusDir::Down => (
+                    (p.y >= cur_pos.y + cur_pos.height) && p.overlaps_horizontally(&cur_pos),
+                    p.y as isize - (cur_pos.y + cur_pos.height) as isize,
+                ),
+            };
+
+            if is_adjacent && distance >= 0 && distance < best_distance {
+                best_distance = distance;
+                best_id = Some(win.id);
+            }
+        }
+        best_id
+    }
+
     /// Generic directional focus.
     ///
     /// `(dx, dy)` indicates the direction: `(-1, 0)` = left, `(1, 0)` =
@@ -1637,6 +1697,32 @@ impl Editor {
 
         if let Some(idx) = best_idx {
             self.active_window_idx = idx;
+        }
+    }
+
+    /// Closes the window in the specified direction.
+    fn close_window_in_direction(&mut self, direction: FocusDir) {
+        if self.windows.len() <= 1 {
+            self.set_status_msg(
+                "Cannot close the last window",
+                crate::ed::mode::MessageKind::Error,
+            );
+            return;
+        }
+
+        if let Some(target_id) = self.find_window_in_direction(direction) {
+            // Temporarily switch focus to the target window
+            if let Some(idx) = self.windows.iter().position(|w| w.id == target_id) {
+                self.active_window_idx = idx;
+                // Reuse existing close_window logic, which handles layout/tree cleanup
+                // and naturally falls focus back to a sibling (likely your original window)
+                self.close_window(false);
+            }
+        } else {
+            self.set_status_msg(
+                "No window in that direction",
+                crate::ed::mode::MessageKind::Info,
+            );
         }
     }
 

@@ -50,7 +50,7 @@ pub enum Action {
     EnterCommand,
     EnterBrief,
     EnterNormal,
-    ExitMode,
+   ExitMode,
 
     // Completion
     AcceptCompletion,
@@ -103,7 +103,13 @@ pub enum Action {
     FocusWindowRight,
     FocusWindowUp,
     FocusWindowDown,
-
+    EnterWindowNav,
+    EnterCloseWindowNav,
+    CloseWindowLeft,    
+    CloseWindowRight,   
+    CloseWindowUp,      
+    CloseWindowDown, 
+ 
     // Text Objects
     DeleteInsideWord,
     DeleteWordForward,
