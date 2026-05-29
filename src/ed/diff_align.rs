@@ -1,5 +1,3 @@
-// ed/diff_align.rs
-
 use crate::ed::buffer::VirtualLine;
 
 /// Parallel virtual line maps for a side-by-side diff.
@@ -35,155 +33,99 @@ impl DiffAlignment {
             let old_start = (hunk.old_start() as usize).saturating_sub(1);
             let new_start = (hunk.new_start() as usize).saturating_sub(1);
 
-            // Flush unchanged context lines that precede this hunk.
-            // Use old_start as ground truth; new_start may differ due to
-            // prior insertions/deletions — context content is identical.
-            let context_count = old_start.saturating_sub(old_cursor);
+            // ── Flush unchanged context lines that precede this hunk ──
+            // For well-formed patches with context_lines(0), the number of
+            // context lines on both sides is always identical between hunks.
+            // We use the minimum as a safety clamp for edge cases.
+            let old_context = old_start.saturating_sub(old_cursor);
+            let new_context = new_start.saturating_sub(new_cursor);
+            let context_count = old_context.min(new_context);
+
             for i in 0..context_count {
-                let ol = old_cursor + i;
-                let nl = new_cursor + i;
-                left.push(VirtualLine::Real(ol));
-                if nl < new_line_count {
-                    right.push(VirtualLine::Real(nl));
-                } else {
-                    right.push(VirtualLine::Padding);
-                }
+                left.push(VirtualLine::Real(old_cursor + i));
+                right.push(VirtualLine::Real(new_cursor + i));
             }
             old_cursor += context_count;
             new_cursor += context_count;
 
-            // Sanity-clamp: if the hunk header says new_start is further
-            // ahead than our new_cursor accounts for, fast-forward.
-            // This can happen on the very first hunk when the file starts
-            // with unchanged lines that git omits from the header counts.
-            if new_start > new_cursor {
-                let extra = new_start - new_cursor;
-                // These were already emitted above via old_start; if there
-                // is still a gap on the new side we need to fill it.
-                for i in 0..extra {
-                    let nl = new_cursor + i;
-                    if nl < new_line_count {
-                        // pair with a padding on the left because old_cursor
-                        // has already moved past these
-                        left.push(VirtualLine::Padding);
-                        right.push(VirtualLine::Real(nl));
-                    }
+            // Handle any residual context lines on one side only.
+            // This can happen with unusual patch formats or when git
+            // reports slightly different start positions. We pad the
+            // shorter side rather than dropping lines.
+            if old_context > context_count {
+                for i in context_count..old_context {
+                    left.push(VirtualLine::Real(old_cursor + i - context_count));
+                    right.push(VirtualLine::Padding);
                 }
-                new_cursor += extra;
+                old_cursor += old_context - context_count;
+            }
+            if new_context > context_count {
+                for i in context_count..new_context {
+                    left.push(VirtualLine::Padding);
+                    right.push(VirtualLine::Real(new_cursor + i - context_count));
+                }
+                new_cursor += new_context - context_count;
             }
 
-            // Collect deleted and inserted lines for this hunk separately
-            // so we can pair them up and pad the shorter side.
+            // ── Process hunk lines ──
             let num_lines = patch.num_lines_in_hunk(hunk_idx).unwrap_or(0);
 
+            // Collect change lines into blocks, flushing when we hit
+            // context or the end of the hunk.
             let mut del_lines: Vec<usize> = Vec::new();
             let mut ins_lines: Vec<usize> = Vec::new();
-
-            // Context lines inside the hunk are emitted immediately as
-            // paired real rows; only +/- lines go into the staging vecs.
             let mut hunk_old = old_cursor;
             let mut hunk_new = new_cursor;
 
-            // We need two passes: first collect context positions so we
-            // can interleave them correctly with the change blocks.
-            // Instead, build a per-line decision list.
-            #[derive(Debug)]
-            enum HunkLine {
-                Context,
-                Del,
-                Ins,
-            }
-            let mut hunk_plan: Vec<HunkLine> = Vec::with_capacity(num_lines);
             for line_idx in 0..num_lines {
                 if let Ok(line) = patch.line_in_hunk(hunk_idx, line_idx) {
                     match line.origin() {
-                        '-' => hunk_plan.push(HunkLine::Del),
-                        '+' => hunk_plan.push(HunkLine::Ins),
-                        ' ' => hunk_plan.push(HunkLine::Context),
+                        '-' => {
+                            del_lines.push(hunk_old);
+                            hunk_old += 1;
+                        }
+                        '+' => {
+                            ins_lines.push(hunk_new);
+                            hunk_new += 1;
+                        }
+                        ' ' => {
+                            // Flush pending change block before the context line
+                            flush_change_block(
+                                &mut del_lines,
+                                &mut ins_lines,
+                                &mut left,
+                                &mut right,
+                            );
+                            left.push(VirtualLine::Real(hunk_old));
+                            right.push(VirtualLine::Real(hunk_new));
+                            hunk_old += 1;
+                            hunk_new += 1;
+                        }
                         _ => {}
                     }
                 }
             }
-
-            // Walk the plan, flushing accumulated del/ins blocks whenever
-            // we hit a context line or the end of the hunk.
-            let flush_block = |del: &mut Vec<usize>,
-                               ins: &mut Vec<usize>,
-                               left: &mut Vec<VirtualLine>,
-                               right: &mut Vec<VirtualLine>| {
-                let max_len = del.len().max(ins.len());
-                for i in 0..max_len {
-                    match (del.get(i), ins.get(i)) {
-                        (Some(&o), Some(&n)) => {
-                            left.push(VirtualLine::Real(o));
-                            right.push(VirtualLine::Real(n));
-                        }
-                        (Some(&o), None) => {
-                            left.push(VirtualLine::Real(o));
-                            right.push(VirtualLine::Padding);
-                        }
-                        (None, Some(&n)) => {
-                            left.push(VirtualLine::Padding);
-                            right.push(VirtualLine::Real(n));
-                        }
-                        (None, None) => {}
-                    }
-                }
-                del.clear();
-                ins.clear();
-            };
-
-            for action in &hunk_plan {
-                match action {
-                    HunkLine::Context => {
-                        // Flush pending change block first
-                        flush_block(&mut del_lines, &mut ins_lines, &mut left, &mut right);
-                        // Emit the context line as a paired real row
-                        left.push(VirtualLine::Real(hunk_old));
-                        right.push(VirtualLine::Real(hunk_new));
-                        hunk_old += 1;
-                        hunk_new += 1;
-                    }
-                    HunkLine::Del => {
-                        del_lines.push(hunk_old);
-                        hunk_old += 1;
-                    }
-                    HunkLine::Ins => {
-                        ins_lines.push(hunk_new);
-                        hunk_new += 1;
-                    }
-                }
-            }
             // Flush any trailing change block at the end of the hunk
-            flush_block(&mut del_lines, &mut ins_lines, &mut left, &mut right);
+            flush_change_block(&mut del_lines, &mut ins_lines, &mut left, &mut right);
 
             old_cursor = hunk_old;
             new_cursor = hunk_new;
         }
 
-        // Flush remaining unchanged lines after the last hunk
+        // ── Flush remaining unchanged lines after the last hunk ──
         let old_remaining = old_line_count.saturating_sub(old_cursor);
         let new_remaining = new_line_count.saturating_sub(new_cursor);
-        let trailing = old_remaining.max(new_remaining);
 
-        for i in 0..trailing {
-            let ol = old_cursor + i;
-            let nl = new_cursor + i;
-            left.push(if ol < old_line_count {
-                VirtualLine::Real(ol)
-            } else {
-                VirtualLine::Padding
-            });
-            right.push(if nl < new_line_count {
-                VirtualLine::Real(nl)
-            } else {
-                VirtualLine::Padding
-            });
+        for i in 0..old_remaining {
+            left.push(VirtualLine::Real(old_cursor + i));
+        }
+        for i in 0..new_remaining {
+            right.push(VirtualLine::Real(new_cursor + i));
         }
 
-        // Invariant: both vecs must always be the same length.
-        // If they diverge due to a bug above, pad the shorter side so
-        // the renderer never panics on an index mismatch.
+        // Pad the shorter side so both vecs have the same length.
+        // Trailing lines after the last hunk don't need per-line pairing;
+        // we just need equal-length vectors for the renderer.
         let max_len = left.len().max(right.len());
         while left.len() < max_len {
             left.push(VirtualLine::Padding);
@@ -209,4 +151,109 @@ impl DiffAlignment {
     pub fn is_empty(&self) -> bool {
         self.left.is_empty()
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Lookup methods for cursor synchronization
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Find the virtual row index where a real rope row first appears
+    /// in the given map.
+    pub fn virtual_row_for_real(map: &[VirtualLine], real_row: usize) -> Option<usize> {
+        map.iter()
+            .position(|vl| matches!(vl, VirtualLine::Real(r) if *r == real_row))
+    }
+
+    /// Given a real row on one side, find the best corresponding real
+    /// row on the other side for cursor synchronization in diff view.
+    ///
+    /// `active_map` — the virtual-line map for the side the cursor is on.
+    /// `sibling_map` — the virtual-line map for the side we want to sync TO.
+    /// `real_row` — the cursor's rope row on the active side.
+    ///
+    /// Returns the nearest real row on the sibling side, searching
+    /// outward from the corresponding virtual row. Prefers searching
+    /// upward (earlier in the file) when distances are equal.
+    pub fn sibling_real_row(
+        active_map: &[VirtualLine],
+        sibling_map: &[VirtualLine],
+        real_row: usize,
+    ) -> usize {
+        // Find the virtual row where the active side has this real row
+        let vrow = Self::virtual_row_for_real(active_map, real_row);
+
+        if let Some(vrow) = vrow {
+            // Check the exact virtual row first (common case: both sides
+            // have real lines here).
+            if let Some(VirtualLine::Real(r)) = sibling_map.get(vrow) {
+                return *r;
+            }
+
+            // Search outward from vrow for the nearest real line on the
+            // sibling side. Prefer upward (vrow - delta) over downward
+            // (vrow + delta) to keep the cursor near the start of change
+            // blocks, matching traditional diff-viewer behavior.
+            let max_delta = sibling_map.len().saturating_sub(1);
+            for delta in 1..=max_delta {
+                // Check above
+                if vrow >= delta {
+                    if let Some(VirtualLine::Real(r)) = sibling_map.get(vrow - delta) {
+                        return *r;
+                    }
+                }
+                // Check below
+                if vrow + delta < sibling_map.len() {
+                    if let Some(VirtualLine::Real(r)) = sibling_map.get(vrow + delta) {
+                        return *r;
+                    }
+                }
+            }
+        }
+
+        // Fallback: return the last real row on the sibling side
+        sibling_map
+            .iter()
+            .rev()
+            .find_map(|vl| match vl {
+                VirtualLine::Real(r) => Some(*r),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+/// Pair up accumulated deletion and insertion lines, padding the
+/// shorter side so both columns have the same number of virtual rows.
+fn flush_change_block(
+    del: &mut Vec<usize>,
+    ins: &mut Vec<usize>,
+    left: &mut Vec<VirtualLine>,
+    right: &mut Vec<VirtualLine>,
+) {
+    let max_len = del.len().max(ins.len());
+    for i in 0..max_len {
+        match (del.get(i), ins.get(i)) {
+            (Some(&o), Some(&n)) => {
+                // Modified line: both sides have content
+                left.push(VirtualLine::Real(o));
+                right.push(VirtualLine::Real(n));
+            }
+            (Some(&o), None) => {
+                // Deleted line: left has content, right is padding
+                left.push(VirtualLine::Real(o));
+                right.push(VirtualLine::Padding);
+            }
+            (None, Some(&n)) => {
+                // Inserted line: left is padding, right has content
+                left.push(VirtualLine::Padding);
+                right.push(VirtualLine::Real(n));
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    del.clear();
+    ins.clear();
 }

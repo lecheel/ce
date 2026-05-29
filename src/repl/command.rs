@@ -10,13 +10,218 @@ use std::path::Path;
 // Command execution (free function)
 // ---------------------------------------------------------------------------
 
-pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
-    let cmd = cmd.trim();
+// Add near the top of command.rs
+fn parse_substitution(cmd: &str) -> Option<(String, String, String)> {
+    if !cmd.starts_with('s') {
+        return None;
+    }
+    let cmd = &cmd[1..];
     if cmd.is_empty() {
+        return None;
+    }
+    let delim = cmd.chars().next()?;
+    if delim.is_alphanumeric() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+
+    for ch in cmd.chars().skip(1) {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == delim {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.push(ch);
+        }
+    }
+    parts.push(current);
+
+    if parts.len() < 2 {
+        return None;
+    }
+    let pattern = parts[0].clone();
+    let replacement = parts[1].clone();
+    let flags = parts.get(2).cloned().unwrap_or_default();
+
+    Some((pattern, replacement, flags))
+}
+
+// command.rs - in execute(), after stripping '<,'> and before the match:
+
+pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
+    let mut cmd_str = cmd.trim().to_string();
+    let mut sel_range = None;
+
+    // 1. Check for visual range marker
+    let had_visual_range = cmd_str.starts_with("'<,'>");
+    if had_visual_range {
+        sel_range = editor.saved_visual_range.take();
+        if sel_range.is_none() {
+            sel_range = editor.get_visual_line_range();
+        }
+        cmd_str = cmd_str.trim_start_matches("'<,'>").trim().to_string();
+    } else {
+        // Clear saved range if not consumed
+        editor.saved_visual_range = None;
+    }
+
+    // Always clear the visual anchor when executing a command from visual mode
+    if editor.active_window().visual_anchor.is_some()
+        && editor.mode() == crate::ed::mode::Mode::Command
+    {
+        editor.active_window_mut().visual_anchor = None;
+        editor.prev_mode = if editor.prev_mode == crate::ed::mode::Mode::Brief {
+            crate::ed::mode::Mode::Brief
+        } else {
+            crate::ed::mode::Mode::Normal
+        };
+    }
+
+    if cmd_str.is_empty() {
         return;
     }
 
-    match cmd {
+    // 2. Block invalid range+command combinations
+    if had_visual_range {
+        // '%s' with a visual range prefix is nonsensical: '<,'> already
+        // constrains the range, and '%' means whole-file. Reject early.
+        let is_percent_subst = (cmd_str.starts_with("%s") || cmd_str.starts_with("s%"))
+            && cmd_str.len() > 2
+            && !cmd_str
+                .chars()
+                .nth(2)
+                .map(|c| c.is_alphanumeric())
+                .unwrap_or(true);
+        if is_percent_subst {
+            editor.set_status_msg(
+                "E481: No range allowed with '%s' when using visual selection ('\\<,'\\>%s is invalid, use '\\<,'\\>s instead)",
+                MessageKind::Error,
+            );
+            return;
+        }
+    }
+
+    match cmd_str.as_str() {
+        // ---- Sort Commands ----
+        s if s.starts_with("sort") => {
+            let (start_row, end_row) = if let Some((r1, r2)) = sel_range {
+                (r1, r2)
+            } else {
+                let total_lines = editor.buf().len_lines();
+                (0, total_lines.saturating_sub(1))
+            };
+            if start_row > end_row {
+                editor.set_status_msg("Nothing to sort", MessageKind::Info);
+            } else {
+                let mut reverse = s.starts_with("sort!");
+                let arg_str = if reverse {
+                    s.strip_prefix("sort!").unwrap_or("").trim()
+                } else {
+                    s.strip_prefix("sort").unwrap_or("").trim()
+                };
+                let mut unique = false;
+                let mut case_insensitive = false;
+                for word in arg_str.split_whitespace() {
+                    match word {
+                        "u" | "unique" => unique = true,
+                        "i" | "ignore" | "insensitive" => case_insensitive = true,
+                        "r" | "reverse" => reverse = true,
+                        _ => {}
+                    }
+                }
+                {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    buf.push_undo(win.row, win.col);
+                }
+                let mut lines = Vec::new();
+                {
+                    let buf = editor.buf();
+                    for r in start_row..=end_row {
+                        lines.push(buf.line_text(r));
+                    }
+                }
+                if case_insensitive {
+                    lines.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                } else {
+                    lines.sort();
+                }
+                if reverse {
+                    lines.reverse();
+                }
+                if unique {
+                    lines.dedup_by(|a, b| {
+                        if case_insensitive {
+                            a.to_lowercase() == b.to_lowercase()
+                        } else {
+                            a == b
+                        }
+                    });
+                }
+                // Reconstruct replacement string, normalizing line endings
+                let mut replacement = String::new();
+                for line in &lines {
+                    let clean = line.trim_end_matches('\n').trim_end_matches('\r');
+                    replacement.push_str(clean);
+                    replacement.push('\n');
+                }
+                let (win, buf) = editor.active_window_and_buf_mut();
+                let start_char = buf.rope.line_to_char(start_row);
+                let end_char = if end_row + 1 >= buf.len_lines() {
+                    buf.rope.len_chars()
+                } else {
+                    buf.rope.line_to_char(end_row + 1)
+                };
+                buf.rope.remove(start_char..end_char);
+                buf.rope.insert(start_char, &replacement);
+                buf.mark_modified();
+                buf.parse_syntax();
+                win.row = start_row;
+                win.col = 0;
+                win.desired_col = 0;
+                let msg = format!(
+                    "Sorted {} lines{}",
+                    lines.len(),
+                    if unique { " (unique)" } else { "" }
+                );
+                editor.set_status_msg(&msg, MessageKind::Success);
+            }
+        }
+
+        // ---- Substitution Commands ----
+        s if (s.starts_with("%s") || s.starts_with("s%")) && s.len() > 2 && {
+            let delim = s.chars().nth(2).unwrap();
+            !delim.is_alphanumeric()
+        } =>
+        {
+            if let Some((pattern, replacement, flags)) = parse_substitution(&s[1..]) {
+                // %s means whole file, overrides any visual range
+                editor.start_substitution(pattern, replacement, flags, None, true);
+            } else {
+                editor.set_status_msg("Invalid substitution format", MessageKind::Error);
+            }
+        }
+        s if s.starts_with('s')
+            && s.len() > 1
+            && !s.starts_with("split")
+            && !s.starts_with("sp")
+            && {
+                let delim = s.chars().nth(1).unwrap();
+                !delim.is_alphanumeric()
+            } =>
+        {
+            if let Some((pattern, replacement, flags)) = parse_substitution(s) {
+                // Pass the visual selection range if it exists (Some), otherwise None (current line only)
+                editor.start_substitution(pattern, replacement, flags, sel_range, false);
+            } else {
+                editor.set_status_msg("Invalid substitution format", MessageKind::Error);
+            }
+        }
         // ---- Mode Switching ----
         "vim" | "normal" => {
             editor.enter_normal();
@@ -328,6 +533,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "diffthis" | "gd" => {
             editor.open_diffthis();
         }
+        "doff" | "diffoff" => {
+            editor.diffoff();
+        }
         "stash" => {
             editor.handle_stash_command("");
         }
@@ -406,7 +614,7 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
 
         // ---- Unknown ----
         _ => {
-            editor.set_status_msg(&format!("Unknown command: {}", cmd), MessageKind::Error);
+            editor.set_status_msg(&format!("Unknown command: {}", cmd_str), MessageKind::Error);
         }
     }
 }
@@ -425,8 +633,8 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "on", "only", "vim", "brief", "scankey", "ff", "finder", "filepicker", 
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
-        "command_palette","guide","guide sync", "guide update", "gen_desc",
-        "tag", "ta", "retag", "tags",
+        "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
+        "tag", "ta", "retag", "tags", "sort",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

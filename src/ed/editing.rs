@@ -92,7 +92,20 @@ fn grapheme_at_col(line: &str, col: usize) -> Option<(usize, usize, usize)> {
     None
 }
 
-fn col_from_char_offset(line: &str, target_offset: usize) -> usize {
+/// Returns the visual width of the grapheme at the given visual column.
+pub fn grapheme_width_at_col(buf: &Buffer, row: usize, col: usize) -> usize {
+    if row >= buf.len_lines() {
+        return 1;
+    }
+    let line_text = buf.line_text(row);
+    if let Some((_, _, width)) = grapheme_at_col(&line_text, col) {
+        width
+    } else {
+        1
+    }
+}
+
+pub fn col_from_char_offset(line: &str, target_offset: usize) -> usize {
     let mut char_offset = 0;
     let mut col = 0;
     for grapheme in graphemes(line) {
@@ -155,72 +168,116 @@ pub fn insert_char(win: &mut Window, buf: &mut Buffer, ch: char) {
 
 /// Insert a newline at the cursor position, auto-copying indentation.
 pub fn insert_newline(win: &mut Window, buf: &mut Buffer) {
-    if !cursor_in_bounds(win, buf) {
-        return;
-    }
-    let current_line_text = buf.line_text(win.row);
-    let leading_whitespace: String = current_line_text
+    let row = win.row;
+
+    let line_text = buf.line_text(row);
+
+    // Resolve the visual column to a character offset
+    let (char_offset, _) = find_grapheme_boundary(&line_text, win.col);
+
+    let chars: Vec<char> = line_text.chars().collect();
+
+    // Split the line at the cursor using character indices (safe for multi-byte/emoji)
+    let before: String = chars[..char_offset].iter().collect();
+    let after: String = chars[char_offset..].iter().collect();
+
+    // Trim trailing whitespace from the line we are leaving (standard Vim behavior)
+    let before_trimmed = before.trim_end();
+
+    // Calculate base indentation from the ORIGINAL full line.
+    // This ensures that if the cursor is at col 0 on an indented line,
+    // we preserve the block indentation.
+    let base_indent: String = line_text
         .chars()
         .take_while(|c| c.is_whitespace())
         .collect();
-    let indent_width = display_width(&leading_whitespace);
 
-    let line_start = buf.rope.line_to_char(win.row);
-    let (insert_char_offset, _) = find_grapheme_boundary(&current_line_text, win.col);
-    let insert_pos = line_start + insert_char_offset;
+    // Determine the new indentation for the second line
+    let mut new_indent = base_indent;
 
-    let insert_text = format!("\n{}", leading_whitespace);
-    buf.rope.insert(insert_pos, &insert_text);
+    // Heuristic: if the first half ends with '{', increase indentation level
+    if before_trimmed.ends_with('{') {
+        new_indent.push_str("    "); // Assuming 4-space indent
+    }
 
-    win.row += 1;
-    win.col = indent_width;
-    win.desired_col = win.col;
+    // Strip original leading whitespace to prevent double indentation
+    let after_trimmed = after.trim_start();
+    // Strip trailing line breaks so we can control formatting cleanly
+    let after_clean = after_trimmed.trim_end_matches(|c| c == '\r' || c == '\n');
+
+    // Reconstruct the two lines
+    let line1 = before_trimmed.to_string();
+    let line2 = format!("{}{}", new_indent, after_clean);
+
+    // Replace the current line in the Rope
+    let start_char = buf.rope.line_to_char(row);
+    let end_char = if row + 1 >= buf.len_lines() {
+        buf.rope.len_chars()
+    } else {
+        buf.rope.line_to_char(row + 1)
+    };
+
+    buf.rope.remove(start_char..end_char);
+    // Explicitly add a newline after both lines to keep the next line split
+    buf.rope
+        .insert(start_char, &format!("{}\n{}\n", line1, line2));
+
+    // Update cursor to the beginning of the text on the new line
+    win.row = row + 1;
+    win.col = new_indent.chars().count();
+
     buf.mark_modified();
 }
 
-/// Insert a newline at the end of the current line (vim `o`).
 pub fn insert_newline_below(win: &mut Window, buf: &mut Buffer) {
-    if !cursor_in_bounds(win, buf) {
-        return;
-    }
-    let current_line_text = buf.line_text(win.row);
-    let leading_whitespace: String = current_line_text
+    let row = win.row;
+    let raw_line = buf.line_text(row);
+    let line_text = raw_line.trim_end_matches('\n');
+
+    let indent: String = line_text
         .chars()
         .take_while(|c| c.is_whitespace())
         .collect();
-    let indent_width = display_width(&leading_whitespace);
 
-    let line_end_col = display_width(&current_line_text);
-    win.col = line_end_col;
+    let mut new_indent = indent;
+    let trimmed = line_text.trim_end();
+    if trimmed.ends_with('{') {
+        new_indent.push_str("    ");
+    }
 
-    let line_start = buf.rope.line_to_char(win.row);
-    let insert_pos = line_start + current_line_text.chars().count();
+    let new_line = format!("{}\n", new_indent);
 
-    let insert_text = format!("\n{}", leading_whitespace);
-    buf.rope.insert(insert_pos, &insert_text);
+    let insert_pos = if row + 1 >= buf.len_lines() {
+        buf.rope.len_chars()
+    } else {
+        buf.rope.line_to_char(row + 1)
+    };
 
-    win.row += 1;
-    win.col = indent_width;
-    win.desired_col = win.col;
+    buf.rope.insert(insert_pos, &new_line);
+
+    win.row = row + 1;
+    win.col = new_indent.chars().count();
+
     buf.mark_modified();
 }
 
-/// Insert a newline at the start of the current line (vim `O`).
 pub fn insert_newline_above(win: &mut Window, buf: &mut Buffer) {
-    if !cursor_in_bounds(win, buf) {
-        return;
-    }
-    let current_line_text = buf.line_text(win.row);
-    let leading_whitespace: String = current_line_text
+    let row = win.row;
+    let raw_line = buf.line_text(row);
+    let line_text = raw_line.trim_end_matches('\n');
+
+    let indent: String = line_text
         .chars()
         .take_while(|c| c.is_whitespace())
         .collect();
-    let indent_width = display_width(&leading_whitespace);
-    let line_start = buf.rope.line_to_char(win.row);
-    let insert_text = format!("{}\n", leading_whitespace);
-    buf.rope.insert(line_start, &insert_text);
-    win.col = indent_width;
-    win.desired_col = win.col;
+    let new_line = format!("{}\n", indent);
+
+    let insert_pos = buf.rope.line_to_char(row);
+    buf.rope.insert(insert_pos, &new_line);
+
+    win.row = row;
+    win.col = indent.chars().count();
+
     buf.mark_modified();
 }
 

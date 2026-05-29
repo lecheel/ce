@@ -14,6 +14,284 @@ use crate::Editor;
 
 const MAX_WINDOWS: usize = 8;
 
+/// A single hunk boundary computed from git2::Patch.
+#[derive(Debug, Clone)]
+pub struct HunkRange {
+    /// 0-based index in the patch.
+    pub idx: usize,
+    /// First changed row (0-based).
+    pub start_row: usize,
+    /// Last changed row (0-based, inclusive).
+    pub end_row: usize,
+    /// Number of lines in the new (working-tree) version.
+    pub new_count: usize,
+    /// Number of lines in the old (HEAD) version.
+    pub old_count: usize,
+}
+
+/// Cache for hunk ranges to avoid recomputing the patch every `]c` / `[c`.
+#[derive(Debug, Clone)]
+pub struct HunkCache {
+    pub filename: String,
+    /// Simple invalidation key: char count of the buffer rope when cached.
+    pub rope_len: usize,
+    pub hunks: Vec<HunkRange>,
+}
+
+impl Editor {
+    /// Invalidate hunk cache (call after edits or hunk reverts).
+    pub fn invalidate_hunk_cache(&mut self) {
+        self.hunk_cache = None;
+    }
+
+    /// Return cached hunk ranges, computing them if stale.
+    fn ensure_hunk_ranges(&mut self) -> Option<Vec<HunkRange>> {
+        let filename = self.buf().filename.clone()?;
+        let rope_len = self.buf().rope.len_chars();
+
+        let needs_recompute = match &self.hunk_cache {
+            None => true,
+            Some(c) => c.filename != filename || c.rope_len != rope_len,
+        };
+
+        if needs_recompute {
+            let hunks = self.compute_hunk_ranges_from_patch(&filename)?;
+            self.hunk_cache = Some(HunkCache {
+                filename,
+                rope_len,
+                hunks,
+            });
+        }
+
+        Some(self.hunk_cache.as_ref()?.hunks.clone())
+    }
+
+    /// Compute accurate hunk ranges from git2::Patch.
+    fn compute_hunk_ranges_from_patch(&self, filename: &str) -> Option<Vec<HunkRange>> {
+        let path = std::path::Path::new(filename);
+        let repo = git2::Repository::discover(path).ok()?;
+        let workdir = repo.workdir()?;
+
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let rel_path = canon
+            .strip_prefix(workdir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+
+        let head_content = get_head_file_content(&repo, &rel_path)?;
+        let current_content = self.buf().rope.to_string();
+
+        let patch = git2::Patch::from_buffers(
+            head_content.as_bytes(),
+            Some(std::path::Path::new(&rel_path)),
+            current_content.as_bytes(),
+            Some(std::path::Path::new(&rel_path)),
+            None,
+        )
+        .ok()?;
+
+        let mut ranges = Vec::new();
+        for i in 0..patch.num_hunks() {
+            let hunk = match patch.hunk(i) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            let new_start_1 = hunk.0.new_start().max(1) as usize;
+            let new_count = hunk.0.new_lines().max(0) as usize;
+            let old_count = hunk.0.old_lines().max(0) as usize;
+
+            let start_row = new_start_1.saturating_sub(1);
+            let end_row = if new_count > 0 {
+                start_row + new_count - 1
+            } else {
+                // Pure deletion: the hunk is anchored at the line above.
+                start_row
+            };
+
+            ranges.push(HunkRange {
+                idx: i,
+                start_row,
+                end_row,
+                new_count,
+                old_count,
+            });
+        }
+
+        Some(ranges)
+    }
+
+    /// Jump to the start of the next hunk (`]c`). Wraps around.
+    pub fn jump_to_next_hunk_v1(&mut self) {
+        let hunks = match self.ensure_hunk_ranges() {
+            Some(h) if !h.is_empty() => h,
+            _ => {
+                self.set_status_msg("No git hunks found", MessageKind::Info);
+                return;
+            }
+        };
+
+        let current_row = self.active_window().row;
+        let total = hunks.len();
+
+        // Cursor is *inside* a hunk → skip to the one after it
+        let inside = hunks
+            .iter()
+            .find(|h| current_row >= h.start_row && current_row <= h.end_row);
+
+        let target = if let Some(current) = inside {
+            hunks
+                .iter()
+                .find(|h| h.start_row > current.end_row)
+                .or_else(|| hunks.first())
+        } else {
+            // Cursor is between hunks → find next start after cursor
+            hunks
+                .iter()
+                .find(|h| h.start_row > current_row)
+                .or_else(|| hunks.first())
+        };
+
+        if let Some(hunk) = target {
+            let wrapped = hunk.start_row <= current_row;
+            self.land_on_hunk(hunk, total, wrapped);
+        }
+    }
+
+    /// Jump to the start of the previous hunk (`[c`). Wraps around.
+    pub fn jump_to_prev_hunk_v1(&mut self) {
+        let hunks = match self.ensure_hunk_ranges() {
+            Some(h) if !h.is_empty() => h,
+            _ => {
+                self.set_status_msg("No git hunks found", MessageKind::Info);
+                return;
+            }
+        };
+
+        let current_row = self.active_window().row;
+        let total = hunks.len();
+
+        let inside = hunks
+            .iter()
+            .find(|h| current_row >= h.start_row && current_row <= h.end_row);
+
+        let target = if let Some(current) = inside {
+            hunks
+                .iter()
+                .rev()
+                .find(|h| h.end_row < current.start_row)
+                .or_else(|| hunks.last())
+        } else {
+            hunks
+                .iter()
+                .rev()
+                .find(|h| h.start_row < current_row)
+                .or_else(|| hunks.last())
+        };
+
+        if let Some(hunk) = target {
+            let wrapped = hunk.start_row >= current_row;
+            self.land_on_hunk(hunk, total, wrapped);
+        }
+    }
+
+    /// Move cursor to a hunk, scroll it into view, show stats, and sync diff sibling.
+    fn land_on_hunk(&mut self, hunk: &HunkRange, total: usize, wrapped: bool) {
+        self.active_window_mut().save_jump_position();
+
+        let win = self.active_window_mut();
+        win.row = hunk.start_row;
+        win.col = 0;
+        win.desired_col = 0;
+        self.scroll_active_window_to_cursor();
+
+        // ── Sync diff sibling if active ──
+        // This ensures both panes in :diffthis jump to the hunk together!
+        self.sync_diff_windows();
+
+        // ── Rich status line ──
+        let kind = if hunk.new_count > 0 && hunk.old_count > 0 {
+            format!("±{}/{}", hunk.new_count, hunk.old_count)
+        } else if hunk.new_count > 0 {
+            format!("+{}", hunk.new_count)
+        } else {
+            format!("-{}", hunk.old_count)
+        };
+
+        let wrap_tag = if wrapped { " (wrap)" } else { "" };
+        self.set_status_msg(
+            &format!(
+                "Hunk {}/{} {} ─ line {}{}",
+                hunk.idx + 1,
+                total,
+                kind,
+                hunk.start_row + 1,
+                wrap_tag
+            ),
+            MessageKind::Info,
+        );
+    }
+
+    /// `:diffoff` — close the diff split, return to a single pane.
+    pub fn diffoff(&mut self) {
+        // 1. Find the HEAD buffer (the one that must be closed)
+        let head_bid = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::GitDiffHead)
+            .map(|b| b.id);
+
+        let Some(hbid) = head_bid else {
+            self.set_status_msg("No diff session active", MessageKind::Info);
+            return;
+        };
+
+        // 2. Find the window showing the HEAD buffer
+        let head_win_id = self
+            .windows
+            .iter()
+            .find(|w| w.buffer_id() == hbid)
+            .map(|w| w.id);
+
+        // 3. Clear alignment and sibling links on all buffers/windows
+        for buf in &mut self.buffers {
+            buf.diff_alignment = None;
+        }
+        for win in &mut self.windows {
+            win.diff_sibling = None;
+        }
+
+        // 4. Remove the HEAD buffer from the buffer list
+        self.buffers.retain(|b| b.id != hbid);
+
+        // 5. If a window was showing the HEAD buffer, close it
+        if let Some(hw_id) = head_win_id {
+            self.layout.remove_leaf(hw_id);
+
+            if let Some(remove_idx) = self.windows.iter().position(|w| w.id == hw_id) {
+                self.windows.remove(remove_idx);
+
+                // Adjust active_window_idx to ensure it's valid
+                // and points to the surviving (working-copy) window
+                if !self.windows.is_empty() {
+                    if self.active_window_idx > remove_idx {
+                        self.active_window_idx -= 1;
+                    } else if self.active_window_idx >= self.windows.len() {
+                        self.active_window_idx = self.windows.len() - 1;
+                    }
+                } else {
+                    self.active_window_idx = 0;
+                }
+            }
+        }
+
+        // Invalidate hunk cache so it recalculates cleanly for the working copy
+        self.invalidate_hunk_cache();
+
+        self.set_status_msg("Diff view closed", MessageKind::Info);
+    }
+}
+
 impl Editor {
     // ── Set bookmark ────────────────────────────────────────────
 
@@ -114,8 +392,8 @@ impl Editor {
     }
 
     /// Synchronize scrolling and cursor positions for side-by-side linked diff windows.
-    // In editor.rs — replace sync_diff_windows entirely
 
+    /// Synchronize scrolling and cursor positions for side-by-side linked diff windows.
     pub fn sync_diff_windows(&mut self) {
         let active_win_idx = self.active_window_idx;
         let active_win = &self.windows[active_win_idx];
@@ -133,26 +411,17 @@ impl Editor {
             return;
         }
 
-        // 1. Sync scroll unconditionally
+        // 1. Sync scroll unconditionally so both panes show the same
+        //    virtual rows.
         self.windows[sib_idx].scroll_line = scroll_line;
         self.windows[sib_idx].scroll_col = scroll_col;
 
         let sibling_bid = self.windows[sib_idx].buffer_id();
         let active_bid = self.windows[active_win_idx].buffer_id();
 
-        // 2. Use the alignment map to translate the active virtual row
-        //    into the sibling's real rope row.
-        //
-        //    The alignment maps are stored on BOTH buffers identically.
-        //    If the active window is on the working-copy side (right),
-        //    we look up cursor_row in align.right to find the real rope
-        //    row, then find the matching position in align.left for the
-        //    sibling, and vice-versa.
-        //
-        //    Fallback: if no alignment exists, mirror the row directly.
-
+        // 2. Use the alignment map to translate the active cursor row
+        //    into the sibling's corresponding real rope row.
         let sibling_real_row: usize = {
-            // Try to get the alignment from either buffer (they're identical)
             let alignment = self
                 .buf_by_id(active_bid)
                 .and_then(|b| b.diff_alignment.as_ref())
@@ -168,48 +437,17 @@ impl Editor {
                     .map(|f| f.starts_with("git://head/"))
                     .unwrap_or(false);
 
-                // active_map: the side the active window is on
-                // sibling_map: the side we want to sync TO
                 let (active_map, sibling_map) = if active_is_head {
                     (&align.left, &align.right)
                 } else {
                     (&align.right, &align.left)
                 };
 
-                // Walk virtual rows to find one whose active-side real row
-                // is >= cursor_row, then return the sibling real row there.
-                // This keeps both cursors visually aligned.
-                let mut best_sibling_row = 0usize;
-                let mut found = false;
-
-                for vrow in 0..active_map.len() {
-                    use crate::ed::buffer::VirtualLine;
-                    if let Some(VirtualLine::Real(r)) = active_map.get(vrow) {
-                        if *r >= cursor_row {
-                            // Find the nearest real row on the sibling side
-                            // at or after this virtual row
-                            for sv in vrow..sibling_map.len() {
-                                if let Some(VirtualLine::Real(sr)) = sibling_map.get(sv) {
-                                    best_sibling_row = *sr;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                // cursor is past last real row on sibling — clamp to last
-                                for sv in (0..vrow).rev() {
-                                    if let Some(VirtualLine::Real(sr)) = sibling_map.get(sv) {
-                                        best_sibling_row = *sr;
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                best_sibling_row
+                crate::ed::diff_align::DiffAlignment::sibling_real_row(
+                    active_map,
+                    sibling_map,
+                    cursor_row,
+                )
             } else {
                 // No alignment — mirror directly, clamped to rope length
                 let max = self
@@ -221,16 +459,17 @@ impl Editor {
         };
 
         // 3. Clamp to the sibling rope's actual line count and apply
-        let (max_row, line_char_len) = self
+        let max_row = self
             .buf_by_id(sibling_bid)
-            .map(|b| {
-                let max = b.len_lines().saturating_sub(1);
-                let safe = sibling_real_row.min(max);
-                (max, b.line_char_len(safe))
-            })
-            .unwrap_or((0, 0));
-
+            .map(|b| b.len_lines().saturating_sub(1))
+            .unwrap_or(0);
         let clamped_row = sibling_real_row.min(max_row);
+
+        let line_char_len = self
+            .buf_by_id(sibling_bid)
+            .map(|b| b.line_char_len(clamped_row))
+            .unwrap_or(0);
+
         self.windows[sib_idx].row = clamped_row;
         self.windows[sib_idx].col = self.windows[sib_idx].col.min(line_char_len);
     }
@@ -1742,6 +1981,22 @@ impl Editor {
         let bid = self.active_window().buffer_id();
         if let Some(buf) = self.buffers.iter_mut().find(|b| b.id == bid) {
             buf.filename = Some(path);
+        }
+    }
+
+    /// Returns true if the which-key popup should be rendered.
+    /// Implements a configurable debounce: if keys in a sequence are pressed
+    /// faster than `which_key_delay_ms` apart, the popup stays hidden.
+    pub fn is_whichkey_visible(&self) -> bool {
+        if self.pending_keys.is_empty() {
+            return false;
+        }
+
+        let delay = std::time::Duration::from_millis(self.config.which_key_delay_ms);
+
+        match self.pending_keys_time {
+            Some(time) => time.elapsed() >= delay,
+            None => true, // Fallback if time wasn't set
         }
     }
 }

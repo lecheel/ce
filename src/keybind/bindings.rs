@@ -290,6 +290,8 @@ pub fn resolve_single_key(
                     KeyCode::Char('d') => Some(Action::CommandDeleteChar),
                     KeyCode::Char('k') => Some(Action::CommandLineKillToEnd),
                     KeyCode::Char('r') => Some(Action::CommandEnterRegisterMode),
+                    KeyCode::Char('n') | KeyCode::Char('N') => Some(Action::CommandHistoryNext),
+                    KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::CommandHistoryPrev),
                     _ => None,
                 };
             }
@@ -310,6 +312,8 @@ pub fn resolve_single_key(
                 KeyCode::Home => Some(Action::CommandLineStart),
                 KeyCode::End => Some(Action::CommandLineEnd),
                 KeyCode::Char(ch) => Some(Action::CommandChar(ch)),
+                KeyCode::Up => Some(Action::CommandHistoryPrev),
+                KeyCode::Down => Some(Action::CommandHistoryNext),
                 _ => None,
             }
         }
@@ -583,6 +587,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
     if action.modifies_buffer() {
         let buf_id = editor.buf().id;
         editor.git_debounce.notify_edit(buf_id);
+        editor.invalidate_hunk_cache();
     }
 
     // ── ② Recording State Engine (FIXED) ──────────────────────────────
@@ -1154,7 +1159,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                                 + win.position.height.saturating_sub(1))
                             .min(buf.len_lines().saturating_sub(1));
                             win.row = last_visible;
-                            win.col = buf.line_char_len(win.row).saturating_sub(1);
+                            win.col = editing::line_display_width(buf, win.row).saturating_sub(1);
                             win.desired_col = win.col;
                             win.clamp_cursor(buf);
                         }
@@ -1521,6 +1526,10 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 editing::delete_current_line(win, buf);
             }
             editor.clipboard = Some(deleted_text);
+
+            // Recalculate column boundary with visual dimensions
+            let (win, buf) = editor.active_window_and_buf_mut();
+            win.col = win.col.min(editing::line_display_width(buf, win.row));
             editor.comp.on_edit();
         }
         Action::DeleteToEndOfLine => {
@@ -1581,8 +1590,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::EnterAppend => {
             let (win, buf) = editor.active_window_and_buf_mut();
-            win.col = (win.col + 1).min(buf.line_char_len(win.row));
-            let _ = buf;
+            let step = editing::grapheme_width_at_col(buf, win.row, win.col);
+            let max_width = editing::line_display_width(buf, win.row);
+            win.col = (win.col + step).min(max_width);
             editor.enter_insert();
         }
         Action::EnterInsertLineStart => {
@@ -1614,7 +1624,39 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.enter_insert();
         }
         Action::EnterCommand => {
+            let prev_mode = editor.mode();
+            // Save the visual range BEFORE any anchor clearing
+            let visual_range = if matches!(
+                prev_mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) {
+                editor.get_visual_line_range()
+            } else {
+                None
+            };
+            // Save it on the editor for use in command execution
+            editor.saved_visual_range = visual_range;
+
+            let visual_anchor = if matches!(
+                prev_mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) {
+                editor.active_window().visual_anchor
+            } else {
+                None
+            };
             editor.enter_command();
+            if visual_anchor.is_some() {
+                editor.active_window_mut().visual_anchor = visual_anchor;
+            }
+            if matches!(
+                prev_mode,
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) {
+                for ch in "'<,'>".chars() {
+                    editor.push_command(ch);
+                }
+            }
         }
         Action::EnterNormal => {
             editor.finalize_visual_block_insert(pre_captured_insert.clone());
@@ -1623,7 +1665,8 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let win = editor.active_window();
                     (win.row, win.col)
                 };
-                let max_col = editor.buf().line_char_len(row).saturating_sub(1);
+                let buf = editor.buf();
+                let max_col = editing::line_display_width(buf, row).saturating_sub(1);
                 let new_col = if col > 0 { col - 1 } else { 0 };
                 let win = editor.active_window_mut();
                 win.col = new_col.min(max_col);
@@ -1671,6 +1714,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let target_mode = editor.prev_mode;
             editor.set_mode(target_mode);
             if !query.is_empty() {
+                // Save the search query to history so Up/Down can find it later
+                editor.append_and_save_search_history(&query);
+
                 editor.last_search_query = Some(query.clone());
                 let (start_char, text) = {
                     let (win, buf) = editor.active_window_and_buf_mut();
@@ -1703,7 +1749,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     let row = buf.rope.char_to_line(pos);
                     win.row = row;
-                    win.col = pos - buf.rope.line_to_char(row);
+                    let line_text = buf.line_text(row);
+                    let char_offset = pos - buf.rope.line_to_char(row);
+                    win.col = editing::col_from_char_offset(&line_text, char_offset);
                     let viewport_h = win.position.height;
                     let viewport_w = win.position.width;
                     win.scroll_to_cursor(viewport_h, viewport_w, gutter);
@@ -1761,7 +1809,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     let row = buf.rope.char_to_line(pos);
                     win.row = row;
-                    win.col = pos - buf.rope.line_to_char(row);
+                    let line_text = buf.line_text(row);
+                    let char_offset = pos - buf.rope.line_to_char(row);
+                    win.col = editing::col_from_char_offset(&line_text, char_offset);
                     let viewport_h = win.position.height;
                     let viewport_w = win.position.width;
                     win.scroll_to_cursor(viewport_h, viewport_w, gutter);
@@ -1808,7 +1858,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     let row = buf.rope.char_to_line(pos);
                     win.row = row;
-                    win.col = pos - buf.rope.line_to_char(row);
+                    let line_text = buf.line_text(row);
+                    let char_offset = pos - buf.rope.line_to_char(row);
+                    win.col = editing::col_from_char_offset(&line_text, char_offset);
                     let viewport_h = win.position.height;
                     let viewport_w = win.position.width;
                     win.scroll_to_cursor(viewport_h, viewport_w, gutter);
@@ -2121,7 +2173,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 let (win, buf) = editor.active_window_and_buf_mut();
                 let target_row = (start_row + count - 1).min(buf.len_lines().saturating_sub(1));
                 win.row = target_row;
-                win.col = win.col.min(buf.line_char_len(target_row));
+                win.col = win.col.min(editing::line_display_width(buf, target_row));
             }
 
             // Now delete from current line to end of file.
@@ -2227,7 +2279,8 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     let win = editor.active_window();
                     (win.row, win.col)
                 };
-                let max_col = editor.buf().line_char_len(row).saturating_sub(1);
+                let buf = editor.buf();
+                let max_col = editing::line_display_width(buf, row).saturating_sub(1);
                 let new_col = if col > 0 { col - 1 } else { 0 };
                 let win = editor.active_window_mut();
                 win.col = new_col.min(max_col);
@@ -2279,14 +2332,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::CommandBackspace => {
             editor.pop_command();
-            editor.cmd_history_idx = None;
-            editor.history_search_prefix = None;
+            editor.reset_history_idx();
             editor.comp.on_edit();
         }
         Action::CommandChar(ch) => {
             editor.push_command(ch);
-            editor.cmd_history_idx = None;
-            editor.history_search_prefix = None;
+            editor.reset_history_idx();
             editor.comp.on_edit();
         }
         Action::CommandHistoryPrev => {
@@ -2335,7 +2386,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             {
                 let max_row = editor.buf().len_lines().saturating_sub(1);
                 let safe_row = editor.active_window().row.min(max_row);
-                let max_col = editor.buf().line_char_len(safe_row);
+                let max_col = editing::line_display_width(editor.buf(), safe_row);
                 let win = editor.active_window_mut();
                 win.row = safe_row;
                 win.col = win.col.min(max_col);
@@ -2667,9 +2718,9 @@ fn clamp_cursor_after_paste(editor: &mut Editor) {
     let (win, buf) = editor.active_window_and_buf_mut();
     let max_row = buf.len_lines().saturating_sub(1);
     win.row = win.row.min(max_row);
-    let max_col = buf.line_char_len(win.row).saturating_sub(1);
+    let max_col = editing::line_display_width(buf, win.row).saturating_sub(1);
     // saturating_sub(1) would underflow on an empty line; guard for that.
-    win.col = if buf.line_char_len(win.row) == 0 {
+    win.col = if editing::line_display_width(buf, win.row) == 0 {
         0
     } else {
         win.col.min(max_col)

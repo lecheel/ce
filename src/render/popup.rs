@@ -1631,7 +1631,8 @@ fn draw_mru(f: &mut Frame, editor: &Editor, screen: Rect) {
 /// Collapses duplicate first-key prefixes into `key+(N)` rows.
 /// Called once from `render::draw`, after `draw_popup`.
 pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
-    if editor.pending_keys.is_empty() {
+    // ── Debounce: skip rendering if the 150ms window hasn't elapsed ──
+    if !editor.is_whichkey_visible() {
         return;
     }
     if editor.popup.is_open() {

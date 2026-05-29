@@ -15,8 +15,8 @@ pub mod movement;
 pub mod position;
 pub mod ripgrep;
 pub mod syntax;
-pub mod window;
 pub mod tag;
+pub mod window;
 
 // Register the new repeat and gutter modules in the compiler tree
 pub mod gutter;

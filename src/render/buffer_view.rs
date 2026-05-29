@@ -317,14 +317,19 @@ fn draw_pane(
             || mode == Mode::VisualLine
             || mode == Mode::VisualBlock
             || editor.visual_block_insert_state.is_some()
-            || (mode == Mode::Brief && win.visual_anchor.is_some());
+            || (mode == Mode::Brief && win.visual_anchor.is_some())
+            || (mode == Mode::Command && win.visual_anchor.is_some()); // NEW: Keep highlight in command mode
 
         let block_insert_col = editor.visual_block_insert_state.as_ref().map(|s| s.col);
 
         let mut selected_mask: Vec<bool> = (0..chars.len())
             .map(|c_idx| {
                 if is_selecting {
-                    let eval_mode = if block_insert_col.is_some() {
+                    // If we are in Command mode with a visual anchor, use prev_mode
+                    // to correctly render Visual vs VisualLine vs VisualBlock selections
+                    let eval_mode = if mode == Mode::Command && win.visual_anchor.is_some() {
+                        editor.prev_mode
+                    } else if block_insert_col.is_some() {
                         Mode::VisualBlock
                     } else {
                         mode

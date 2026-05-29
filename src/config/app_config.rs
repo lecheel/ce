@@ -61,6 +61,10 @@ fn default_llm_system_prompt() -> String {
     "You are a helpful, concise coding assistant inside a terminal text editor. Provide clear, accurate answers. Use markdown code blocks when providing code examples. Keep responses relatively brief.".to_string()
 }
 
+fn default_which_key_delay_ms() -> u64 {
+    300
+}
+
 // ---------------------------------------------------------------------------
 // Command Palette Description Overrides
 // ---------------------------------------------------------------------------
@@ -190,6 +194,11 @@ pub struct Config {
     pub cursor_line_highlight: bool,
     #[serde(default = "default_cursor_line_highlight_color")]
     pub cursor_line_highlight_color: String,
+    // Which-key popup debounce delay in milliseconds.
+    // Set to 0 to show instantly, or a higher number to hide it during fast typing.
+    #[serde(default = "default_which_key_delay_ms")]
+    pub which_key_delay_ms: u64,
+
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
 }
@@ -225,6 +234,7 @@ impl Default for Config {
             search_wrap_enabled: false,
             show_startup_hints: true,
             scroll_offset: 0,
+            which_key_delay_ms: 300,
             show_indent_guides: true,
             tab_size: 4,
             format_on_save: false,
@@ -292,6 +302,7 @@ impl Config {
                 bookmarks_enabled: true,
                 show_startup_hints: true,
                 scroll_offset: 0,
+                which_key_delay_ms: 300,
                 show_indent_guides: true,
                 tab_size: 4,
                 format_on_save: false,

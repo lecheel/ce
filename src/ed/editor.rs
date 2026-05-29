@@ -90,6 +90,7 @@ pub struct Editor {
     pub spinner_frame: usize,
 
     pub pending_keys: String,
+    pub pending_keys_time: Option<std::time::Instant>,
     pub popup: PopupState,
     pub config_bool_keys: Vec<String>,
 
@@ -104,6 +105,11 @@ pub struct Editor {
     pub cmd_history_idx: Option<usize>,
     pub cmd_temp_input: String,
     pub history_search_prefix: Option<String>,
+
+    pub search_history: Vec<String>,
+    pub search_history_idx: Option<usize>,
+    pub search_temp_input: String,
+    pub search_history_prefix: Option<String>,
 
     pub status_state: StatusBarState,
     pub prev_mode: Mode,
@@ -134,6 +140,10 @@ pub struct Editor {
     pub needs_initial_scroll: bool,
     pub pending_register: bool,
     pub tag_manager: crate::ed::tag::TagManager,
+    pub substitution_state: Option<crate::ed::handle::subst::SubstitutionState>,
+    pub prev_search_query: Option<String>,
+    pub saved_visual_range: Option<(usize, usize)>,
+    pub hunk_cache: Option<crate::ed::implex::HunkCache>,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -165,7 +175,10 @@ impl Editor {
                 .to_string();
             if let Some(pos) = positions.iter().find(|p| p.path == canon_path) {
                 first_win.row = pos.row.min(first_buf.len_lines().saturating_sub(1));
-                first_win.col = pos.col.min(first_buf.line_char_len(first_win.row));
+                first_win.col = pos.col.min(crate::ed::editing::line_display_width(
+                    &first_buf,
+                    first_win.row,
+                ));
             }
         }
         let layout = LayoutNode::leaf(first_win.id);
@@ -188,6 +201,7 @@ impl Editor {
             lsp_loading: true,
             spinner_frame: 0,
             pending_keys: String::new(),
+            pending_keys_time: None,
             popup: PopupState::new(),
             config_bool_keys: Vec::new(),
             vocab_words,
@@ -199,6 +213,10 @@ impl Editor {
             cmd_history_idx: None,
             cmd_temp_input: String::new(),
             history_search_prefix: None,
+            search_history: Self::load_search_history(),
+            search_history_idx: None,
+            search_temp_input: String::new(),
+            search_history_prefix: None,
             scankey_info: None,
             prev_mode: Mode::Normal,
             status_state: StatusBarState::default(),
@@ -221,6 +239,10 @@ impl Editor {
             needs_initial_scroll: true,
             pending_register: false,
             tag_manager: crate::ed::tag::TagManager::new(),
+            substitution_state: None,
+            prev_search_query: None,
+            saved_visual_range: None,
+            hunk_cache: None,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -513,6 +535,7 @@ impl Editor {
 impl Editor {
     pub fn clear_pending_keys(&mut self) {
         self.pending_keys.clear();
+        self.pending_keys_time = None;
     }
 }
 
@@ -734,6 +757,11 @@ impl Editor {
 
         if self.popup.tag_candidates.is_some() {
             self.handle_tag_candidates_key(key);
+            return;
+        }
+
+        if self.substitution_state.is_some() {
+            self.handle_substitution_key(key);
             return;
         }
 
@@ -977,6 +1005,10 @@ impl Editor {
             }
             crate::keybind::binding_ex::ResolveResult::Pending => {
                 self.pending_keys = new_seq.clone();
+                // Start/reset the 150ms debounce timer
+                if self.pending_keys_time.is_none() {
+                    self.pending_keys_time = Some(std::time::Instant::now());
+                }
             }
             crate::keybind::binding_ex::ResolveResult::None => {
                 self.clear_pending_keys();
@@ -1324,7 +1356,7 @@ impl Editor {
             // Clamp to valid buffer positions to avoid out-of-bounds panics
             final_row = final_row.min(buf.len_lines().saturating_sub(1));
             if final_row < buf.len_lines() {
-                final_col = final_col.min(buf.line_char_len(final_row));
+                final_col = final_col.min(crate::ed::editing::line_display_width(buf, final_row));
             } else {
                 final_col = 0;
             }
@@ -1506,6 +1538,19 @@ impl Editor {
     /// Display an error: multi-line → error popup, single-line → status bar.
     pub fn show_error(&mut self, err: anyhow::Error) {
         self.show_message(err.to_string());
+    }
+    // ═══════════════════════════════════════════════════════════════════
+    // Visual Selection Helpers
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Returns the (start_row, end_row) of the active visual selection.
+    /// Returns `None` if not in a visual mode or no anchor is set.
+    pub fn get_visual_line_range(&self) -> Option<(usize, usize)> {
+        let win = self.active_window();
+        let anchor = win.visual_anchor?;
+        let r1 = anchor.0.min(win.row);
+        let r2 = anchor.0.max(win.row);
+        Some((r1, r2))
     }
 }
 
