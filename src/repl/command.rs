@@ -432,6 +432,38 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "tags" => {
             editor.show_tag_info();
         }
+        "fd" | "fdfind" => {
+            let root = crate::git::gutter::find_git_root(&std::path::PathBuf::from(
+                editor.active_filename().unwrap_or("."),
+            ))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            if root.is_dir() {
+                editor.popup.open_fd(&root, "");
+            } else {
+                editor.set_status_msg("No valid search root directory", MessageKind::Error);
+            }
+        }
+
+        s if s.starts_with("fd ") || s.starts_with("fdfind ") => {
+            let arg = if let Some(a) = s.strip_prefix("fd ") {
+                a
+            } else {
+                s.strip_prefix("fdfind ").unwrap()
+            }
+            .trim();
+
+            let root = crate::git::gutter::find_git_root(&std::path::PathBuf::from(
+                editor.active_filename().unwrap_or("."),
+            ))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            if root.is_dir() {
+                editor.popup.open_fd(&root, arg);
+            } else {
+                editor.set_status_msg("No valid search root directory", MessageKind::Error);
+            }
+        }
 
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
@@ -634,7 +666,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
-        "tag", "ta", "retag", "tags", "sort",
+        "tag", "ta", "retag", "tags", "sort", "fd", 
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

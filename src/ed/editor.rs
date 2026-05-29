@@ -846,6 +846,11 @@ impl Editor {
             return;
         }
 
+        if self.popup.fd.is_some() {
+            self.handle_fd_key(key);
+            return;
+        }
+
         if self.popup.marks.is_some() {
             self.handle_marks_key(key);
             return;

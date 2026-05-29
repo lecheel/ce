@@ -2245,6 +2245,14 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::TagBack => {
             editor.tag_back();
         }
+        Action::FdSearch => {
+            let root = crate::git::gutter::find_git_root(&std::path::PathBuf::from(
+                editor.active_filename().unwrap_or("."),
+            ))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+            editor.popup.open_fd(&root, "");
+        }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {

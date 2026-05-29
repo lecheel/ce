@@ -30,6 +30,13 @@ pub struct FilePicker {
     pub initial_cwd: PathBuf,
     pub flat: bool,
     pub last_error: Option<String>,
+
+    pub new_file_mode: bool,
+    pub new_file_input: String,
+    pub new_file_base_dir: PathBuf,
+
+    pub delete_confirm_mode: bool,
+    pub delete_target_path: PathBuf,
 }
 
 impl FilePicker {
@@ -82,6 +89,11 @@ impl FilePicker {
             initial_cwd: effective_cwd,
             flat,
             last_error: None,
+            new_file_mode: false,
+            new_file_input: String::new(),
+            new_file_base_dir: PathBuf::new(),
+            delete_confirm_mode: false,
+            delete_target_path: PathBuf::new(),
         };
         picker.refresh_entries();
         picker
@@ -133,7 +145,7 @@ impl FilePicker {
                     if is_dir {
                         dirs.push(fe);
                     } else {
-                        files.push(fe);
+                        files.push(fe)
                     }
                 }
 
@@ -143,7 +155,6 @@ impl FilePicker {
                 all_entries.extend(files);
             }
             Err(e) => {
-                // Caller can check last_error separately
                 let _ = e;
             }
         }
@@ -196,7 +207,6 @@ impl FilePicker {
 
         if entries.is_empty() {
             if let Some(e) = walk_error {
-                // Return empty; caller checks last_error
                 let _ = e;
             }
         }
@@ -260,8 +270,6 @@ impl FilePicker {
     }
 
     pub fn go_home(&mut self) {
-        // 1. Try to jump to the Git repository root
-        // 2. Fallback to the initial directory the editor/picker started in
         let target = crate::git::gutter::find_git_root(&self.cwd)
             .unwrap_or_else(|| self.initial_cwd.clone());
 

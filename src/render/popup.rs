@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph},
     Frame,
 };
 
@@ -113,6 +113,11 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    if editor.popup.fd.is_some() {
+        draw_fd(f, editor, screen);
+        return;
+    }
+
     let Some(content) = &editor.popup.content else {
         return;
     };
@@ -159,6 +164,7 @@ fn draw_guide(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -271,6 +277,7 @@ fn draw_config(f: &mut Frame, items: &[PopupItem], selected: usize, screen: Rect
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -353,6 +360,7 @@ fn draw_scankey(f: &mut Frame, key_label: &str, action_label: &str, raw_label: &
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -399,6 +407,7 @@ fn draw_buffer_list(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -526,6 +535,189 @@ fn draw_buffer_list(f: &mut Frame, editor: &Editor, screen: Rect) {
     f.render_widget(list_widget, list_area);
 }
 
+fn draw_fd(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.fd {
+        Some(p) => p,
+        None => return,
+    };
+    let list = &popup.list;
+
+    let width = popup_width(screen);
+    const VISIBLE_ROWS: usize = 20;
+    const TOTAL_HEIGHT: u16 = VISIBLE_ROWS as u16 + 3; // +3 borders + filter
+    let area = centered_rect(screen, width, TOTAL_HEIGHT);
+
+    let scroll_offset = if list.selected >= VISIBLE_ROWS {
+        list.selected - VISIBLE_ROWS + 1
+    } else {
+        0
+    };
+
+    let tool = if which_fd_cached() { "fd" } else { "find" };
+    let title = format!(" Fuzzy Find [{}] ({}) ", tool, list.filtered.len());
+    let footer = format!(
+        "[Enter] open  [Esc] close  [Ctrl+u] clear filter  {}/{}",
+        if list.filtered.is_empty() {
+            0
+        } else {
+            list.selected + 1
+        },
+        list.filtered.len()
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+    let filter_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height - 1,
+    };
+
+    // ── Filter line ───────────────────────────────────────────────
+    let root_display = popup
+        .root_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(".");
+
+    let filter_line = if list.filter.is_empty() {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{}> ", root_display),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "█",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]))
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{}> ", root_display),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                list.filter.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" ({} matches)", list.filtered.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]))
+    };
+
+    // ── List items ────────────────────────────────────────────────
+    let mut list_items = Vec::with_capacity(VISIBLE_ROWS);
+    for i in 0..VISIBLE_ROWS {
+        let entry_idx = scroll_offset + i;
+        if entry_idx < list.filtered.len() {
+            let real_idx = list.filtered[entry_idx];
+            let entry = &list.entries[real_idx];
+            let is_selected = entry_idx == list.selected;
+            let match_idx = list
+                .match_indices
+                .get(entry_idx)
+                .cloned()
+                .unwrap_or_default();
+
+            let row_style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            // Split name into directory / filename parts for colouring
+            let name_chars: Vec<char> = entry.name.chars().collect();
+            let last_slash = name_chars.iter().rposition(|&c| c == '/');
+
+            let mut spans = Vec::new();
+
+            for (ci, ch) in name_chars.iter().enumerate() {
+                let matched = match_idx.binary_search(&ci).is_ok();
+
+                let in_dir_part = last_slash.map_or(false, |pos| ci <= pos);
+
+                let style = if is_selected {
+                    if matched {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
+                    } else if in_dir_part {
+                        Style::default().fg(Color::Gray).bg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::White).bg(Color::DarkGray)
+                    }
+                } else if matched {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if in_dir_part {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Blue)
+                };
+
+                spans.push(Span::styled(ch.to_string(), style));
+            }
+
+            list_items.push(ListItem::new(Line::from(spans).style(row_style)));
+        } else {
+            list_items.push(ListItem::new(Line::from("")));
+        }
+    }
+
+    let list_widget = List::new(list_items);
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(filter_line, filter_area);
+    f.render_widget(list_widget, list_area);
+}
+
+/// Lightweight cached check for `fd` availability (used only by the renderer
+/// to show which backend was used in the title).
+fn which_fd_cached() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static CACHE: AtomicBool = AtomicBool::new(true); // assume true until proven
+    static CHECKED: AtomicBool = AtomicBool::new(false);
+    if !CHECKED.load(Ordering::Relaxed) {
+        let available = std::process::Command::new("fd")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        CACHE.store(available, Ordering::Relaxed);
+        CHECKED.store(true, Ordering::Relaxed);
+    }
+    CACHE.load(Ordering::Relaxed)
+}
+
 fn draw_file_picker(f: &mut Frame, editor: &Editor, screen: Rect) {
     let picker = match &editor.popup.file_picker {
         Some(p) => p,
@@ -612,7 +804,12 @@ fn draw_file_picker(f: &mut Frame, editor: &Editor, screen: Rect) {
         Span::styled(" flat ", Style::default().fg(Color::DarkGray)),
         Span::styled("<BS>", Style::default().fg(Color::Yellow)),
         Span::styled(" Up/Filter ", Style::default().fg(Color::DarkGray)),
+        Span::styled("<Ins>", Style::default().fg(Color::Yellow)),
+        Span::styled(" New File ", Style::default().fg(Color::DarkGray)),
+        Span::styled("<Del>", Style::default().fg(Color::Yellow)),
+        Span::styled(" Delete File ", Style::default().fg(Color::DarkGray)),
         Span::styled("<Home>", Style::default().fg(Color::Yellow)),
+        Span::styled(" Repo ", Style::default().fg(Color::DarkGray)),
     ]);
 
     let outer_block = Block::default()
@@ -624,6 +821,7 @@ fn draw_file_picker(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(hints)
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -642,8 +840,42 @@ fn draw_file_picker(f: &mut Frame, editor: &Editor, screen: Rect) {
         height: inner.height.saturating_sub(1),
     };
 
-    // ── Filter / Error Line ─────────────────────────────────────────
-    let filter_line = if let Some(err) = &picker.last_error {
+    // ── Filter / Error / New File / Delete Line ─────────────────────────────────
+    let filter_line = if picker.delete_confirm_mode {
+        Paragraph::new(Line::from(vec![
+            Span::styled("Delete ", Style::default().fg(Color::Red)),
+            Span::styled(
+                picker.delete_target_path.to_string_lossy().to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("? [y/N] ", Style::default().fg(Color::Red)),
+        ]))
+    } else if picker.new_file_mode {
+        // Format the base directory string to show the user where the file will be created
+        let base_dir_display = if picker.new_file_base_dir.as_os_str().is_empty() {
+            String::new()
+        } else {
+            format!("{}/", picker.new_file_base_dir.to_string_lossy())
+        };
+
+        Paragraph::new(Line::from(vec![
+            Span::styled("New File: ", Style::default().fg(Color::Green)),
+            Span::styled(base_dir_display, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                picker.new_file_input.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                " [Enter] create  [Esc] cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]))
+    } else if let Some(err) = &picker.last_error {
         Paragraph::new(Line::from(vec![
             Span::styled("⚠ ", Style::default().fg(Color::Red)),
             Span::styled(
@@ -719,6 +951,7 @@ fn draw_command_palette(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -897,6 +1130,7 @@ fn draw_tag_candidates(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -1005,6 +1239,7 @@ fn draw_function_list(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -1188,6 +1423,7 @@ fn draw_git_hunk_popup(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -1269,6 +1505,7 @@ fn draw_marks(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -1384,6 +1621,7 @@ fn draw_mru(f: &mut Frame, editor: &Editor, screen: Rect) {
         ))
         .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .style(Style::default().bg(Color::Black));
 
@@ -1796,6 +2034,7 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(Color::Black));
 
@@ -1842,6 +2081,7 @@ fn draw_error(f: &mut Frame, editor: &Editor, screen: Rect) {
             Style::default().fg(Color::DarkGray),
         ))
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(dark_yellow))
         .style(Style::default().bg(Color::Black));
 

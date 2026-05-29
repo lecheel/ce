@@ -28,6 +28,10 @@ fn default_llm_url() -> String {
     "127.0.0.1".to_string()
 }
 
+fn default_plain() -> String {
+    "plain".to_string()
+}
+
 fn default_llm_port() -> u16 {
     8080
 }
@@ -134,6 +138,8 @@ pub struct Config {
     pub api_url: String,
     pub portal_url: String,
     pub max_tokens: i32,
+
+    #[serde(default = "default_plain")]
     pub editor_language: String,
 
     #[serde(default)]

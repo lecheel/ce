@@ -1,4 +1,5 @@
 pub mod buffer_list;
+pub mod fd;
 pub mod file_picker;
 pub mod filter;
 pub mod function_list;

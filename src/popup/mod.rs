@@ -2,6 +2,7 @@
 
 pub mod buffer_list;
 pub mod command_palette;
+pub mod fd;
 pub mod file_picker;
 pub mod filtered_list;
 pub mod function_list;
@@ -14,6 +15,7 @@ pub mod tag_candidates;
 
 pub use buffer_list::{BufferEntry, BufferList};
 pub use command_palette::CommandPalettePopup;
+pub use fd::FdPopup;
 pub use file_picker::FilePicker;
 pub use function_list::FunctionListPopup;
 pub use marks::{MarkEntry, MarksPopup};
@@ -86,6 +88,7 @@ pub enum PopupKind {
     Guide,
     GitHunk,
     FunctionList,
+    Fd,
     Error, // Added for multi-line error redirection
 }
 
@@ -153,6 +156,7 @@ pub struct PopupState {
     pub content: Option<PopupContent>,
     pub error: Option<ErrorPopup>,
     pub tag_candidates: Option<tag_candidates::TagCandidatesPopup>,
+    pub fd: Option<FdPopup>,
 }
 
 impl PopupState {
@@ -178,6 +182,7 @@ impl PopupState {
             tag_candidates: None,
             command_palette: None,
             error: None,
+            fd: None,
         }
     }
 
@@ -193,6 +198,7 @@ impl PopupState {
             || self.guide.is_some()
             || self.command_palette.is_some()
             || self.error.is_some()
+            || self.fd.is_some()
     }
 
     pub fn close(&mut self) {
@@ -213,7 +219,8 @@ impl PopupState {
         self.marks = None;
         self.guide = None;
         self.command_palette = None;
-        self.error = None; // Added to fully clear error state
+        self.error = None;
+        self.fd = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {
@@ -327,5 +334,11 @@ impl PopupState {
         self.close();
         self.marks = Some(MarksPopup::new(entries));
         self.kind = Some(PopupKind::Marks);
+    }
+
+    pub fn open_fd(&mut self, root_dir: &std::path::Path, pattern: &str) {
+        self.close();
+        self.fd = Some(FdPopup::new(root_dir, pattern));
+        self.kind = Some(PopupKind::Fd);
     }
 }
