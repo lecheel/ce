@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
-// Helper utilities (unchanged)
+// Helper utilities
 // ---------------------------------------------------------------------------
 
 fn display_width(s: &str) -> usize {
@@ -20,20 +20,31 @@ fn graphemes(text: &str) -> Vec<&str> {
     UnicodeSegmentation::graphemes(text, true).collect()
 }
 
+/// Returns (char_offset, visual_col).
+/// `char_offset` is in Unicode scalar values (compatible with Ropey).
 fn find_grapheme_boundary(line: &str, target_col: usize) -> (usize, usize) {
     let mut char_offset = 0;
     let mut current_col = 0;
     for grapheme in graphemes(line) {
         let width = display_width(grapheme);
-        if current_col + width > target_col {
+        if current_col >= target_col {
             break;
         }
-        char_offset += grapheme.len();
+        // If target_col is inside this wide grapheme, snap to its END
+        if current_col + width > target_col {
+            if width > 1 && target_col > current_col {
+                char_offset += grapheme.chars().count();
+                current_col += width;
+            }
+            break;
+        }
+        char_offset += grapheme.chars().count();
         current_col += width;
     }
     (char_offset, current_col)
 }
 
+/// Returns (start_char, end_char, visual_width) of the grapheme before `col`.
 fn prev_grapheme_at_col(line: &str, col: usize) -> Option<(usize, usize, usize)> {
     let mut char_offset = 0;
     let mut current_col = 0;
@@ -42,13 +53,17 @@ fn prev_grapheme_at_col(line: &str, col: usize) -> Option<(usize, usize, usize)>
     let mut prev_width = 0;
     for grapheme in graphemes(line) {
         let width = display_width(grapheme);
-        if current_col + width > col {
+        if current_col >= col {
             return Some((prev_start, prev_end, prev_width));
         }
+        // If col is inside this wide grapheme, backspace should delete THIS grapheme
+        if current_col + width > col {
+            return Some((char_offset, char_offset + grapheme.chars().count(), width));
+        }
         prev_start = prev_end;
-        prev_end = char_offset + grapheme.len();
+        prev_end = char_offset + grapheme.chars().count();
         prev_width = width;
-        char_offset += grapheme.len();
+        char_offset += grapheme.chars().count();
         current_col += width;
     }
     if prev_end > 0 {
@@ -58,15 +73,20 @@ fn prev_grapheme_at_col(line: &str, col: usize) -> Option<(usize, usize, usize)>
     }
 }
 
+/// Returns (start_char, end_char, visual_width) of the grapheme at `col`.
 fn grapheme_at_col(line: &str, col: usize) -> Option<(usize, usize, usize)> {
     let mut char_offset = 0;
     let mut current_col = 0;
     for grapheme in graphemes(line) {
         let width = display_width(grapheme);
         if current_col == col {
-            return Some((char_offset, char_offset + grapheme.len(), width));
+            return Some((char_offset, char_offset + grapheme.chars().count(), width));
         }
-        char_offset += grapheme.len();
+        // If col is inside this wide grapheme, the character at col is THIS grapheme.
+        if current_col + width > col {
+            return Some((char_offset, char_offset + grapheme.chars().count(), width));
+        }
+        char_offset += grapheme.chars().count();
         current_col += width;
     }
     None
@@ -79,11 +99,11 @@ fn col_from_char_offset(line: &str, target_offset: usize) -> usize {
         if char_offset >= target_offset {
             break;
         }
-        if char_offset + grapheme.len() > target_offset {
+        if char_offset + grapheme.chars().count() > target_offset {
             break;
         }
         col += display_width(grapheme);
-        char_offset += grapheme.len();
+        char_offset += grapheme.chars().count();
     }
     col
 }
@@ -91,7 +111,6 @@ fn col_from_char_offset(line: &str, target_offset: usize) -> usize {
 // ---------------------------------------------------------------------------
 // Insertion
 // ---------------------------------------------------------------------------
-/// Returns true if the window's cursor is within valid bounds.
 fn cursor_in_bounds(win: &Window, buf: &Buffer) -> bool {
     win.row < buf.len_lines()
 }
@@ -103,7 +122,7 @@ pub fn insert_char(win: &mut Window, buf: &mut Buffer, ch: char) {
     }
     let line_start = buf.rope.line_to_char(win.row);
     let current_line = buf.line_text(win.row);
-    let (insert_char_offset, _) = find_grapheme_boundary(&current_line, win.col);
+    let (insert_char_offset, insert_col) = find_grapheme_boundary(&current_line, win.col);
     let insert_pos = line_start + insert_char_offset;
 
     // 1. Capture byte coordinates BEFORE insertion
@@ -118,7 +137,7 @@ pub fn insert_char(win: &mut Window, buf: &mut Buffer, ch: char) {
 
     // 2. Perform the actual mutation
     buf.rope.insert(insert_pos, &ch_str);
-    win.col += char_width;
+    win.col = insert_col + char_width;
     win.desired_col = win.col;
     buf.mark_modified();
 
@@ -198,11 +217,8 @@ pub fn insert_newline_above(win: &mut Window, buf: &mut Buffer) {
         .collect();
     let indent_width = display_width(&leading_whitespace);
     let line_start = buf.rope.line_to_char(win.row);
-    // Insert "indent\n" so the new blank line sits at win.row
-    // and the original line is pushed to win.row + 1.
     let insert_text = format!("{}\n", leading_whitespace);
     buf.rope.insert(line_start, &insert_text);
-    // win.row stays the same — the new blank line is now here.
     win.col = indent_width;
     win.desired_col = win.col;
     buf.mark_modified();
@@ -268,23 +284,20 @@ pub fn backspace(win: &mut Window, buf: &mut Buffer) {
         let prev_line = buf.line_text(win.row - 1);
         let prev_line_width = display_width(&prev_line);
 
-        // 1. Capture coordinates for Newline Character Deletion
         let start_byte = buf.rope.char_to_byte(newline_pos);
-        let old_end_byte = start_byte + 1; // \n is 1 byte
+        let old_end_byte = start_byte + 1;
         let start_row = win.row - 1;
         let start_col_byte = start_byte.saturating_sub(buf.rope.line_to_byte(start_row));
 
         let start_point = tree_sitter::Point::new(start_row, start_col_byte);
         let old_end_point = tree_sitter::Point::new(win.row, 0);
 
-        // 2. Perform mutation
         buf.rope.remove(newline_pos..newline_pos + 1);
         win.row -= 1;
         win.col = prev_line_width;
         win.desired_col = win.col;
         buf.mark_modified();
 
-        // 3. Perform incremental update
         let edit = tree_sitter::InputEdit {
             start_byte,
             old_end_byte,
@@ -308,7 +321,6 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
 
     if win.col < line_width {
         if let Some((start, end, _)) = grapheme_at_col(&current_line, win.col) {
-            // 1. Capture byte coordinates BEFORE removal
             let start_byte = buf.rope.char_to_byte(line_start + start);
             let old_end_byte = buf.rope.char_to_byte(line_start + end);
             let start_row = win.row;
@@ -318,11 +330,9 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
             let start_point = tree_sitter::Point::new(start_row, start_col_byte);
             let old_end_point = tree_sitter::Point::new(start_row, old_end_col_byte);
 
-            // 2. Perform mutation
             buf.rope.remove(line_start + start..line_start + end);
             buf.mark_modified();
 
-            // 3. Perform incremental update
             let edit = tree_sitter::InputEdit {
                 start_byte,
                 old_end_byte,
@@ -336,7 +346,6 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
     } else if win.row + 1 < buf.len_lines() {
         let newline_pos = buf.rope.line_to_char(win.row + 1) - 1;
 
-        // 1. Capture newline removal coordinates
         let start_byte = buf.rope.char_to_byte(newline_pos);
         let old_end_byte = start_byte + 1;
         let start_row = win.row;
@@ -345,11 +354,9 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
         let start_point = tree_sitter::Point::new(start_row, start_col_byte);
         let old_end_point = tree_sitter::Point::new(win.row + 1, 0);
 
-        // 2. Perform mutation
         buf.rope.remove(newline_pos..newline_pos + 1);
         buf.mark_modified();
 
-        // 3. Perform incremental update
         let edit = tree_sitter::InputEdit {
             start_byte,
             old_end_byte,
@@ -386,7 +393,6 @@ pub fn delete_current_line(win: &mut Window, buf: &mut Buffer) {
     }
     win.col = win.col.min(buf.line_char_len(win.row));
     buf.mark_modified();
-    // Use Way 1: Force a full parse
     buf.parse_syntax();
 }
 
@@ -450,7 +456,6 @@ pub fn delete_to_end_of_line(win: &mut Window, buf: &mut Buffer) {
     let line_start = buf.rope.line_to_char(win.row);
     let line_text = buf.line_text(win.row);
     let line_char_len = buf.line_char_len(win.row);
-    // Convert display col → char offset
     let (start_char_offset, _) = find_grapheme_boundary(&line_text, win.col);
     let del_start = line_start + start_char_offset;
     if start_char_offset >= line_char_len {
@@ -498,12 +503,11 @@ pub fn paste_text(win: &mut Window, buf: &mut Buffer, text: &str) {
     }
     let line_start = buf.rope.line_to_char(win.row);
     let current_line = buf.line_text(win.row);
-    let (insert_char_offset, _) = find_grapheme_boundary(&current_line, win.col);
+    let (insert_char_offset, insert_col) = find_grapheme_boundary(&current_line, win.col);
     let insert_offset = line_start + insert_char_offset;
 
     buf.rope.insert(insert_offset, text);
-    let text_width = display_width(text);
-    win.col += text_width;
+    win.col = insert_col + display_width(text);
     win.desired_col = win.col;
     buf.mark_modified();
     buf.parse_syntax();
@@ -516,7 +520,6 @@ pub fn paste_line_below(win: &mut Window, buf: &mut Buffer, text: &str) {
     }
     let next_line_row = win.row + 1;
     let insert_offset = if next_line_row >= buf.len_lines() {
-        // Ensure the rope ends with \n before appending
         let last = buf.rope.len_chars();
         if last > 0 {
             let last_char = buf.rope.char(last - 1);

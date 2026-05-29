@@ -133,6 +133,7 @@ pub struct Editor {
     pub command_cursor: usize,
     pub needs_initial_scroll: bool,
     pub pending_register: bool,
+    pub tag_manager: crate::ed::tag::TagManager,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -219,6 +220,7 @@ impl Editor {
             cmd_waiting_register: false,
             needs_initial_scroll: true,
             pending_register: false,
+            tag_manager: crate::ed::tag::TagManager::new(),
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -727,6 +729,11 @@ impl Editor {
                 self.popup.error = None;
                 self.popup.kind = None;
             }
+            return;
+        }
+
+        if self.popup.tag_candidates.is_some() {
+            self.handle_tag_candidates_key(key);
             return;
         }
 

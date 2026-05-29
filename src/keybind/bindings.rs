@@ -2156,6 +2156,15 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             // Record for dot repeat (if needed)
             editor.record_action(RepeatableAction::DeleteToEndOfFile, 1);
         }
+        // ---------------------------------------------------------------
+        // Tag navigation
+        // ---------------------------------------------------------------
+        Action::TagJump => {
+            editor.tag_under_cursor();
+        }
+        Action::TagBack => {
+            editor.tag_back();
+        }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {

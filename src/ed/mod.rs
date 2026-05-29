@@ -16,6 +16,7 @@ pub mod position;
 pub mod ripgrep;
 pub mod syntax;
 pub mod window;
+pub mod tag;
 
 // Register the new repeat and gutter modules in the compiler tree
 pub mod gutter;

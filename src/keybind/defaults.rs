@@ -113,6 +113,9 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("v", Action::EnterVisual),
         ("V", Action::EnterVisualLine),
         ("ctrl+v", Action::EnterVisualBlock),
+        // Tag navigation C-] is C-5
+        ("ctrl+5", Action::TagJump),
+        ("ctrl+t", Action::TagBack),
         // Repeater Command
         (".", Action::RepeatLastChange),
     ]

@@ -107,6 +107,12 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    // 8. Intercept tag Popup
+    if editor.popup.tag_candidates.is_some() {
+        draw_tag_candidates(f, editor, screen);
+        return;
+    }
+
     let Some(content) = &editor.popup.content else {
         return;
     };
@@ -854,6 +860,112 @@ fn draw_command_palette(f: &mut Frame, editor: &Editor, screen: Rect) {
     f.render_widget(list_widget, list_area);
 }
 
+fn draw_tag_candidates(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.tag_candidates {
+        Some(p) => p,
+        None => return,
+    };
+
+    let width = popup_width(screen);
+    let max_height = (screen.height / 2).max(10) as usize;
+    let content_height = popup.entries.len().min(max_height.saturating_sub(2));
+    let total_height = (content_height as u16).saturating_add(2); // +2 for borders
+
+    // Anchor: bottom of screen, grow upward (2 rows margin for status/cmd bars)
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = screen.height.saturating_sub(total_height).saturating_sub(2);
+
+    let area = clamp(
+        screen,
+        Rect {
+            x,
+            y,
+            width,
+            height: total_height,
+        },
+    );
+
+    let title = format!(" Tag Candidates ({}) ", popup.entries.len());
+    let footer = " [Enter] jump  [Esc] cancel ";
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+
+    let mut list_items = Vec::new();
+    for (i, entry) in popup.entries.iter().enumerate() {
+        let is_selected = i == popup.selected;
+        let row_style = if is_selected {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            Style::default()
+        };
+
+        let kind_str = format!("{:<10}", entry.kind.as_deref().unwrap_or("unknown"));
+        let kind_style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Magenta)
+        };
+
+        let name_style = if is_selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Blue)
+        };
+
+        let file_str = entry.file.display().to_string();
+        let file_style = if is_selected {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let line_str = format!(":{}", entry.line);
+        let line_style = if is_selected {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+
+        let line = Line::from(vec![
+            Span::styled(format!(" {} ", kind_str), kind_style),
+            Span::styled(format!("{} ", entry.name), name_style),
+            Span::styled(file_str, file_style),
+            Span::styled(line_str, line_style),
+        ])
+        .style(row_style);
+
+        list_items.push(ListItem::new(line));
+    }
+
+    // Pad to content_height so the block doesn't collapse
+    while list_items.len() < content_height {
+        list_items.push(ListItem::new(Line::from("")));
+    }
+
+    let list_widget = List::new(list_items);
+
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(list_widget, inner);
+}
+
 fn draw_function_list(f: &mut Frame, editor: &Editor, screen: Rect) {
     let popup = match &editor.popup.function_list {
         Some(p) => p,
@@ -944,23 +1056,35 @@ fn draw_function_list(f: &mut Frame, editor: &Editor, screen: Rect) {
 
                 // 1. Combine name and caution symbol directly (if duplicate)
                 let name_with_caution = if entry.is_duplicate {
-                    format!("{} ⚠", entry.name)
+                    format!("{} 🔴 ", entry.name)
                 } else {
                     entry.name.clone()
                 };
 
-                // 2. Pad or truncate the combined text to exactly 50 characters
-                let name_display = if name_with_caution.chars().count() > 50 {
-                    let mut truncated: String = name_with_caution.chars().take(47).collect();
+                // 2. Dynamic sizing to push line number to the right edge
+                let kind_width = 13; // display_kind() is always 13 chars
+                let line_width = 8; // "[L 1234]" is always 8 chars
+
+                // Ensure inner_width is a usize value, not a function pointer
+                let inner_width = inner.width as usize;
+
+                // Calculate max allowed name width (leaving at least 2 spaces gap)
+                let max_name_width = inner_width
+                    .saturating_sub(kind_width)
+                    .saturating_sub(line_width)
+                    .saturating_sub(2);
+
+                let name_display = if name_with_caution.chars().count() > max_name_width {
+                    let mut truncated: String =
+                        name_with_caution.chars().take(max_name_width - 1).collect();
                     truncated.push('…');
                     truncated
                 } else {
-                    let pad_len = 50_usize.saturating_sub(name_with_caution.chars().count());
-                    format!("{}{}", name_with_caution, " ".repeat(pad_len))
+                    name_with_caution.clone() // No trailing spaces, we pad dynamically
                 };
 
-                let kind_display = entry.display_kind(); // fixed 20 chars
-                let line_display = format!("[L{:>4}]", entry.line + 1);
+                let kind_display = entry.display_kind(); // fixed 13 chars
+                let line_display = format!("[L{:>5}]", entry.line + 1);
 
                 // 3. Set styles for uniform rendering on selection or highlight
                 let name_style = if is_selected {
@@ -989,12 +1113,30 @@ fn draw_function_list(f: &mut Frame, editor: &Editor, screen: Rect) {
                     Style::default().fg(Color::DarkGray)
                 };
 
-                let spans = vec![
+                let pad_style = if is_selected {
+                    Style::default().bg(Color::DarkGray)
+                } else {
+                    Style::default()
+                };
+
+                // 4. Calculate dynamic padding to push line_display to the right edge
+                let name_len = name_display.chars().count();
+                let used_width = kind_width + name_len + line_width;
+                let padding_needed = inner_width.saturating_sub(used_width);
+
+                let mut spans = vec![
                     Span::styled(kind_display, kind_style),
                     Span::styled(name_display, name_style),
-                    Span::styled(line_display, line_style),
                 ];
+
+                if padding_needed > 0 {
+                    spans.push(Span::styled(" ".repeat(padding_needed), pad_style));
+                }
+
+                spans.push(Span::styled(line_display, line_style));
+
                 list_items.push(ListItem::new(Line::from(spans)));
+
                 continue;
             }
         }
@@ -1486,7 +1628,7 @@ fn draw_mru(f: &mut Frame, editor: &Editor, screen: Rect) {
 
 /// Derives suggestions fresh from `editor.pending_keys` every frame.
 /// Auto-fits width and height to actual content.
-/// Highlights green and shows "auto ▶" when only one match remains.
+/// Collapses duplicate first-key prefixes into `key+(N)` rows.
 /// Called once from `render::draw`, after `draw_popup`.
 pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
     if editor.pending_keys.is_empty() {
@@ -1504,7 +1646,6 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
     );
     let screen = f.area();
     let display_pending = compact_mods(&editor.pending_keys);
-    let is_last_match = suggestions.len() == 1;
 
     // ── No continuations: bare badge ──────────────────────────────
     if suggestions.is_empty() {
@@ -1531,15 +1672,58 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
         return;
     }
 
-    // ── Column widths from actual content (auto-fit with 30-char min) ──
-    let max_suffix_w = suggestions
+    // ── Group suggestions by first token of suffix ────────────────
+    // When multiple bindings share the same next key (e.g. "p v" and "p p"),
+    // collapse them into a single row: "p+(2) → 2 bindings"
+    struct DisplayRow {
+        suffix: String,
+        description: String,
+        is_collapse: bool,
+    }
+
+    let mut first_token_groups: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+
+    for (i, sug) in suggestions.iter().enumerate() {
+        let first_token = sug
+            .suffix
+            .split_whitespace()
+            .next()
+            .unwrap_or(&sug.suffix)
+            .to_string();
+        first_token_groups.entry(first_token).or_default().push(i);
+    }
+
+    let mut display_rows: Vec<DisplayRow> = Vec::new();
+    for (first_token, indices) in &first_token_groups {
+        if indices.len() > 1 {
+            // Multiple bindings share this first key → collapse with count
+            display_rows.push(DisplayRow {
+                suffix: format!("{}+", compact_mods(first_token)),
+                description: format!("{} bindings", indices.len()),
+                is_collapse: true,
+            });
+        } else {
+            let sug = &suggestions[indices[0]];
+            display_rows.push(DisplayRow {
+                suffix: compact_mods(&sug.suffix),
+                description: sug.description.clone(),
+                is_collapse: false,
+            });
+        }
+    }
+
+    let is_last_match = suggestions.len() == 1;
+
+    // ── Column widths from display entries (auto-fit) ─────────────
+    let max_suffix_w = display_rows
         .iter()
-        .map(|s| s.suffix.len())
+        .map(|e| e.suffix.len())
         .max()
         .unwrap_or(1);
-    let max_desc_w = suggestions
+    let max_desc_w = display_rows
         .iter()
-        .map(|s| s.description.len())
+        .map(|e| e.description.len())
         .max()
         .unwrap_or(1);
 
@@ -1550,8 +1734,8 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
         .saturating_add(3)
         .saturating_add(max_desc_w)
         .saturating_add(1);
-    let box_w = (inner_w.saturating_add(2)).max(30).min(u16::MAX as usize) as u16; // Synced minimum width to 30 chars
-    let box_h = (suggestions.len().saturating_add(2)).min(u16::MAX as usize) as u16;
+    let box_w = (inner_w.saturating_add(2)).max(30).min(u16::MAX as usize) as u16;
+    let box_h = (display_rows.len().saturating_add(2)).min(u16::MAX as usize) as u16;
 
     let area = clamp(
         screen,
@@ -1563,25 +1747,30 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
         },
     );
 
-    // ── Theme-consistent layout colors (Yellow, DarkGray, White) ──
+    // ── Theme-consistent layout colors ────────────────────────────
     let suffix_sty = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
     let arrow_sty = Style::default().fg(Color::DarkGray);
     let desc_sty = Style::default().fg(Color::White);
+    let collapse_suffix_sty = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
 
-    let lines: Vec<Line> = suggestions
+    let lines: Vec<Line> = display_rows
         .iter()
-        .map(|sug| {
-            let padded_suffix = format!(
-                " {:<width$} ",
-                compact_mods(&sug.suffix),
-                width = max_suffix_w
-            );
-            let padded_desc = format!("{:<width$} ", sug.description, width = max_desc_w);
+        .map(|row| {
+            let padded_suffix = format!(" {:<width$} ", row.suffix, width = max_suffix_w);
+            let padded_desc = format!("{:<width$} ", row.description, width = max_desc_w);
+
+            let s_sty = if row.is_collapse {
+                collapse_suffix_sty
+            } else {
+                suffix_sty
+            };
 
             Line::from(vec![
-                Span::styled(padded_suffix, suffix_sty),
+                Span::styled(padded_suffix, s_sty),
                 Span::styled("→ ", arrow_sty),
                 Span::styled(padded_desc, desc_sty),
             ])

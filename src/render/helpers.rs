@@ -27,7 +27,7 @@ pub fn digit_count(mut n: usize) -> usize {
 /// Visual display width of a string (accounts for wide CJK characters and
 /// tabs).
 pub fn display_width(s: &str) -> usize {
-    s.chars().map(char_width).sum()
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 /// Visual width of a single character.

@@ -84,6 +84,10 @@ pub enum Action {
     BriefCopySelection,
     Paste,
 
+    // ── Tag navigation ──────────────────────────────────────────────
+    TagJump,      // C-]  — jump to tag under cursor
+    TagBack,      // C-t  — return from tag jump
+
     // Config Toggles
     TogglePopup,
 
@@ -291,6 +295,7 @@ impl Action {
                 | Action::SearchPrev
                 | Action::SearchCurrentWord
                 | Action::MatchBracket
+                | Action::TagJump
                 | Action::HunkNext
                 | Action::HunkPrev // Note: BookmarkGoto and JumpLastPosition handle their own
                                    // jump-back saving internally, so they are excluded here.

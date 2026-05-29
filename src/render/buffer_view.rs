@@ -21,6 +21,7 @@ use crate::ed::editor::Editor;
 use crate::ed::mode::Mode;
 use crate::ed::window::{Window, WindowPosition};
 use crate::render::helpers::display_width;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Describes what character occupies a given visual column in a line.
 #[derive(Debug)]
@@ -368,7 +369,7 @@ fn draw_pane(
         };
 
         if is_cursor_line {
-            let col = col.min(chars.len());
+            // let col = col.min(chars.len());
             let raw_line = buf.line_text(i);
             let mut highlights = buf.syntax.get_line_highlights(i, &raw_line);
 
@@ -396,23 +397,48 @@ fn draw_pane(
                 indent_guide_style,
             );
 
-            let visual_before_len = display_width(&chars[..col].iter().collect::<String>()) as u16;
+            // ── Grapheme-aware cursor positioning ──────────────────────
+            let mut vis_col = 0;
+            let mut char_offset = 0;
+            let mut cursor_grapheme: Option<&str> = None;
+            let mut cursor_width = 1;
+
+            for g in raw_line.graphemes(true) {
+                let width = display_width(g);
+                if vis_col == col {
+                    cursor_grapheme = Some(g);
+                    cursor_width = width;
+                    break;
+                }
+                if vis_col < col && vis_col + width > col {
+                    // Cursor is on the right half of a wide grapheme (e.g. 🔴)
+                    cursor_grapheme = Some(g);
+                    cursor_width = width;
+                    break;
+                }
+                vis_col += width;
+                char_offset += g.chars().count();
+            }
+
+            let safe_offset = char_offset.min(chars.len());
+            let visual_before_len =
+                display_width(&chars[..safe_offset].iter().collect::<String>()) as u16;
             let mut spans = gutter_spans;
 
             // Text before cursor
-            let before_col = col.min(highlights.len());
+            let before_len = safe_offset.min(highlights.len());
             spans.extend(styled_spans_from_highlights(
-                &chars[..col],
+                &chars[..safe_offset],
                 text_style,
-                &highlights[..before_col],
-                &selected_mask[..before_col],
-                &search_mask[..before_col],
+                &highlights[..before_len],
+                &selected_mask[..before_len],
+                &search_mask[..before_len],
                 line_bg,
             ));
 
             // Ghost text
-            let before_str: String = chars[..col].iter().collect();
-            let after: String = chars[col..].iter().collect();
+            let before_str: String = chars[..safe_offset].iter().collect();
+            let after: String = chars[safe_offset..].iter().collect();
             let display_ghost = if let Some(ghost) = ghost_text {
                 let overlap_len = find_prefix_overlap(&before_str, ghost);
                 let ghost_chars: Vec<char> = ghost.chars().collect();
@@ -436,7 +462,6 @@ fn draw_pane(
             };
 
             if is_block_cursor {
-                // ── Use Configurable Cursor Colors ──────────────────
                 let fg_color = editor
                     .config
                     .resolve_color(&editor.config.cursor_text_color);
@@ -445,15 +470,15 @@ fn draw_pane(
                     .resolve_color(&editor.config.cursor_highlight_color);
                 let cursor_style = Style::default().fg(fg_color).bg(bg_color);
 
-                if col < chars.len() {
-                    spans.push(Span::styled(chars[col].to_string(), cursor_style));
-                    let after_col = col.saturating_add(1);
+                if let Some(g) = cursor_grapheme {
+                    spans.push(Span::styled(g.to_string(), cursor_style));
+                    let after_offset = safe_offset + g.chars().count();
                     spans.extend(styled_spans_from_highlights(
-                        chars.get(after_col..).unwrap_or(&[]),
+                        chars.get(after_offset..).unwrap_or(&[]),
                         text_style,
-                        highlights.get(after_col..).unwrap_or(&[]),
-                        selected_mask.get(after_col..).unwrap_or(&[]),
-                        search_mask.get(after_col..).unwrap_or(&[]),
+                        highlights.get(after_offset..).unwrap_or(&[]),
+                        selected_mask.get(after_offset..).unwrap_or(&[]),
+                        search_mask.get(after_offset..).unwrap_or(&[]),
                         line_bg,
                     ));
                 } else {
@@ -469,11 +494,11 @@ fn draw_pane(
                     ));
                 }
                 spans.extend(styled_spans_from_highlights(
-                    &chars[col..],
+                    chars.get(safe_offset..).unwrap_or(&[]),
                     text_style,
-                    highlights.get(col..).unwrap_or(&[]),
-                    selected_mask.get(col..).unwrap_or(&[]),
-                    search_mask.get(col..).unwrap_or(&[]),
+                    highlights.get(safe_offset..).unwrap_or(&[]),
+                    selected_mask.get(safe_offset..).unwrap_or(&[]),
+                    search_mask.get(safe_offset..).unwrap_or(&[]),
                     line_bg,
                 ));
             }
@@ -760,7 +785,8 @@ fn compute_guide_depths(levels: &[(usize, bool)]) -> Vec<usize> {
 /// Inspects a line of text and determines what occupies `visual_col`.
 fn visual_col_content(line_text: &str, visual_col: usize, tab_size: usize) -> VisualColContent {
     let mut current_col = 0;
-    for (char_idx, ch) in line_text.char_indices() {
+    // Use chars().enumerate() instead of char_indices() to get character offsets rather than byte offsets
+    for (char_idx, ch) in line_text.chars().enumerate() {
         let width = if ch == '\t' {
             tab_size - (current_col % tab_size)
         } else {

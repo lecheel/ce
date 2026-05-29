@@ -206,6 +206,28 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             editor.open_git_log(limit);
         }
 
+        // ---- Tag Commands ----
+        s if s.starts_with("tag ") || s.starts_with("ta ") => {
+            let name = if let Some(p) = s.strip_prefix("tag ") {
+                p
+            } else {
+                s.strip_prefix("ta ").unwrap()
+            }
+            .trim();
+
+            if name.is_empty() {
+                editor.set_status_msg("Usage: :tag <name>", MessageKind::Error);
+            } else {
+                editor.jump_to_tag(name);
+            }
+        }
+        "retag" => {
+            editor.retag();
+        }
+        "tags" => {
+            editor.show_tag_info();
+        }
+
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
         "sp" | "split" => {
@@ -404,6 +426,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
         "command_palette","guide","guide sync", "guide update", "gen_desc",
+        "tag", "ta", "retag", "tags",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

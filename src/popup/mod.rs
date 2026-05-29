@@ -10,6 +10,7 @@ pub mod git_hunk;
 pub mod guide;
 pub mod marks;
 pub mod mru;
+pub mod tag_candidates;
 
 pub use buffer_list::{BufferEntry, BufferList};
 pub use command_palette::CommandPalettePopup;
@@ -151,6 +152,7 @@ pub struct PopupState {
     pub command_palette: Option<CommandPalettePopup>,
     pub content: Option<PopupContent>,
     pub error: Option<ErrorPopup>,
+    pub tag_candidates: Option<tag_candidates::TagCandidatesPopup>,
 }
 
 impl PopupState {
@@ -173,6 +175,7 @@ impl PopupState {
             content: None,
             marks: None,
             guide: None,
+            tag_candidates: None,
             command_palette: None,
             error: None,
         }
