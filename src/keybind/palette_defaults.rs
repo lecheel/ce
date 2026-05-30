@@ -44,8 +44,8 @@ pub fn palette_defaults() -> &'static [(Action, &'static str, &'static str)] {
         (Action::InsertNewlineBelow, "Insert line below", "o"),
         (Action::InsertNewlineAbove, "Insert line above", "O"),
         (Action::Undo, "Undo", "u"),
-        (Action::IndentLine, "Indent line", ">"),
-        (Action::OutdentLine, "Outdent line", "<"),
+        (Action::IndentSelection, "Indent line", ">"),
+        (Action::OutdentSelection, "Outdent line", "<"),
         (Action::Paste, "Paste from register", "p"),
         // ── Clipboard ──────────────────────────────────────────
         (Action::YankCurrentLine, "Yank line", "yy"),

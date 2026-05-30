@@ -39,8 +39,6 @@ pub enum Action {
     Undo,
     Redo,
     InsertTab,
-    IndentLine,
-    OutdentLine,
     ToggleComment,
 
     // Modes
@@ -326,8 +324,6 @@ impl Action {
                 | Action::InsertNewlineAbove
                 | Action::InsertTab
                 | Action::Undo
-                | Action::IndentLine
-                | Action::OutdentLine
                 | Action::InsertChar(_)
                 | Action::AcceptCompletion
                 | Action::Paste

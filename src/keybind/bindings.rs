@@ -573,6 +573,8 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 | Action::BriefCopySelection
                 | Action::BriefCutSelection
                 | Action::DeleteCharForward
+                | Action::IndentSelection
+                | Action::OutdentSelection
         );
         if !keeps_selection {
             editor.active_window_mut().visual_anchor = None;
@@ -685,24 +687,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
                 Action::DeleteWordForward => {
                     editor.record_action(RepeatableAction::DeleteWordForward, count);
-                }
-                Action::IndentLine => {
-                    editor.record_action(
-                        RepeatableAction::Indent {
-                            count: 1,
-                            outdent: false,
-                        },
-                        count,
-                    );
-                }
-                Action::OutdentLine => {
-                    editor.record_action(
-                        RepeatableAction::Indent {
-                            count: 1,
-                            outdent: true,
-                        },
-                        count,
-                    );
                 }
                 Action::Paste => {
                     editor.record_action(
@@ -1034,32 +1018,108 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
 
         Action::IndentSelection => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            if let Some(anchor) = win.visual_anchor {
-                let r1 = anchor.0.min(win.row);
-                let r2 = anchor.0.max(win.row);
+            let (r1, r2) = if let Some(anchor) = editor.active_window().visual_anchor {
+                let row = editor.active_window().row;
+                (anchor.0.min(row), anchor.0.max(row))
+            } else {
+                // No selection — Normal mode: use count as line count from cursor
+                let row = editor.active_window().row;
+                let end =
+                    (row + count.saturating_sub(1)).min(editor.buf().len_lines().saturating_sub(1));
+                (row, end)
+            };
+            let line_count = r2.saturating_sub(r1) + 1;
+
+            {
+                let (win, buf) = editor.active_window_and_buf_mut();
                 for r in r1..=r2 {
                     let mut temp_win = win.clone();
                     temp_win.row = r;
                     editing::indent_line(&mut temp_win, buf);
                 }
-                buf.parse_syntax();
+                // Move cursor to the FIRST line of the selection (Vim behavior).
+                win.row = r1;
+                win.col = 0;
+                win.clamp_cursor(buf);
+                win.desired_col = win.col;
             }
-            editor.enter_normal();
+            editor.buf_mut().parse_syntax();
+            editor.comp.on_edit();
+
+            // If we were in visual mode, exit to the previous mode
+            if matches!(
+                editor.mode(),
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) {
+                let target_mode = if editor.prev_mode == Mode::Brief {
+                    Mode::Brief
+                } else {
+                    Mode::Normal
+                };
+                editor.change_mode(target_mode);
+                editor.clear_status_msg();
+            }
+
+            // Self-record for dot-repeat
+            editor.record_action(
+                RepeatableAction::Indent {
+                    count: line_count,
+                    outdent: false,
+                },
+                1,
+            );
         }
+
         Action::OutdentSelection => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            if let Some(anchor) = win.visual_anchor {
-                let r1 = anchor.0.min(win.row);
-                let r2 = anchor.0.max(win.row);
+            let (r1, r2) = if let Some(anchor) = editor.active_window().visual_anchor {
+                let row = editor.active_window().row;
+                (anchor.0.min(row), anchor.0.max(row))
+            } else {
+                // No selection — Normal mode: use count as line count from cursor
+                let row = editor.active_window().row;
+                let end =
+                    (row + count.saturating_sub(1)).min(editor.buf().len_lines().saturating_sub(1));
+                (row, end)
+            };
+            let line_count = r2.saturating_sub(r1) + 1;
+
+            {
+                let (win, buf) = editor.active_window_and_buf_mut();
                 for r in r1..=r2 {
                     let mut temp_win = win.clone();
                     temp_win.row = r;
                     editing::outdent_line(&mut temp_win, buf);
                 }
-                buf.parse_syntax();
+                // Move cursor to the FIRST line of the selection (Vim behavior).
+                win.row = r1;
+                win.col = 0;
+                win.clamp_cursor(buf);
+                win.desired_col = win.col;
             }
-            editor.enter_normal();
+            editor.buf_mut().parse_syntax();
+            editor.comp.on_edit();
+
+            if matches!(
+                editor.mode(),
+                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+            ) {
+                let target_mode = if editor.prev_mode == Mode::Brief {
+                    Mode::Brief
+                } else {
+                    Mode::Normal
+                };
+                editor.change_mode(target_mode);
+                editor.clear_status_msg();
+            }
+
+            // Self-record for dot-repeat
+            editor.record_action(
+                RepeatableAction::Indent {
+                    count: line_count,
+                    outdent: true,
+                },
+                1,
+            );
         }
 
         // ---------------------------------------------------------------
@@ -1608,18 +1668,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 editor.set_status_msg("Already at newest change", MessageKind::Info);
             }
             editor.comp.on_leave_insert();
-        }
-        Action::IndentLine => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::indent_line(win, buf);
-            editor.comp.on_edit();
-        }
-        Action::OutdentLine => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::outdent_line(win, buf);
-            editor.comp.on_edit();
         }
         Action::InsertChar(ch) => {
             let (win, buf) = editor.active_window_and_buf_mut();

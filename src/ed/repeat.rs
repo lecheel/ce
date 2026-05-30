@@ -188,11 +188,15 @@ impl RepeatExt for Editor {
             }
             RepeatableAction::ReplaceChar(c) => Action::InsertChar(c),
             RepeatableAction::Paste { .. } => Action::Paste,
-            RepeatableAction::Indent { outdent, .. } => {
+            RepeatableAction::Indent { count, outdent } => {
+                // Inject the recorded line count so IndentSelection knows
+                // how many lines to indent in Normal mode.
+                self.current_count = count;
+
                 if outdent {
-                    Action::OutdentLine
+                    Action::OutdentSelection
                 } else {
-                    Action::IndentLine
+                    Action::IndentSelection
                 }
             }
             RepeatableAction::JoinLines { .. } => {

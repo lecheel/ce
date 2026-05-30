@@ -68,8 +68,8 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("y w", Action::YankCurrentWord),
         ("d $", Action::DeleteToEndOfLine),
         ("y y", Action::YankCurrentLine),
-        (">", Action::IndentLine),
-        ("<", Action::OutdentLine),
+        (">", Action::IndentSelection),
+        ("<", Action::OutdentSelection),
         ("space g r", Action::GitRevert),
         // Global shortcuts
         ("alt+d", Action::DeleteCurrentLine),
