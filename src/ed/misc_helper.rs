@@ -142,3 +142,48 @@ pub fn comment_prefix_for_lang(lang: &str) -> &'static str {
         _ => "//", // Default fallback
     }
 }
+/// Recurse into `node`'s *direct* children, counting function-like nodes.
+/// Does NOT recurse into those children's bodies (so a doubly-nested fn
+/// inside a nested fn is NOT counted as a separate top-level nested fn
+/// — it is part of the first nested fn).
+pub fn count_nested_fns(node: tree_sitter::Node) -> usize {
+    let mut count: usize = 0;
+    let mut stack: Vec<tree_sitter::Node> = Vec::new();
+
+    // ── FIX: Explicit `usize` annotation prevents E0282 type inference error ──
+    let child_count: usize = node.child_count();
+    for i in 0..child_count {
+        if let Some(child) = node.child(i) {
+            stack.push(child);
+        }
+    }
+
+    while let Some(n) = stack.pop() {
+        if is_fn_kind(n.kind()) {
+            count += 1;
+            // Do NOT recurse into nested functions — their own inner fns
+            // belong to them, not to the outer function we're measuring.
+        } else {
+            let cc: usize = n.child_count();
+            for i in 0..cc {
+                if let Some(child) = n.child(i) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+
+    count
+}
+
+pub fn is_fn_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function_item"
+            | "function_definition"
+            | "method_definition"
+            | "arrow_function"
+            | "function_declaration"
+            | "method_declaration"
+    )
+}

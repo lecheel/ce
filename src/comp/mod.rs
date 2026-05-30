@@ -2,6 +2,7 @@
 //!
 //! Re-exports the primary types at the `comp` level for convenience.
 
+pub mod path_complete;
 pub mod state;
 
 // pub(crate) use state::Phase;

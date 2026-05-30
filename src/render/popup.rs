@@ -293,10 +293,29 @@ fn draw_config(f: &mut Frame, items: &[PopupItem], selected: usize, screen: Rect
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let mut spans = vec![
-                Span::styled(if is_sel { " > " } else { "   " }, style),
-                Span::styled(&item.label, style),
-            ];
+
+            let mut spans = vec![Span::styled(if is_sel { " > " } else { "   " }, style)];
+
+            // Split label at the bracket to color the [ON]/[OFF] part
+            if let Some(pos) = item.label.rfind('[') {
+                let before = &item.label[..pos];
+                let inside_and_after = &item.label[pos..]; // e.g. "[ ON ]" or "[OFF]"
+
+                spans.push(Span::styled(before, style));
+
+                let status_style = if item.active {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                spans.push(Span::styled(inside_and_after, status_style));
+            } else {
+                spans.push(Span::styled(&item.label, style));
+            }
+
             if let Some(detail) = &item.detail {
                 spans.push(Span::styled(
                     format!(" — {detail}"),
@@ -308,7 +327,7 @@ fn draw_config(f: &mut Frame, items: &[PopupItem], selected: usize, screen: Rect
         .collect();
 
     f.render_widget(Clear, area);
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    f.render_widget(Paragraph::new(lines).block(block), area)
 }
 
 fn draw_scankey(f: &mut Frame, key_label: &str, action_label: &str, raw_label: &str, screen: Rect) {
@@ -2046,8 +2065,13 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
 
 /// Floating completion dropdown anchored below the cursor.
 pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
-    let completions = editor.completions();
-    if completions.len() <= 1 {
+    // ── Respect the global popup toggle ──────────────────────────
+    if !editor.config.popup_enabled {
+        return;
+    }
+
+    let candidates = editor.comp.candidates();
+    if candidates.len() <= 1 {
         return;
     }
     if editor.ghost_text().is_none() {
@@ -2057,27 +2081,23 @@ pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
     let screen = f.area();
     let win = editor.active_window();
     let pos = win.position;
-
-    // ── Calculate screen position of the cursor (all usize) ──────
     let gutter_w = editor.active_gutter_width();
     let col_offset = win.col.saturating_sub(win.scroll_col);
     let row_offset = win.row.saturating_sub(win.scroll_line);
 
     let abs_x: usize = pos.x + gutter_w + col_offset;
-    let abs_y: usize = pos.y + row_offset + 1; // one row below cursor
+    let abs_y: usize = pos.y + row_offset + 1;
 
-    // ── Popup dimensions ─────────────────────────────────────────
-    let max_visible = completions.len().min(8);
-    let max_item_w = completions
+    let max_visible = candidates.len().min(8);
+    let max_item_w = candidates
         .iter()
-        .map(|c| c.chars().count())
+        .map(|c| c.text.chars().count() + 5) // +5 for " [SRC]"
         .max()
         .unwrap_or(10)
-        .min(40);
-    let popup_w: usize = max_item_w + 4; // +4: padding + borders
-    let popup_h: usize = max_visible + 2; // +2: borders
+        .min(50);
+    let popup_w: usize = max_item_w + 4;
+    let popup_h: usize = max_visible + 2;
 
-    // Clamp to screen (all usize arithmetic)
     let clamped_x = abs_x.min(screen.width as usize - popup_w.min(screen.width as usize));
     let clamped_y = abs_y.min(screen.height as usize - popup_h.min(screen.height as usize));
 
@@ -2093,13 +2113,13 @@ pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
 
     let selected = editor.completion_idx();
 
-    let items: Vec<ListItem> = completions
+    let items: Vec<ListItem> = candidates
         .iter()
         .take(max_visible)
         .enumerate()
-        .map(|(i, text)| {
+        .map(|(i, candidate)| {
             let is_sel = i == selected;
-            let style = if is_sel {
+            let text_style = if is_sel {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -2107,7 +2127,19 @@ pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
             } else {
                 Style::default().fg(Color::White)
             };
-            ListItem::new(Line::from(Span::styled(format!(" {} ", text), style)))
+            let badge_style = if is_sel {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(candidate.source.badge_color())
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {} ", candidate.text), text_style),
+                Span::styled(format!(" [{}]", candidate.source.badge()), badge_style),
+            ]))
         })
         .collect();
 

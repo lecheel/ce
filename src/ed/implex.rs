@@ -1,3 +1,4 @@
+use crate::comp::state::CompletionSource;
 use crate::ed::buffer::BufferKind;
 use crate::ed::editor::PendingInput;
 use crate::ed::misc_helper::get_head_file_content;
@@ -10,7 +11,6 @@ use crate::ed::MessageKind;
 use crate::ed::Mode;
 use crate::render::helpers::digit_count;
 use crate::Editor;
-// use anyhow::Result;
 
 const MAX_WINDOWS: usize = 8;
 
@@ -44,6 +44,10 @@ pub struct HunkCache {
     pub rope_len: usize,
     pub hunks: Vec<HunkRange>,
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Git hunk navigation
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     /// Invalidate hunk cache (call after edits or hunk reverts).
@@ -112,7 +116,6 @@ impl Editor {
             let end_row = if new_count > 0 {
                 start_row + new_count - 1
             } else {
-                // Pure deletion: the hunk is anchored at the line above.
                 start_row
             };
 
@@ -141,7 +144,6 @@ impl Editor {
         let current_row = self.active_window().row;
         let total = hunks.len();
 
-        // Cursor is *inside* a hunk → skip to the one after it
         let inside = hunks
             .iter()
             .find(|h| current_row >= h.start_row && current_row <= h.end_row);
@@ -152,7 +154,6 @@ impl Editor {
                 .find(|h| h.start_row > current.end_row)
                 .or_else(|| hunks.first())
         } else {
-            // Cursor is between hunks → find next start after cursor
             hunks
                 .iter()
                 .find(|h| h.start_row > current_row)
@@ -212,11 +213,8 @@ impl Editor {
         win.desired_col = 0;
         self.scroll_active_window_to_cursor();
 
-        // ── Sync diff sibling if active ──
-        // This ensures both panes in :diffthis jump to the hunk together!
         self.sync_diff_windows();
 
-        // ── Rich status line ──
         let kind = if hunk.new_count > 0 && hunk.old_count > 0 {
             format!("±{}/{}", hunk.new_count, hunk.old_count)
         } else if hunk.new_count > 0 {
@@ -238,168 +236,13 @@ impl Editor {
             MessageKind::Info,
         );
     }
-
-    /// `:diffoff` — close the diff split, return to a single pane.
-    pub fn diffoff(&mut self) {
-        // 1. Find the HEAD buffer (the one that must be closed)
-        let head_bid = self
-            .buffers
-            .iter()
-            .find(|b| b.kind == BufferKind::GitDiffHead)
-            .map(|b| b.id);
-
-        let Some(hbid) = head_bid else {
-            self.set_status_msg("No diff session active", MessageKind::Info);
-            return;
-        };
-
-        // 2. Find the window showing the HEAD buffer
-        let head_win_id = self
-            .windows
-            .iter()
-            .find(|w| w.buffer_id() == hbid)
-            .map(|w| w.id);
-
-        // 3. Clear alignment and sibling links on all buffers/windows
-        for buf in &mut self.buffers {
-            buf.diff_alignment = None;
-        }
-        for win in &mut self.windows {
-            win.diff_sibling = None;
-        }
-
-        // 4. Remove the HEAD buffer from the buffer list
-        self.buffers.retain(|b| b.id != hbid);
-
-        // 5. If a window was showing the HEAD buffer, close it
-        if let Some(hw_id) = head_win_id {
-            self.layout.remove_leaf(hw_id);
-
-            if let Some(remove_idx) = self.windows.iter().position(|w| w.id == hw_id) {
-                self.windows.remove(remove_idx);
-
-                // Adjust active_window_idx to ensure it's valid
-                // and points to the surviving (working-copy) window
-                if !self.windows.is_empty() {
-                    if self.active_window_idx > remove_idx {
-                        self.active_window_idx -= 1;
-                    } else if self.active_window_idx >= self.windows.len() {
-                        self.active_window_idx = self.windows.len() - 1;
-                    }
-                } else {
-                    self.active_window_idx = 0;
-                }
-            }
-        }
-
-        // Invalidate hunk cache so it recalculates cleanly for the working copy
-        self.invalidate_hunk_cache();
-
-        self.set_status_msg("Diff view closed", MessageKind::Info);
-    }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Diff view management
+// ═══════════════════════════════════════════════════════════════════════════
+
 impl Editor {
-    // ── Set bookmark ────────────────────────────────────────────
-
-    /// Set (or overwrite) named bookmark `ch` at the current cursor.
-    pub fn set_named_bookmark(&mut self, ch: char) {
-        let (row, col) = {
-            let win = self.active_window();
-            (win.row, win.col)
-        };
-
-        let buf = self.buf_mut();
-        buf.named_bookmarks.insert(ch, (row, col));
-        buf.sync_bookmark_rows();
-
-        self.set_status_msg(
-            &format!("Mark '{}' set at line {}", ch, row + 1),
-            MessageKind::Success,
-        );
-    }
-
-    // ── Goto bookmark ───────────────────────────────────────────
-
-    /// Jump to named bookmark `ch`.  Saves current position for
-    /// ping-pong before jumping.
-    pub fn goto_named_bookmark(&mut self, ch: char) {
-        let target = self.buf().named_bookmarks.get(&ch).copied();
-
-        match target {
-            Some((row, col)) => {
-                // Save current position for ping-pong *before* jumping
-                self.active_window_mut().save_jump_position();
-
-                let buf_len = self.buf().len_lines();
-                let safe_row = row.min(buf_len.saturating_sub(1));
-                let safe_col = col.min(self.buf().line_char_len(safe_row));
-
-                let win = self.active_window_mut();
-                win.row = safe_row;
-                win.col = safe_col;
-                win.desired_col = safe_col;
-
-                self.scroll_active_window_to_cursor();
-                self.set_status_msg(
-                    &format!("Jumped to mark '{}' (line {})", ch, safe_row + 1),
-                    MessageKind::Info,
-                );
-            }
-            None => {
-                self.set_status_msg(&format!("Mark '{}' not set", ch), MessageKind::Error);
-            }
-        }
-    }
-
-    // ── Ping-pong jump (``) ────────────────────────────────────
-
-    /// Swap cursor with `last_jump`.  Pressing `` twice returns to
-    /// the original position.
-    pub fn jump_last_position(&mut self) {
-        let prev = self.active_window().last_jump;
-
-        match prev {
-            Some((row, col)) => {
-                // Save *current* position (becomes the new ping-pong target)
-                self.active_window_mut().save_jump_position();
-                // Overwrite with where we *were* (the save above captured
-                // current, now set cursor to previous)
-                let buf_len = self.buf().len_lines();
-                let safe_row = row.min(buf_len.saturating_sub(1));
-                let safe_col = col.min(self.buf().line_char_len(safe_row));
-
-                let win = self.active_window_mut();
-                win.row = safe_row;
-                win.col = safe_col;
-                win.desired_col = safe_col;
-
-                self.scroll_active_window_to_cursor();
-                self.set_status_msg(
-                    &format!("Jumped back to line {}", safe_row + 1),
-                    MessageKind::Info,
-                );
-            }
-            None => {
-                self.set_status_msg("No previous jump position", MessageKind::Info);
-            }
-        }
-    }
-
-    // ── Delete named bookmark ───────────────────────────────────
-
-    /// Remove a named bookmark.  Returns true if it existed.
-    pub fn delete_named_bookmark(&mut self, ch: char) -> bool {
-        let removed = self.buf_mut().named_bookmarks.remove(&ch).is_some();
-        if removed {
-            self.buf_mut().sync_bookmark_rows();
-            self.set_status_msg(&format!("Mark '{}' removed", ch), MessageKind::Info);
-        }
-        removed
-    }
-
-    /// Synchronize scrolling and cursor positions for side-by-side linked diff windows.
-
     /// Synchronize scrolling and cursor positions for side-by-side linked diff windows.
     pub fn sync_diff_windows(&mut self) {
         let active_win_idx = self.active_window_idx;
@@ -418,16 +261,12 @@ impl Editor {
             return;
         }
 
-        // 1. Sync scroll unconditionally so both panes show the same
-        //    virtual rows.
         self.windows[sib_idx].scroll_line = scroll_line;
         self.windows[sib_idx].scroll_col = scroll_col;
 
         let sibling_bid = self.windows[sib_idx].buffer_id();
         let active_bid = self.windows[active_win_idx].buffer_id();
 
-        // 2. Use the alignment map to translate the active cursor row
-        //    into the sibling's corresponding real rope row.
         let sibling_real_row: usize = {
             let alignment = self
                 .buf_by_id(active_bid)
@@ -456,7 +295,6 @@ impl Editor {
                     cursor_row,
                 )
             } else {
-                // No alignment — mirror directly, clamped to rope length
                 let max = self
                     .buf_by_id(sibling_bid)
                     .map(|b| b.len_lines().saturating_sub(1))
@@ -465,7 +303,6 @@ impl Editor {
             }
         };
 
-        // 3. Clamp to the sibling rope's actual line count and apply
         let max_row = self
             .buf_by_id(sibling_bid)
             .map(|b| b.len_lines().saturating_sub(1))
@@ -491,7 +328,6 @@ impl Editor {
             }
         };
 
-        // 1. Discover Git repository
         let path = std::path::Path::new(&filename);
         let repo = match git2::Repository::discover(path) {
             Ok(r) => r,
@@ -515,19 +351,13 @@ impl Editor {
             Err(_) => path.to_string_lossy().to_string(),
         };
 
-        // 2. Fetch HEAD content from Git ODB (reusing existing helper)
         let head_content = match get_head_file_content(&repo, &rel_path) {
             Some(c) => c,
-            None => {
-                // Brand new/untracked file: HEAD version is empty
-                String::new()
-            }
+            None => String::new(),
         };
 
-        // Create a unique URI-style filename for the HEAD version
         let target_filename = format!("git://head/{}", rel_path);
 
-        // 3. Create or update the HEAD buffer
         let existing_id = self
             .buffers
             .iter()
@@ -565,25 +395,22 @@ impl Editor {
             };
 
             self.buffers.push(buf);
-            self.buffers.last_mut().unwrap().parse_syntax(); // Inherits tree-sitter highlighting
+            self.buffers.last_mut().unwrap().parse_syntax();
             id
         };
 
-        // 4. Split the active window vertically
         let original_win_id = self.active_window().id;
         let (original_row, original_col, original_scroll_line) = {
             let w = self.active_window();
             (w.row, w.col, w.scroll_line)
         };
 
-        self.split_vertical(); // Focuses the new split window
+        self.split_vertical();
 
         let new_win_id = self.active_window().id;
 
-        // 5. Point the new viewport to our HEAD buffer
         self.active_window_mut().set_buffer_id(head_bid);
 
-        // Initialize matching cursor and scroll position
         {
             let win = self.active_window_mut();
             win.row = original_row;
@@ -591,7 +418,6 @@ impl Editor {
             win.scroll_line = original_scroll_line;
         }
 
-        // 6. Link both windows together as diff siblings
         if let Some(original_win) = self.windows.iter_mut().find(|w| w.id == original_win_id) {
             original_win.diff_sibling = Some(new_win_id);
         }
@@ -599,38 +425,26 @@ impl Editor {
             new_win.diff_sibling = Some(original_win_id);
         }
 
-        // --- Build alignment ---
-        let old_line_count = {
-            let buf = self.buf_by_id(head_bid).unwrap();
-            buf.len_lines()
-        };
-        let new_line_count = {
-            // The "active" buffer is the original working-copy side
-            let working_bid = self
-                .windows
-                .iter()
-                .find(|w| w.id == original_win_id)
-                .map(|w| w.buffer_id())
-                .unwrap_or(0);
-            self.buf_by_id(working_bid)
-                .map(|b| b.len_lines())
-                .unwrap_or(0)
-        };
+        let old_line_count = self.buf_by_id(head_bid).unwrap().len_lines();
+        let working_bid = self
+            .windows
+            .iter()
+            .find(|w| w.id == original_win_id)
+            .map(|w| w.buffer_id())
+            .unwrap_or(0);
+        let new_line_count = self
+            .buf_by_id(working_bid)
+            .map(|b| b.len_lines())
+            .unwrap_or(0);
 
         if let Ok(patch) = git2::Patch::from_buffers(
             head_content.as_bytes(),
             Some(std::path::Path::new(&rel_path)),
-            self.buf_by_id(
-                self.windows
-                    .iter()
-                    .find(|w| w.id == original_win_id)
-                    .unwrap()
-                    .buffer_id(),
-            )
-            .unwrap()
-            .rope
-            .to_string()
-            .as_bytes(),
+            self.buf_by_id(working_bid)
+                .unwrap()
+                .rope
+                .to_string()
+                .as_bytes(),
             Some(std::path::Path::new(&rel_path)),
             None,
         ) {
@@ -639,24 +453,15 @@ impl Editor {
                 old_line_count,
                 new_line_count,
             );
-            // Store the SAME struct on both buffers
-            // (clone since each buffer owns its copy)
-            let working_bid = self
-                .windows
-                .iter()
-                .find(|w| w.id == original_win_id)
-                .unwrap()
-                .buffer_id();
 
             if let Some(buf) = self.buf_mut_by_id(head_bid) {
-                buf.diff_alignment = Some(alignment.clone()); // needs #[derive(Clone)]
+                buf.diff_alignment = Some(alignment.clone());
             }
             if let Some(buf) = self.buf_mut_by_id(working_bid) {
                 buf.diff_alignment = Some(alignment);
             }
         }
 
-        // Return focus to the original active window so user can edit right away
         if let Some(idx) = self.windows.iter().position(|w| w.id == original_win_id) {
             self.active_window_idx = idx;
         }
@@ -666,11 +471,154 @@ impl Editor {
             MessageKind::Info,
         );
     }
+
+    /// `:diffoff` — close the diff split, return to a single pane.
+    pub fn diffoff(&mut self) {
+        let head_bid = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::GitDiffHead)
+            .map(|b| b.id);
+
+        let Some(hbid) = head_bid else {
+            self.set_status_msg("No diff session active", MessageKind::Info);
+            return;
+        };
+
+        let head_win_id = self
+            .windows
+            .iter()
+            .find(|w| w.buffer_id() == hbid)
+            .map(|w| w.id);
+
+        for buf in &mut self.buffers {
+            buf.diff_alignment = None;
+        }
+        for win in &mut self.windows {
+            win.diff_sibling = None;
+        }
+
+        self.buffers.retain(|b| b.id != hbid);
+
+        if let Some(hw_id) = head_win_id {
+            self.layout.remove_leaf(hw_id);
+
+            if let Some(remove_idx) = self.windows.iter().position(|w| w.id == hw_id) {
+                self.windows.remove(remove_idx);
+
+                if !self.windows.is_empty() {
+                    if self.active_window_idx > remove_idx {
+                        self.active_window_idx -= 1;
+                    } else if self.active_window_idx >= self.windows.len() {
+                        self.active_window_idx = self.windows.len() - 1;
+                    }
+                } else {
+                    self.active_window_idx = 0;
+                }
+            }
+        }
+
+        self.invalidate_hunk_cache();
+        self.set_status_msg("Diff view closed", MessageKind::Info);
+    }
 }
 
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
+// Bookmarks
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
+    /// Set (or overwrite) named bookmark `ch` at the current cursor.
+    pub fn set_named_bookmark(&mut self, ch: char) {
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+
+        let buf = self.buf_mut();
+        buf.named_bookmarks.insert(ch, (row, col));
+        buf.sync_bookmark_rows();
+
+        self.set_status_msg(
+            &format!("Mark '{}' set at line {}", ch, row + 1),
+            MessageKind::Success,
+        );
+    }
+
+    /// Jump to named bookmark `ch`.  Saves current position for
+    /// ping-pong before jumping.
+    pub fn goto_named_bookmark(&mut self, ch: char) {
+        let target = self.buf().named_bookmarks.get(&ch).copied();
+
+        match target {
+            Some((row, col)) => {
+                self.active_window_mut().save_jump_position();
+
+                let buf_len = self.buf().len_lines();
+                let safe_row = row.min(buf_len.saturating_sub(1));
+                let safe_col = col.min(self.buf().line_char_len(safe_row));
+
+                let win = self.active_window_mut();
+                win.row = safe_row;
+                win.col = safe_col;
+                win.desired_col = safe_col;
+
+                self.scroll_active_window_to_cursor();
+                self.set_status_msg(
+                    &format!("Jumped to mark '{}' (line {})", ch, safe_row + 1),
+                    MessageKind::Info,
+                );
+            }
+            None => {
+                self.set_status_msg(&format!("Mark '{}' not set", ch), MessageKind::Error);
+            }
+        }
+    }
+
+    /// Swap cursor with `last_jump`.  Pressing `` twice returns to
+    /// the original position.
+    pub fn jump_last_position(&mut self) {
+        let prev = self.active_window().last_jump;
+
+        match prev {
+            Some((row, col)) => {
+                self.active_window_mut().save_jump_position();
+
+                let buf_len = self.buf().len_lines();
+                let safe_row = row.min(buf_len.saturating_sub(1));
+                let safe_col = col.min(self.buf().line_char_len(safe_row));
+
+                let win = self.active_window_mut();
+                win.row = safe_row;
+                win.col = safe_col;
+                win.desired_col = safe_col;
+
+                self.scroll_active_window_to_cursor();
+                self.set_status_msg(
+                    &format!("Jumped back to line {}", safe_row + 1),
+                    MessageKind::Info,
+                );
+            }
+            None => {
+                self.set_status_msg("No previous jump position", MessageKind::Info);
+            }
+        }
+    }
+
+    /// Remove a named bookmark.  Returns true if it existed.
+    pub fn delete_named_bookmark(&mut self, ch: char) -> bool {
+        let removed = self.buf_mut().named_bookmarks.remove(&ch).is_some();
+        if removed {
+            self.buf_mut().sync_bookmark_rows();
+            self.set_status_msg(&format!("Mark '{}' removed", ch), MessageKind::Info);
+        }
+        removed
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Read-only accessors  (render / main)
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     pub fn mode(&self) -> Mode {
@@ -685,7 +633,7 @@ impl Editor {
     pub fn ghost_text(&self) -> Option<&str> {
         self.comp.ghost_text()
     }
-    pub fn completions(&self) -> &[String] {
+    pub fn completions(&self) -> Vec<String> {
         self.comp.completions()
     }
     pub fn completion_idx(&self) -> usize {
@@ -771,8 +719,14 @@ impl Editor {
         let chars: Vec<char> = buf.line_text(win.row).chars().collect();
         let col = win.col.min(chars.len());
         let mut start = col;
-        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
-            start -= 1;
+
+        while start > 0 {
+            let c = chars[start - 1];
+            if c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-' {
+                start -= 1;
+            } else {
+                break;
+            }
         }
         chars[start..col].iter().collect()
     }
@@ -798,16 +752,13 @@ impl Editor {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Layout computation (called each frame by the render loop)
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
+// Layout computation
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     /// Compute and assign `WindowPosition` to every window based on
     /// the layout tree and the available terminal `area`.
-    ///
-    /// `separator` is the number of rows/cols taken by a divider line
-    /// between split panes (typically 1).
     pub fn layout_windows(&mut self, area: WindowPosition, separator: usize) {
         let positions = self.layout.compute_positions(area, separator);
         for (window_id, pos) in positions {
@@ -827,9 +778,9 @@ impl Editor {
     }
 }
 
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 // Status helpers
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     pub fn set_status(&mut self, msg: &str, kind: MessageKind) {
@@ -847,9 +798,9 @@ impl Editor {
     }
 }
 
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 // Mode transitions
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     pub fn enter_insert(&mut self) {
@@ -868,7 +819,7 @@ impl Editor {
             );
         }
         self.mode = Mode::Normal;
-        self.active_window_mut().visual_anchor = None; // Clear the selection anchor
+        self.active_window_mut().visual_anchor = None;
         self.comp.on_leave_insert();
         self.command.clear();
         self.cmd_history_idx = None;
@@ -938,372 +889,9 @@ impl Editor {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Completion
-// ---------------------------------------------------------------------------
-
-impl Editor {
-    pub fn ingest_completion_response(&mut self, id: usize, items: Vec<String>) {
-        let (row, col) = {
-            let win = self.active_window();
-            (win.row, win.col)
-        };
-        let mode = self.mode();
-        let rope_len = self.buf().rope.len_chars();
-        let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
-
-        log::debug!(
-            "[comp:response] id={} items={} request_id={} row={} col={}",
-            id,
-            items.len(),
-            self.comp.request_id,
-            row,
-            col
-        );
-
-        if id != self.comp.request_id {
-            log::debug!(
-                "[comp:response] DROPPED: stale id={} != current={}",
-                id,
-                self.comp.request_id
-            );
-            return;
-        }
-
-        // Re-implement context check inline...
-        let context_ok = {
-            if rope_len <= 1 {
-                log::debug!("[comp:response] REJECT: rope too short");
-                false
-            } else {
-                let c = col.min(line_chars.len());
-                if c < line_chars.len() {
-                    let next = line_chars[c];
-                    if next.is_alphanumeric() || next == '_' || next == ')' {
-                        log::debug!("[comp:response] REJECT: next char '{}' blocks", next);
-                        false
-                    } else if c > 0 && line_chars[c - 1] == ')' {
-                        log::debug!("[comp:response] REJECT: char before cursor is ')'");
-                        false
-                    } else {
-                        let min_prefix = 4;
-                        let mut prefix_len = 0;
-                        let mut i = c;
-                        while i > 0 {
-                            let ch = line_chars[i - 1];
-                            if ch.is_alphanumeric() || ch == '_' {
-                                prefix_len += 1;
-                                i -= 1;
-                            } else {
-                                break;
-                            }
-                        }
-                        if prefix_len < min_prefix {
-                            log::debug!(
-                                "[comp:response] REJECT: prefix_len={} < {}",
-                                prefix_len,
-                                min_prefix
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                } else if c > 0 && line_chars[c - 1] == ')' {
-                    log::debug!("[comp:response] REJECT: char before cursor is ')'");
-                    false
-                } else {
-                    let min_prefix = 4;
-                    let mut prefix_len = 0;
-                    let mut i = c;
-                    while i > 0 {
-                        let ch = line_chars[i - 1];
-                        if ch.is_alphanumeric() || ch == '_' {
-                            prefix_len += 1;
-                            i -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    if prefix_len < min_prefix {
-                        log::debug!(
-                            "[comp:response] REJECT: prefix_len={} < {} (at EOL)",
-                            prefix_len,
-                            min_prefix
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                }
-            }
-        };
-
-        if !context_ok {
-            log::debug!("[comp:response] → reset_to_idle (context failed)");
-            self.comp.reset_to_idle();
-            return;
-        }
-        if items.is_empty() {
-            log::debug!("[comp:response] → reset_to_idle (empty items)");
-            self.comp.reset_to_idle();
-            return;
-        }
-        log::debug!(
-            "[comp:response] → SET ACTIVE: {} items, first={:?}",
-            items.len(),
-            &items[0][..items[0].chars().take(30).collect::<String>().len()]
-        );
-        self.comp.set_active(items);
-    }
-
-    pub fn on_edit(&mut self) {
-        self.comp.on_edit();
-    }
-
-    pub fn cycle_completion(&mut self, dir: i32) {
-        self.comp.cycle(dir);
-    }
-
-    pub fn clear_completions(&mut self) {
-        self.comp.on_edit();
-    }
-
-    pub fn cancel_pending_request(&mut self) {
-        let id = self.comp.request_id;
-        self.comp.on_cancel(id);
-    }
-
-    pub fn touch_completion(&mut self) {
-        self.comp.last_edit_time = std::time::Instant::now();
-    }
-
-    // set_completions — extract buf data before calling comp:
-    pub fn set_completions(&mut self, items: Vec<String>) {
-        let id = self.comp.request_id;
-        let (row, col) = {
-            let win = self.active_window();
-            (win.row, win.col)
-        };
-        let mode = self.mode();
-        let rope_len = self.buf().rope.len_chars();
-        let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
-        // drop buf borrow here, then call on_response with owned data
-        // but since set_completions bypasses context check, just use set_active:
-        self.comp.set_active(items);
-    }
-
-    /// Poll the completion machine on every tick.
-    pub fn poll_completion(&mut self) -> Option<(usize, String, usize, String)> {
-        let (row, col, rope_str, offset, filename) = {
-            let win = self.active_window();
-            let buf = self.buf();
-
-            if win.row >= buf.len_lines() {
-                log::debug!("[comp:poll] SKIP: row >= len_lines");
-                return None;
-            }
-
-            (
-                win.row,
-                win.col,
-                buf.rope.to_string(),
-                win.cursor_char_offset(buf),
-                buf.filename.clone(),
-            )
-        };
-        let mode = self.mode;
-
-        let comp = &mut self.comp;
-        use crate::ed::buffer::detect_language;
-
-        if mode != Mode::Insert && mode != Mode::Brief {
-            log::debug!("[comp:poll] SKIP: mode={:?} not Insert/Brief", mode);
-            return None;
-        }
-        if !comp.is_throttling() {
-            log::debug!("[comp:poll] SKIP: phase=xxx (not Throttling)",);
-            return None;
-        }
-        if comp.last_edit_time.elapsed() < std::time::Duration::from_millis(comp.throttle_ms) {
-            log::debug!(
-                "[comp:poll] SKIP: throttle {}ms < {}ms",
-                comp.last_edit_time.elapsed().as_millis(),
-                comp.throttle_ms
-            );
-            return None;
-        }
-
-        if rope_str.chars().count() <= 1 {
-            log::debug!("[comp:poll] SKIP: rope too short");
-            return None;
-        }
-        let line: Vec<char> = rope_str.lines().nth(row).unwrap_or("").chars().collect();
-        let c = col.min(line.len());
-        if c < line.len() {
-            let next = line[c];
-            if next.is_alphanumeric() || next == '_' || next == ')' {
-                log::debug!("[comp:poll] SKIP: next char '{}' blocks", next);
-                return None;
-            }
-        }
-        if c > 0 && line[c - 1] == ')' {
-            log::debug!("[comp:poll] SKIP: char before cursor is ')'");
-            return None;
-        }
-
-        // ── min_prefix guard ──────────────────────────────────────────
-        let min_prefix = match mode {
-            Mode::Brief | Mode::Insert => 4,
-            _ => return None,
-        };
-        let mut prefix_len = 0;
-        let mut i = c;
-        while i > 0 {
-            let ch = line[i - 1];
-            if ch.is_alphanumeric() || ch == '_' {
-                prefix_len += 1;
-                i -= 1;
-            } else {
-                break;
-            }
-        }
-        if prefix_len < min_prefix {
-            log::debug!(
-                "[comp:poll] SKIP: prefix_len={} < min_prefix={}",
-                prefix_len,
-                min_prefix
-            );
-            return None;
-        }
-
-        log::debug!(
-            "[comp:poll] FIRE: id={} row={} col={} prefix_len={}",
-            comp.request_id + 1,
-            row,
-            col,
-            prefix_len
-        );
-        comp.start_pending(row, col);
-
-        Some((
-            comp.request_id,
-            rope_str,
-            offset,
-            detect_language(filename.as_deref()),
-        ))
-    }
-
-    /// Accept the current ghost text and insert it.
-    pub fn accept_completion(&mut self) {
-        let (row, col, before_str, after, line_to_char_row) = {
-            let win = self.active_window();
-            let buf = self.buf();
-            if win.row >= buf.len_lines() {
-                self.comp.reset_to_idle();
-                return;
-            }
-            let line_text = buf.line_text(win.row);
-            let before_str: String = line_text.chars().take(win.col).collect();
-            let after: String = line_text.chars().skip(win.col).collect();
-            (
-                win.row,
-                win.col,
-                before_str,
-                after,
-                buf.rope.line_to_char(win.row),
-            )
-        };
-
-        let ghost = match self.comp.ghost_text.take() {
-            Some(t) => t,
-            None => return,
-        };
-
-        // Dynamically compute the prefix overlap with the full ghost word relative to what is currently typed
-        let prefix_overlap = crate::comp::state::find_prefix_overlap(&before_str, &ghost);
-        let ghost_suffix: String = ghost.chars().skip(prefix_overlap).collect();
-
-        // Calculate overlap with the existing text ahead of the cursor to prevent duplicates
-        let overlap = after
-            .chars()
-            .zip(ghost_suffix.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-
-        let to_insert: String = ghost_suffix.chars().skip(overlap).collect();
-        let insert_offset = line_to_char_row + col;
-
-        self.comp.reset_to_idle();
-
-        {
-            let buf = self.buf_mut();
-            buf.push_undo(row, col);
-            if !to_insert.is_empty() {
-                buf.rope.insert(insert_offset, &to_insert);
-            }
-            buf.mark_modified();
-            buf.parse_syntax();
-        }
-        {
-            let win = self.active_window_mut();
-            win.col += to_insert.chars().count() + overlap;
-        }
-
-        self.maybe_refresh_buffer_words();
-    }
-
-    /// Locates the word under (or immediately after) the active window's cursor position on the line.
-    /// Matches standard Vim behavior by scanning forward for a word boundary first.
-    pub fn get_word_under_cursor(&self) -> Option<String> {
-        let win = self.active_window();
-        let buf = self.buf();
-
-        if win.row >= buf.len_lines() {
-            return None;
-        }
-
-        let line_text = buf.line_text(win.row);
-        let chars: Vec<char> = line_text.chars().collect();
-        if chars.is_empty() {
-            return None;
-        }
-
-        let col = win.col.min(chars.len().saturating_sub(1));
-        let mut start = col;
-
-        // 1. If starting on a non-word character, scan forward to find the next word
-        while start < chars.len() && !chars[start].is_alphanumeric() && chars[start] != '_' {
-            start += 1;
-        }
-
-        if start >= chars.len() {
-            return None; // No word found forward on this line
-        }
-
-        let mut end = start;
-
-        // 2. Scan backward to locate the word start boundary
-        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
-            start -= 1;
-        }
-
-        // 3. Scan forward to locate the word end boundary
-        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
-            end += 1;
-        }
-
-        if start < end {
-            Some(chars[start..end].iter().collect())
-        } else {
-            None
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 // Command string helpers
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     pub fn clear_command(&mut self) {
@@ -1332,9 +920,9 @@ impl Editor {
     }
 }
 
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 // Spinner / LSP
-// ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
     pub fn set_lsp_loading(&mut self, loading: bool) {
@@ -1351,10 +939,13 @@ impl Editor {
             self.buf().len_lines()
         }
     }
+}
 
-    // -----------------------------------------------------------------------
-    // Scroll helpers
-    // -----------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
+// Scroll helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
     pub fn ensure_cursor_visible(&mut self, viewport_height: usize) {
         let w = self.active_window().position.width;
         let gutter = self.active_gutter_width();
@@ -1380,24 +971,20 @@ impl Editor {
     pub fn active_gutter_width(&self) -> usize {
         let mut width = 0;
 
-        // Git signs column
         if self.config.git_gutter_enabled {
             width += 1;
         }
 
-        // Line numbers
         if self.config.line_numbers_enabled {
             let total_lines = self.buf().len_lines().max(1);
             let digits = digit_count(total_lines);
-            width += digits + 1; // digits + trailing space
+            width += digits + 1;
         }
 
-        // Bookmarks column
         if self.config.bookmarks_enabled {
             width += 1;
         }
 
-        // Separator between gutter and text
         if width > 0 {
             width += 1;
         }
@@ -1431,15 +1018,14 @@ impl Editor {
             win.scroll_line = max_scroll;
         }
     }
+}
 
-    // ---------------------------------------------------------------------------
-    // Buffer management
-    // ---------------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════════════
+// Window management
+// ═══════════════════════════════════════════════════════════════════════════
 
+impl Editor {
     /// Split the active window horizontally (top / bottom).
-    ///
-    /// The new pane initially shows the same buffer at the same cursor
-    /// position.
     pub fn split_horizontal(&mut self) {
         if self.windows.len() >= MAX_WINDOWS {
             self.set_status("Maximum number of windows reached", MessageKind::Error);
@@ -1456,18 +1042,15 @@ impl Editor {
         let new_win_id = self.next_win_id;
         self.next_win_id += 1;
 
-        // Update layout tree.
         self.layout
             .split_leaf(cur_win_id, SplitDir::Horizontal, new_win_id);
 
-        // Create new window sharing the same buffer.
         let mut new_win = Window::new(new_win_id, bid);
         new_win.row = row;
         new_win.col = col;
         new_win.scroll_line = scroll_line;
         new_win.scroll_col = scroll_col;
 
-        // Append and focus the new window.
         let new_idx = self.windows.len();
         self.windows.push(new_win);
         self.active_window_idx = new_idx;
@@ -1479,7 +1062,7 @@ impl Editor {
             .map(|w| w.position.height)
             .unwrap_or(40);
         let est_height = old_height.saturating_sub(1) / 2;
-        let est_width = self.active_window().position.width; // Preserve width
+        let est_width = self.active_window().position.width;
         let gutter = self.active_gutter_width();
         let offset = self.effective_scroll_offset();
         if est_height > 0 {
@@ -1530,7 +1113,7 @@ impl Editor {
             .map(|w| w.position.width)
             .unwrap_or(80);
         let est_width = old_width.saturating_sub(1) / 2;
-        let est_height = self.active_window().position.height; // Preserve height
+        let est_height = self.active_window().position.height;
         let gutter = self.active_gutter_width();
         let offset = self.effective_scroll_offset();
         if est_width > 0 {
@@ -1545,10 +1128,6 @@ impl Editor {
     }
 
     /// Close the active window.
-    ///
-    /// If `force` is false and the window is the last viewer of a
-    /// modified buffer, the close is refused with a status message.
-    /// If this is the last window the editor quits (or prompts).
     pub fn close_window(&mut self, force: bool) {
         if self.windows.len() <= 1 {
             if force {
@@ -1559,7 +1138,6 @@ impl Editor {
             return;
         }
 
-        // Warn if the buffer is modified and no other window is viewing it.
         if !force && !self.is_buffer_viewed_elsewhere() && self.buf().modified {
             self.set_status_msg(
                 "No write since last change (use :q! to force)",
@@ -1570,7 +1148,6 @@ impl Editor {
 
         let win_id = self.active_window().id;
 
-        // Clear sibling's link before discarding this window
         let sibling_id = self.active_window().diff_sibling;
         if let Some(sib_id) = sibling_id {
             if let Some(sib) = self.windows.iter_mut().find(|w| w.id == sib_id) {
@@ -1578,13 +1155,11 @@ impl Editor {
             }
         }
 
-        // Remove from the layout tree.
         self.layout.remove_leaf(win_id);
 
-        // Calculate the index to focus after removal.
         let remove_idx = self.active_window_idx;
         let next_idx = if remove_idx + 1 < self.windows.len() {
-            remove_idx // the window after this one slides down
+            remove_idx
         } else {
             remove_idx.saturating_sub(1)
         };
@@ -1603,11 +1178,7 @@ impl Editor {
         }
 
         let keep_id = self.active_window().id;
-
-        // Reset the layout tree to a single leaf.
         self.layout = LayoutNode::Leaf(keep_id);
-
-        // Remove all other windows.
         self.windows.retain(|w| w.id == keep_id);
         self.active_window_idx = 0;
 
@@ -1639,22 +1210,18 @@ impl Editor {
 
     // ---- Directional focus ----
 
-    /// Focus the nearest window to the left.
     pub fn focus_window_left(&mut self) {
         self.focus_window_directional(-1, 0);
     }
 
-    /// Focus the nearest window to the right.
     pub fn focus_window_right(&mut self) {
         self.focus_window_directional(1, 0);
     }
 
-    /// Focus the nearest window above.
     pub fn focus_window_up(&mut self) {
         self.focus_window_directional(0, -1);
     }
 
-    /// Focus the nearest window below.
     pub fn focus_window_down(&mut self) {
         self.focus_window_directional(0, 1);
     }
@@ -1713,9 +1280,6 @@ impl Editor {
     }
 
     /// Generic directional focus.
-    ///
-    /// `(dx, dy)` indicates the direction: `(-1, 0)` = left, `(1, 0)` =
-    /// right, `(0, -1)` = up, `(0, 1)` = down.
     fn focus_window_directional(&mut self, dx: isize, dy: isize) {
         if self.windows.len() <= 1 {
             return;
@@ -1723,7 +1287,6 @@ impl Editor {
 
         let cur = self.active_window().position;
         if !cur.is_visible() {
-            // Positions not yet computed; fall back to cycling.
             if dx > 0 || dy > 0 {
                 self.focus_next_window();
             } else {
@@ -1763,7 +1326,6 @@ impl Editor {
                 continue;
             }
 
-            // Must overlap along the perpendicular axis
             let overlaps_perp = if dx != 0 {
                 cur.overlaps_vertically(&p)
             } else {
@@ -1771,7 +1333,6 @@ impl Editor {
             };
 
             let dist = if dx != 0 { diff_x.abs() } else { diff_y.abs() };
-
             let score = if overlaps_perp { dist } else { dist + 10000 };
 
             if score < best_dist {
@@ -1796,11 +1357,8 @@ impl Editor {
         }
 
         if let Some(target_id) = self.find_window_in_direction(direction) {
-            // Temporarily switch focus to the target window
             if let Some(idx) = self.windows.iter().position(|w| w.id == target_id) {
                 self.active_window_idx = idx;
-                // Reuse existing close_window logic, which handles layout/tree cleanup
-                // and naturally falls focus back to a sibling (likely your original window)
                 self.close_window(false);
             }
         } else {
@@ -1810,7 +1368,13 @@ impl Editor {
             );
         }
     }
+}
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Buffer management
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
     pub fn open_buffer(&mut self, path: Option<String>) {
         // Save old active buffer position
         let old_filename = self.active_filename().map(|s| s.to_string());
@@ -1827,7 +1391,6 @@ impl Editor {
         let old_bid = self.active_window().buffer_id();
         let mut should_clean_old = false;
 
-        // Check if the current buffer is an unmodified, empty "No Name" buffer
         if let Some(old_buf) = self.buf_by_id(old_bid) {
             if old_buf.filename.is_none() && !old_buf.modified && old_buf.rope.len_chars() <= 1 {
                 should_clean_old = true;
@@ -1841,15 +1404,13 @@ impl Editor {
                 crate::ed::buffer::find_buffer_by_filename(&self.buffers, file_path)
             {
                 if existing_id == old_bid {
-                    return; // Already viewing this file
+                    return;
                 }
 
-                // Switch window and restore position
                 self.active_window_mut().set_buffer_id(existing_id);
 
                 let mut restored = false;
                 if let Some((row, col)) = self.get_saved_position(p) {
-                    // FIX: extract buffer data first to avoid simultaneous mutable+immutable borrows
                     let (len_lines, line_char_len) = {
                         let buf = self.buf_by_id(existing_id).unwrap();
                         let safe_row = row.min(buf.len_lines().saturating_sub(1));
@@ -1873,12 +1434,10 @@ impl Editor {
                 self.comp.on_leave_insert();
                 self.maybe_refresh_buffer_words();
 
-                // Clean up the old empty "No Name" buffer if no other window views it
                 if should_clean_old && !self.windows.iter().any(|w| w.buffer_id() == old_bid) {
                     self.buffers.retain(|b| b.id != old_bid);
                 }
 
-                // Sync into MRU with correct restored coordinates
                 let path_buf = std::path::PathBuf::from(p);
                 if let Ok(canon_path) = std::fs::canonicalize(&path_buf) {
                     let win = self.active_window();
@@ -1895,13 +1454,11 @@ impl Editor {
                 self.next_buf_id += 1;
                 self.buffers.push(buf);
 
-                // Switch window and restore position
                 self.active_window_mut().set_buffer_id(bid);
 
                 let mut restored = false;
                 if let Some(ref p) = path {
                     if let Some((row, col)) = self.get_saved_position(p) {
-                        // FIX: extract buffer data first to avoid simultaneous mutable+immutable borrows
                         let (len_lines, line_char_len) = {
                             let buf = self.buf_by_id(bid).unwrap();
                             let safe_row = row.min(buf.len_lines().saturating_sub(1));
@@ -1926,12 +1483,10 @@ impl Editor {
                 self.comp.on_leave_insert();
                 self.maybe_refresh_buffer_words();
 
-                // Clean up the old empty "No Name" buffer if no other window views it
                 if should_clean_old && !self.windows.iter().any(|w| w.buffer_id() == old_bid) {
                     self.buffers.retain(|b| b.id != old_bid);
                 }
 
-                // Sync into MRU with correct coordinates
                 if let Some(ref p) = path {
                     let path_buf = std::path::PathBuf::from(p);
                     if let Ok(canon_path) = std::fs::canonicalize(&path_buf) {
@@ -2079,7 +1634,6 @@ impl Editor {
             if matches.len() == 1 {
                 target_bid = Some(matches[0]);
             } else if matches.len() > 1 {
-                // Smart prefix prioritization if multiple match
                 let mut best_match = None;
                 for &bid in &matches {
                     if let Some(buf) = self.buf_by_id(bid) {
@@ -2131,8 +1685,6 @@ impl Editor {
         let format_on_save = self.config.format_on_save;
         let result = self.buf_mut().save_file(format_on_save);
 
-        // ── Route warnings/errors to the correct UI element ────────
-        // Multi-line → Error popup, Single-line → Status bar
         match &result {
             Ok(Some(warning)) => {
                 self.show_message(warning.clone());
@@ -2140,9 +1692,7 @@ impl Editor {
             Err(e) => {
                 self.show_message(e.to_string());
             }
-            Ok(None) => {
-                // Save succeeded with no warnings — no message needed
-            }
+            Ok(None) => {}
         }
 
         result
@@ -2154,27 +1704,370 @@ impl Editor {
             buf.filename = Some(path);
         }
     }
+}
 
-    /// Returns true if the which-key popup should be rendered.
-    /// Implements a configurable debounce: if keys in a sequence are pressed
-    /// faster than `which_key_delay_ms` apart, the popup stays hidden.
-    // tag_whichkey_visible.b
-    pub fn is_whichkey_visible(&self) -> bool {
-        if self.pending_keys.is_empty() {
-            return false;
+// ═══════════════════════════════════════════════════════════════════════════
+// Completion
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
+    pub fn ingest_completion_response(&mut self, id: usize, items: Vec<String>) {
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+        let mode = self.mode();
+        let rope_len = self.buf().rope.len_chars();
+        let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
+
+        log::debug!(
+            "[comp:response] id={} items={} request_id={} row={} col={}",
+            id,
+            items.len(),
+            self.comp.request_id,
+            row,
+            col
+        );
+
+        if id != self.comp.request_id {
+            log::debug!(
+                "[comp:response] DROPPED: stale id={} != current={}",
+                id,
+                self.comp.request_id
+            );
+            return;
         }
 
-        let delay = std::time::Duration::from_millis(self.config.which_key_delay_ms);
+        let context_ok = {
+            if rope_len <= 1 {
+                log::debug!("[comp:response] REJECT: rope too short");
+                false
+            } else {
+                let c = col.min(line_chars.len());
+                if c < line_chars.len() {
+                    let next = line_chars[c];
+                    if next.is_alphanumeric() || next == '_' || next == ')' {
+                        log::debug!("[comp:response] REJECT: next char '{}' blocks", next);
+                        false
+                    } else if c > 0 && line_chars[c - 1] == ')' {
+                        log::debug!("[comp:response] REJECT: char before cursor is ')'");
+                        false
+                    } else {
+                        let min_prefix = 4;
+                        let mut prefix_len = 0;
+                        let mut i = c;
+                        while i > 0 {
+                            let ch = line_chars[i - 1];
+                            if ch.is_alphanumeric() || ch == '_' {
+                                prefix_len += 1;
+                                i -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if prefix_len < min_prefix {
+                            log::debug!(
+                                "[comp:response] REJECT: prefix_len={} < {}",
+                                prefix_len,
+                                min_prefix
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                } else if c > 0 && line_chars[c - 1] == ')' {
+                    log::debug!("[comp:response] REJECT: char before cursor is ')'");
+                    false
+                } else {
+                    let min_prefix = 4;
+                    let mut prefix_len = 0;
+                    let mut i = c;
+                    while i > 0 {
+                        let ch = line_chars[i - 1];
+                        if ch.is_alphanumeric() || ch == '_' {
+                            prefix_len += 1;
+                            i -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if prefix_len < min_prefix {
+                        log::debug!(
+                            "[comp:response] REJECT: prefix_len={} < {} (at EOL)",
+                            prefix_len,
+                            min_prefix
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+            }
+        };
 
-        match self.pending_keys_time {
-            Some(time) => time.elapsed() >= delay,
-            None => true, // Fallback if time wasn't set
+        if !context_ok {
+            log::debug!("[comp:response] → reset_to_idle (context failed)");
+            self.comp.reset_to_idle();
+            return;
+        }
+        if items.is_empty() {
+            log::debug!("[comp:response] → reset_to_idle (empty items)");
+            self.comp.reset_to_idle();
+            return;
+        }
+        log::debug!(
+            "[comp:response] → SET ACTIVE: {} items, first={:?}",
+            items.len(),
+            &items[0][..items[0].chars().take(30).collect::<String>().len()]
+        );
+        self.comp.set_active(items);
+    }
+
+    pub fn on_edit(&mut self) {
+        self.comp.on_edit();
+    }
+
+    pub fn cycle_completion(&mut self, dir: i32) {
+        self.comp.cycle(dir);
+    }
+
+    pub fn clear_completions(&mut self) {
+        self.comp.on_edit();
+    }
+
+    pub fn cancel_pending_request(&mut self) {
+        let id = self.comp.request_id;
+        self.comp.on_cancel(id);
+    }
+
+    pub fn touch_completion(&mut self) {
+        self.comp.last_edit_time = std::time::Instant::now();
+    }
+
+    pub fn set_completions(&mut self, items: Vec<String>) {
+        self.comp.set_active(items);
+    }
+
+    /// Poll the completion machine on every tick.
+    pub fn poll_completion(&mut self) -> Option<(usize, String, usize, String)> {
+        let prefix = self.get_current_word_prefix();
+        let (row, col, rope_str, offset, filename) = {
+            let win = self.active_window();
+            let buf = self.buf();
+
+            if win.row >= buf.len_lines() {
+                log::debug!("[comp:poll] SKIP: row >= len_lines");
+                return None;
+            }
+
+            (
+                win.row,
+                win.col,
+                buf.rope.to_string(),
+                win.cursor_char_offset(buf),
+                buf.filename.clone(),
+            )
+        };
+        let mode = self.mode;
+
+        let comp = &mut self.comp;
+        use crate::ed::buffer::detect_language;
+
+        if mode != Mode::Insert && mode != Mode::Brief {
+            log::debug!("[comp:poll] SKIP: mode={:?} not Insert/Brief", mode);
+            return None;
+        }
+        if !comp.is_throttling() {
+            log::debug!("[comp:poll] SKIP: phase=xxx (not Throttling)");
+            return None;
+        }
+        if comp.last_edit_time.elapsed() < std::time::Duration::from_millis(comp.throttle_ms) {
+            log::debug!(
+                "[comp:poll] SKIP: throttle {}ms < {}ms",
+                comp.last_edit_time.elapsed().as_millis(),
+                comp.throttle_ms
+            );
+            return None;
+        }
+
+        if rope_str.chars().count() <= 1 {
+            log::debug!("[comp:poll] SKIP: rope too short");
+            return None;
+        }
+
+        let line: Vec<char> = rope_str.lines().nth(row).unwrap_or("").chars().collect();
+        let c = col.min(line.len());
+
+        if c < line.len() {
+            let next = line[c];
+            if next.is_alphanumeric() || next == '_' || next == ')' {
+                log::debug!("[comp:poll] SKIP: next char '{}' blocks", next);
+                return None;
+            }
+        }
+        if c > 0 && line[c - 1] == ')' {
+            log::debug!("[comp:poll] SKIP: char before cursor is ')'");
+            return None;
+        }
+
+        let min_prefix = match mode {
+            Mode::Brief | Mode::Insert => 4,
+            _ => return None,
+        };
+
+        let mut prefix_len = 0;
+        let mut is_path = false;
+        let mut i = c;
+        while i > 0 {
+            let ch = line[i - 1];
+            if ch.is_alphanumeric() || ch == '_' {
+                prefix_len += 1;
+                i -= 1;
+            } else if ch == '.' || ch == '/' || ch == '-' {
+                is_path = true;
+                prefix_len += 1;
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+
+        if prefix_len < min_prefix && !is_path {
+            log::debug!(
+                "[comp:poll] SKIP: prefix_len={} < min_prefix={}",
+                prefix_len,
+                min_prefix
+            );
+            return None;
+        }
+
+        log::debug!(
+            "[comp:poll] FIRE: id={} row={} col={} prefix_len={}",
+            comp.request_id + 1,
+            row,
+            col,
+            prefix_len
+        );
+        comp.set_prefix(prefix);
+        comp.start_pending(row, col);
+
+        Some((
+            comp.request_id,
+            rope_str,
+            offset,
+            detect_language(filename.as_deref()),
+        ))
+    }
+
+    /// Accept the current completion (ghost text or popup selection).
+    pub fn accept_completion(&mut self) {
+        let (row, col, line_text, line_start_char) = {
+            let win = self.active_window();
+            let buf = self.buf();
+            if win.row >= buf.len_lines() {
+                self.comp.reset_to_idle();
+                return;
+            }
+            (
+                win.row,
+                win.col,
+                buf.line_text(win.row),
+                buf.rope.line_to_char(win.row),
+            )
+        };
+
+        let replacement = match self.comp.ghost_text.take() {
+            Some(t) => t,
+            None => match self.comp.candidates().get(self.comp.completion_idx()) {
+                Some(c) => c.text.clone(),
+                None => return,
+            },
+        };
+
+        let chars: Vec<char> = line_text.chars().collect();
+        let mut word_start = col;
+        while word_start > 0 {
+            let c = chars[word_start - 1];
+            if c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-' {
+                word_start -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let replace_start = line_start_char + word_start;
+        let replace_end = line_start_char + col;
+
+        self.comp.reset_to_idle();
+
+        {
+            let (win, buf) = self.active_window_and_buf_mut();
+            buf.push_undo(row, col);
+
+            if replace_start < replace_end {
+                buf.rope.remove(replace_start..replace_end);
+            }
+
+            if !replacement.is_empty() {
+                buf.rope.insert(replace_start, &replacement);
+            }
+
+            buf.mark_modified();
+            buf.parse_syntax();
+
+            win.col = word_start + replacement.chars().count();
+            win.desired_col = win.col;
+        }
+
+        self.maybe_refresh_buffer_words();
+    }
+
+    /// Locates the word under (or immediately after) the active window's cursor position on the line.
+    pub fn get_word_under_cursor(&self) -> Option<String> {
+        let win = self.active_window();
+        let buf = self.buf();
+
+        if win.row >= buf.len_lines() {
+            return None;
+        }
+
+        let line_text = buf.line_text(win.row);
+        let chars: Vec<char> = line_text.chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+
+        let col = win.col.min(chars.len().saturating_sub(1));
+        let mut start = col;
+
+        while start < chars.len() && !chars[start].is_alphanumeric() && chars[start] != '_' {
+            start += 1;
+        }
+
+        if start >= chars.len() {
+            return None;
+        }
+
+        let mut end = start;
+
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+
+        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+
+        if start < end {
+            Some(chars[start..end].iter().collect())
+        } else {
+            None
         }
     }
 
-    /// Manual completion trigger (Alt+/).
-    /// Uses pre-built lists if available; otherwise performs a
-    /// one-shot scan of the buffer rope — no config change needed.
+    /// Manual completion (Alt+/) — scans synchronously, merges with
+    /// any existing results from the current version.
     pub fn trigger_manual_completion(&mut self) {
         if self.mode != Mode::Insert && self.mode != Mode::Brief {
             return;
@@ -2186,52 +2079,36 @@ impl Editor {
             return;
         }
 
-        const MAX_RESULTS: usize = 50;
-        let mut seen = std::collections::HashSet::new();
+        self.comp.set_prefix(prefix.clone());
+
+        let min_len = prefix.len().max(3);
         let mut matches: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
 
-        // ── 1. Vocab words (always available if config enabled) ─────
-        for word in &self.vocab_words {
-            if matches.len() >= MAX_RESULTS {
-                break;
-            }
-            if word.starts_with(&prefix) && word.as_str() != prefix {
-                if seen.insert(word.clone()) {
-                    matches.push(word.clone());
+        // ── Buffer words ──────────────────────────────────────────
+        if !self.buffer_words.is_empty() {
+            for word in &self.buffer_words {
+                if matches.len() >= 50 {
+                    break;
+                }
+                if word.starts_with(&prefix) && word.as_str() != prefix {
+                    if seen.insert(word.clone()) {
+                        matches.push(word.clone());
+                    }
                 }
             }
-        }
-
-        // ── 2. Pre-scanned buffer words (if buffer_word_scan=true) ──
-        for word in &self.buffer_words {
-            if matches.len() >= MAX_RESULTS {
-                break;
-            }
-            if word.starts_with(&prefix) && word.as_str() != prefix {
-                if seen.insert(word.clone()) {
-                    matches.push(word.clone());
-                }
-            }
-        }
-
-        // ── 3. One-shot scan (when buffer_word_scan=false) ──────────
-        //    Scans the rope directly, this frame only.
-        //    The borrow on `self.buf()` is dropped at the end of this block,
-        //    well before we touch `self.comp` below.
-        if self.buffer_words.is_empty() && matches.len() < MAX_RESULTS {
-            let min_len = prefix.len().max(3);
+        } else {
             let buf = self.buf();
             let total = buf.len_lines();
-
             for i in 0..total {
-                if matches.len() >= MAX_RESULTS {
+                if matches.len() >= 50 {
                     break;
                 }
                 for w in buf
                     .line_text(i)
                     .split(|c: char| !c.is_alphanumeric() && c != '_')
                 {
-                    if matches.len() >= MAX_RESULTS {
+                    if matches.len() >= 50 {
                         break;
                     }
                     if w.len() >= min_len && w.starts_with(&prefix) && w != prefix {
@@ -2241,7 +2118,19 @@ impl Editor {
                     }
                 }
             }
-        } // ← buf borrow dropped here
+        }
+
+        // ── Vocab words ─────────────────────────────────────────
+        for word in &self.vocab_words {
+            if matches.len() >= 50 {
+                break;
+            }
+            if word.starts_with(&prefix) && word.as_str() != prefix {
+                if seen.insert(word.clone()) {
+                    matches.push(word.clone());
+                }
+            }
+        }
 
         if matches.is_empty() {
             self.set_status_msg("No completions found", MessageKind::Info);
@@ -2251,12 +2140,28 @@ impl Editor {
         matches.sort();
         matches.dedup();
 
-        // ── Inject into CompletionMachine ────────────────────────────
-        let (row, col) = {
-            let win = self.active_window();
-            (win.row, win.col)
-        };
-        self.comp.start_pending(row, col);
-        self.comp.set_active(matches);
+        let version = self.comp.current_version();
+        self.comp
+            .merge_source(CompletionSource::Manual, matches, version);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Which-key visibility
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
+    /// Returns true if the which-key popup should be rendered.
+    pub fn is_whichkey_visible(&self) -> bool {
+        if self.pending_keys.is_empty() {
+            return false;
+        }
+
+        let delay = std::time::Duration::from_millis(self.config.which_key_delay_ms);
+
+        match self.pending_keys_time {
+            Some(time) => time.elapsed() >= delay,
+            None => true,
+        }
     }
 }

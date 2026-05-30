@@ -1469,7 +1469,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
             editing::backspace(win, buf);
-            editor.comp.on_edit();
+            editor.on_completion_edit();
         }
         Action::DeleteCharForward => {
             let is_brief_selecting =
@@ -1625,7 +1625,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
             editing::insert_char(win, buf, ch);
-            editor.comp.on_edit();
+            editor.on_completion_edit();
         }
 
         // ---------------------------------------------------------------
@@ -2405,10 +2405,33 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.history_next();
         }
         Action::CompleteCommand => {
-            let current = editor.completions().to_vec();
+            let current = editor.completions();
             if current.is_empty() {
-                let items =
-                    crate::repl::command::complete_command(editor.command(), &editor.cmd_history);
+                let text = editor.command().to_string();
+                let cursor = editor.command_cursor;
+                let before_cursor = &text[..cursor];
+                let word_start = before_cursor
+                    .rfind(|c: char| c.is_whitespace() || c == ':')
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                let current_word = &before_cursor[word_start..];
+
+                let items = if current_word.starts_with("./") {
+                    let path_items = crate::comp::path_complete::complete_path(current_word);
+                    // Map "./src" to "e ./src" so set_command() gets the full line
+                    path_items
+                        .into_iter()
+                        .map(|p| {
+                            let mut full_cmd = text[..word_start].to_string();
+                            full_cmd.push_str(&p);
+                            full_cmd.push_str(&text[cursor..]);
+                            full_cmd
+                        })
+                        .collect()
+                } else {
+                    crate::repl::command::complete_command(&text, &editor.cmd_history)
+                };
+
                 if !items.is_empty() {
                     editor.set_completions(items);
                 }
@@ -2421,7 +2444,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 editor.set_command(c);
             }
         }
-
         // ---------------------------------------------------------------
         // File / lifecycle
         // ---------------------------------------------------------------

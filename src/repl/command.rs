@@ -129,9 +129,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 let mut case_insensitive = false;
                 for word in arg_str.split_whitespace() {
                     match word {
-                        "u" | "unique" => unique = true,
                         "i" | "ignore" | "insensitive" => case_insensitive = true,
                         "r" | "reverse" => reverse = true,
+                        "u" | "unique" => unique = true,
                         _ => {}
                     }
                 }
@@ -184,6 +184,10 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 win.row = start_row;
                 win.col = 0;
                 win.desired_col = 0;
+                // ── Notify git gutter of the change ──
+                let buf_id = editor.buf().id;
+                editor.git_debounce.notify_edit(buf_id);
+                editor.invalidate_hunk_cache();
                 let msg = format!(
                     "Sorted {} lines{}",
                     lines.len(),

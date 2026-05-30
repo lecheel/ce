@@ -89,22 +89,39 @@ impl Editor {
     }
 
     fn toggle_config_item(&mut self) {
-        if let Some(PopupContent::Config { items, selected }) = &self.popup.content {
-            if let Some(item) = items.get(*selected) {
-                let data = item.data;
-                if let Some(key) = self.config_bool_keys.get(data).cloned() {
-                    if let Ok(mut json_val) = serde_json::to_value(&self.config) {
-                        if let Some(field) = json_val.get_mut(&key) {
-                            if let serde_json::Value::Bool(ref mut v) = field {
-                                *v = !*v;
-                            }
-                        }
-                        if let Ok(updated) = serde_json::from_value(json_val) {
-                            self.config = updated;
-                            let _ = self.config.save();
+        // 1. Save the cursor position *before* we rebuild the popup
+        let saved_idx = match &self.popup.content {
+            Some(PopupContent::Config { selected, .. }) => *selected,
+            _ => return,
+        };
+
+        // 2. Figure out which config key to flip
+        let key_idx = match &self.popup.content {
+            Some(PopupContent::Config { items, .. }) => items.get(saved_idx).map(|item| item.data),
+            _ => None,
+        };
+
+        if let Some(data) = key_idx {
+            if let Some(key) = self.config_bool_keys.get(data).cloned() {
+                // 3. Toggle the boolean value
+                if let Ok(mut json_val) = serde_json::to_value(&self.config) {
+                    if let Some(field) = json_val.get_mut(&key) {
+                        if let serde_json::Value::Bool(ref mut v) = field {
+                            *v = !*v;
                         }
                     }
-                    self.open_config_popup();
+                    if let Ok(updated) = serde_json::from_value(json_val) {
+                        self.config = updated;
+                        let _ = self.config.save();
+                    }
+                }
+
+                // 4. Rebuild popup (this resets selected → 0)
+                self.open_config_popup();
+
+                // 5. Restore the cursor position
+                if let Some(PopupContent::Config { selected, .. }) = &mut self.popup.content {
+                    *selected = saved_idx;
                 }
             }
         }

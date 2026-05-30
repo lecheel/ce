@@ -97,6 +97,7 @@ pub struct PopupItem {
     pub label: String,
     pub detail: Option<String>,
     pub data: usize,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
