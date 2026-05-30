@@ -90,7 +90,7 @@ pub struct Editor {
     pub spinner_frame: usize,
 
     pub pending_keys: String,
-    pub pending_keys_time: Option<std::time::Instant>,
+    pub pending_keys_time: Option<std::time::Instant>, // tag_whichkey_pending.d
     pub popup: PopupState,
     pub config_bool_keys: Vec<String>,
 
@@ -268,6 +268,13 @@ impl Editor {
             editor.enter_brief();
         }
 
+        // ── Conditional vocab/word-scan loading ──────────────────────
+        // Load user wordlist only if enabled
+        // tag_vocab
+        if !editor.config.vocab_wordlist {
+            editor.vocab_words = HashSet::new();
+        }
+
         if editor.config.show_startup_hints {
             let init_msg = if editor.config.init_mode == "brief" {
                 "Brief mode | F9 for :commands, :vim to vim mode"
@@ -277,6 +284,11 @@ impl Editor {
             editor.set_status(init_msg, MessageKind::Info);
         }
 
+        // ── Only scan if enabled ────────────────────────────────────
+        if editor.config.buffer_word_scan {
+            editor.maybe_refresh_buffer_words();
+        }
+
         if let Some(ref name) = filename {
             let bid = editor.active_window().buffer_id();
             let rope = editor.buf().rope.clone();
@@ -284,7 +296,7 @@ impl Editor {
             editor.async_gutter.request_diff(bid, &rope, Some(name));
         }
 
-        editor.refresh_buffer_words();
+        editor.maybe_refresh_buffer_words();
         Ok(editor)
     }
 
@@ -587,7 +599,13 @@ impl Editor {
 // ---------------------------------------------------------------------------
 
 impl Editor {
+    // tag_vocab
     pub fn refresh_buffer_words(&mut self) {
+        // ── Guard: skip buffer word scanning when disabled ──────────
+        if !self.config.buffer_word_scan {
+            self.buffer_words.clear();
+            return;
+        }
         let total = self.buf().len_lines();
         log::debug!("refresh_buffer_words: {} lines", total);
         let mut words = HashSet::new();
@@ -611,7 +629,23 @@ impl Editor {
 // ---------------------------------------------------------------------------
 
 impl Editor {
+    /// Call `refresh_buffer_words()` only when the config allows it.
+    // tag_vocab
+    pub fn maybe_refresh_buffer_words(&mut self) {
+        if self.config.buffer_word_scan {
+            self.refresh_buffer_words();
+        }
+    }
+
     fn preload_vocabulary() -> HashSet<String> {
+        // ── Respect the config: skip loading the wordlist file ──────
+        // Note: this is called before Editor is fully constructed,
+        // so we read the config independently.
+        if let Ok(config) = Config::load() {
+            if !config.vocab_wordlist {
+                return HashSet::new();
+            }
+        }
         let mut words = HashSet::new();
         if let Ok(dir) = Config::config_dir() {
             let path = dir.join("wordlist.txt");
@@ -846,6 +880,7 @@ impl Editor {
             return;
         }
 
+        // tag_fd_handle_key
         if self.popup.fd.is_some() {
             self.handle_fd_key(key);
             return;
@@ -1432,7 +1467,7 @@ impl Editor {
         self.comp.on_edit();
         self.snap_cursor_to_viewport();
         self.git_debounce.notify_edit(bid);
-        self.refresh_buffer_words();
+        self.maybe_refresh_buffer_words();
     }
 
     /// Alias for bracketed paste event loop compatibility.

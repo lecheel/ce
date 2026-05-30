@@ -423,6 +423,7 @@ async fn run_loop(
                 // 7. Trigger redraw if which-key debounce just elapsed
                 // This ensures the popup appears after 150ms of pause,
                 // even if no new key is pressed.
+                // tag_whichkey.a
                 if editor.is_whichkey_visible() {
                     needs_redraw = true;
                 }

@@ -87,6 +87,10 @@ impl CompletionMachine {
 
     /// Call on every buffer-mutating keystroke while in Insert mode.
     pub fn on_edit(&mut self) {
+        log::debug!(
+            "[comp:on_edit] phase={:?} → Throttling, clearing ghost",
+            self.phase
+        );
         self.last_edit_time = std::time::Instant::now();
         self.ghost_text = None;
         self.completions.clear();

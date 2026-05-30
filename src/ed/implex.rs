@@ -550,6 +550,7 @@ impl Editor {
                 filename: Some(target_filename.clone()),
                 modified: false,
                 undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
                 syntax: crate::ed::syntax::SyntaxState::new(),
                 bookmarks: std::collections::HashSet::new(),
                 git_diffs: std::collections::HashMap::new(),
@@ -948,23 +949,41 @@ impl Editor {
             (win.row, win.col)
         };
         let mode = self.mode();
-        // Extract what context_allows needs without holding a borrow into self
         let rope_len = self.buf().rope.len_chars();
         let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
-        let filename = self.buf().filename.clone();
 
-        // Re-implement the context check inline to avoid passing &Buffer
-        // while self.comp is mutably borrowed
+        log::debug!(
+            "[comp:response] id={} items={} request_id={} row={} col={}",
+            id,
+            items.len(),
+            self.comp.request_id,
+            row,
+            col
+        );
+
+        if id != self.comp.request_id {
+            log::debug!(
+                "[comp:response] DROPPED: stale id={} != current={}",
+                id,
+                self.comp.request_id
+            );
+            return;
+        }
+
+        // Re-implement context check inline...
         let context_ok = {
             if rope_len <= 1 {
+                log::debug!("[comp:response] REJECT: rope too short");
                 false
             } else {
                 let c = col.min(line_chars.len());
                 if c < line_chars.len() {
                     let next = line_chars[c];
                     if next.is_alphanumeric() || next == '_' || next == ')' {
+                        log::debug!("[comp:response] REJECT: next char '{}' blocks", next);
                         false
                     } else if c > 0 && line_chars[c - 1] == ')' {
+                        log::debug!("[comp:response] REJECT: char before cursor is ')'");
                         false
                     } else {
                         let min_prefix = 4;
@@ -979,9 +998,19 @@ impl Editor {
                                 break;
                             }
                         }
-                        prefix_len >= min_prefix
+                        if prefix_len < min_prefix {
+                            log::debug!(
+                                "[comp:response] REJECT: prefix_len={} < {}",
+                                prefix_len,
+                                min_prefix
+                            );
+                            false
+                        } else {
+                            true
+                        }
                     }
                 } else if c > 0 && line_chars[c - 1] == ')' {
+                    log::debug!("[comp:response] REJECT: char before cursor is ')'");
                     false
                 } else {
                     let min_prefix = 4;
@@ -996,22 +1025,35 @@ impl Editor {
                             break;
                         }
                     }
-                    prefix_len >= min_prefix
+                    if prefix_len < min_prefix {
+                        log::debug!(
+                            "[comp:response] REJECT: prefix_len={} < {} (at EOL)",
+                            prefix_len,
+                            min_prefix
+                        );
+                        false
+                    } else {
+                        true
+                    }
                 }
             }
         };
 
-        if id != self.comp.request_id {
-            return;
-        }
         if !context_ok {
+            log::debug!("[comp:response] → reset_to_idle (context failed)");
             self.comp.reset_to_idle();
             return;
         }
         if items.is_empty() {
+            log::debug!("[comp:response] → reset_to_idle (empty items)");
             self.comp.reset_to_idle();
             return;
         }
+        log::debug!(
+            "[comp:response] → SET ACTIVE: {} items, first={:?}",
+            items.len(),
+            &items[0][..items[0].chars().take(30).collect::<String>().len()]
+        );
         self.comp.set_active(items);
     }
 
@@ -1058,6 +1100,7 @@ impl Editor {
             let buf = self.buf();
 
             if win.row >= buf.len_lines() {
+                log::debug!("[comp:poll] SKIP: row >= len_lines");
                 return None;
             }
 
@@ -1075,16 +1118,24 @@ impl Editor {
         use crate::ed::buffer::detect_language;
 
         if mode != Mode::Insert && mode != Mode::Brief {
+            log::debug!("[comp:poll] SKIP: mode={:?} not Insert/Brief", mode);
             return None;
         }
         if !comp.is_throttling() {
+            log::debug!("[comp:poll] SKIP: phase=xxx (not Throttling)",);
             return None;
         }
         if comp.last_edit_time.elapsed() < std::time::Duration::from_millis(comp.throttle_ms) {
+            log::debug!(
+                "[comp:poll] SKIP: throttle {}ms < {}ms",
+                comp.last_edit_time.elapsed().as_millis(),
+                comp.throttle_ms
+            );
             return None;
         }
 
         if rope_str.chars().count() <= 1 {
+            log::debug!("[comp:poll] SKIP: rope too short");
             return None;
         }
         let line: Vec<char> = rope_str.lines().nth(row).unwrap_or("").chars().collect();
@@ -1092,13 +1143,47 @@ impl Editor {
         if c < line.len() {
             let next = line[c];
             if next.is_alphanumeric() || next == '_' || next == ')' {
+                log::debug!("[comp:poll] SKIP: next char '{}' blocks", next);
                 return None;
             }
         }
         if c > 0 && line[c - 1] == ')' {
+            log::debug!("[comp:poll] SKIP: char before cursor is ')'");
             return None;
         }
 
+        // ── min_prefix guard ──────────────────────────────────────────
+        let min_prefix = match mode {
+            Mode::Brief | Mode::Insert => 4,
+            _ => return None,
+        };
+        let mut prefix_len = 0;
+        let mut i = c;
+        while i > 0 {
+            let ch = line[i - 1];
+            if ch.is_alphanumeric() || ch == '_' {
+                prefix_len += 1;
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        if prefix_len < min_prefix {
+            log::debug!(
+                "[comp:poll] SKIP: prefix_len={} < min_prefix={}",
+                prefix_len,
+                min_prefix
+            );
+            return None;
+        }
+
+        log::debug!(
+            "[comp:poll] FIRE: id={} row={} col={} prefix_len={}",
+            comp.request_id + 1,
+            row,
+            col,
+            prefix_len
+        );
         comp.start_pending(row, col);
 
         Some((
@@ -1165,7 +1250,7 @@ impl Editor {
             win.col += to_insert.chars().count() + overlap;
         }
 
-        self.refresh_buffer_words();
+        self.maybe_refresh_buffer_words();
     }
 
     /// Locates the word under (or immediately after) the active window's cursor position on the line.
@@ -1786,7 +1871,7 @@ impl Editor {
                 }
 
                 self.comp.on_leave_insert();
-                self.refresh_buffer_words();
+                self.maybe_refresh_buffer_words();
 
                 // Clean up the old empty "No Name" buffer if no other window views it
                 if should_clean_old && !self.windows.iter().any(|w| w.buffer_id() == old_bid) {
@@ -1839,7 +1924,7 @@ impl Editor {
                 }
 
                 self.comp.on_leave_insert();
-                self.refresh_buffer_words();
+                self.maybe_refresh_buffer_words();
 
                 // Clean up the old empty "No Name" buffer if no other window views it
                 if should_clean_old && !self.windows.iter().any(|w| w.buffer_id() == old_bid) {
@@ -1883,7 +1968,7 @@ impl Editor {
             ),
             MessageKind::Info,
         );
-        self.refresh_buffer_words();
+        self.maybe_refresh_buffer_words();
     }
 
     pub fn switch_prev_buffer(&mut self) {
@@ -1912,7 +1997,7 @@ impl Editor {
             ),
             MessageKind::Info,
         );
-        self.refresh_buffer_words();
+        self.maybe_refresh_buffer_words();
     }
 
     pub fn switch_buffer_by_index(&mut self, idx: usize) {
@@ -1925,7 +2010,7 @@ impl Editor {
                 &format!("Switched to buffer {} ({})", idx, self.buf().display_name()),
                 MessageKind::Info,
             );
-            self.refresh_buffer_words();
+            self.maybe_refresh_buffer_words();
         } else {
             self.set_status(
                 &format!("Invalid buffer number: {}", idx),
@@ -1953,7 +2038,7 @@ impl Editor {
                     &format!("Switched to buffer {} ({})", idx, disp_name),
                     MessageKind::Info,
                 );
-                self.refresh_buffer_words();
+                self.maybe_refresh_buffer_words();
                 return;
             }
         }
@@ -2016,7 +2101,7 @@ impl Editor {
                 &format!("Switched to buffer ({})", disp_name),
                 MessageKind::Info,
             );
-            self.refresh_buffer_words();
+            self.maybe_refresh_buffer_words();
         } else {
             self.set_status_msg(&format!("No buffer matching '{}'", arg), MessageKind::Error);
         }
@@ -2073,6 +2158,7 @@ impl Editor {
     /// Returns true if the which-key popup should be rendered.
     /// Implements a configurable debounce: if keys in a sequence are pressed
     /// faster than `which_key_delay_ms` apart, the popup stays hidden.
+    // tag_whichkey_visible.b
     pub fn is_whichkey_visible(&self) -> bool {
         if self.pending_keys.is_empty() {
             return false;
@@ -2084,5 +2170,93 @@ impl Editor {
             Some(time) => time.elapsed() >= delay,
             None => true, // Fallback if time wasn't set
         }
+    }
+
+    /// Manual completion trigger (Alt+/).
+    /// Uses pre-built lists if available; otherwise performs a
+    /// one-shot scan of the buffer rope — no config change needed.
+    pub fn trigger_manual_completion(&mut self) {
+        if self.mode != Mode::Insert && self.mode != Mode::Brief {
+            return;
+        }
+
+        let prefix = self.get_current_word_prefix();
+        if prefix.is_empty() {
+            self.set_status_msg("No word prefix under cursor", MessageKind::Info);
+            return;
+        }
+
+        const MAX_RESULTS: usize = 50;
+        let mut seen = std::collections::HashSet::new();
+        let mut matches: Vec<String> = Vec::new();
+
+        // ── 1. Vocab words (always available if config enabled) ─────
+        for word in &self.vocab_words {
+            if matches.len() >= MAX_RESULTS {
+                break;
+            }
+            if word.starts_with(&prefix) && word.as_str() != prefix {
+                if seen.insert(word.clone()) {
+                    matches.push(word.clone());
+                }
+            }
+        }
+
+        // ── 2. Pre-scanned buffer words (if buffer_word_scan=true) ──
+        for word in &self.buffer_words {
+            if matches.len() >= MAX_RESULTS {
+                break;
+            }
+            if word.starts_with(&prefix) && word.as_str() != prefix {
+                if seen.insert(word.clone()) {
+                    matches.push(word.clone());
+                }
+            }
+        }
+
+        // ── 3. One-shot scan (when buffer_word_scan=false) ──────────
+        //    Scans the rope directly, this frame only.
+        //    The borrow on `self.buf()` is dropped at the end of this block,
+        //    well before we touch `self.comp` below.
+        if self.buffer_words.is_empty() && matches.len() < MAX_RESULTS {
+            let min_len = prefix.len().max(3);
+            let buf = self.buf();
+            let total = buf.len_lines();
+
+            for i in 0..total {
+                if matches.len() >= MAX_RESULTS {
+                    break;
+                }
+                for w in buf
+                    .line_text(i)
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                {
+                    if matches.len() >= MAX_RESULTS {
+                        break;
+                    }
+                    if w.len() >= min_len && w.starts_with(&prefix) && w != prefix {
+                        if seen.insert(w.to_string()) {
+                            matches.push(w.to_string());
+                        }
+                    }
+                }
+            }
+        } // ← buf borrow dropped here
+
+        if matches.is_empty() {
+            self.set_status_msg("No completions found", MessageKind::Info);
+            return;
+        }
+
+        matches.sort();
+        matches.dedup();
+
+        // ── Inject into CompletionMachine ────────────────────────────
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+        self.comp.start_pending(row, col);
+        self.comp.set_active(matches);
     }
 }

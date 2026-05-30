@@ -156,7 +156,7 @@ pub struct PopupState {
     pub content: Option<PopupContent>,
     pub error: Option<ErrorPopup>,
     pub tag_candidates: Option<tag_candidates::TagCandidatesPopup>,
-    pub fd: Option<FdPopup>,
+    pub fd: Option<FdPopup>, // tag_fd_struct
 }
 
 impl PopupState {
@@ -182,7 +182,7 @@ impl PopupState {
             tag_candidates: None,
             command_palette: None,
             error: None,
-            fd: None,
+            fd: None, // tag_fd_new
         }
     }
 
@@ -335,7 +335,7 @@ impl PopupState {
         self.marks = Some(MarksPopup::new(entries));
         self.kind = Some(PopupKind::Marks);
     }
-
+    // tag_fd_open
     pub fn open_fd(&mut self, root_dir: &std::path::Path, pattern: &str) {
         self.close();
         self.fd = Some(FdPopup::new(root_dir, pattern));

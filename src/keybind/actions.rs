@@ -37,6 +37,7 @@ pub enum Action {
     InsertNewlineBelow,
     InsertNewlineAbove,
     Undo,
+    Redo,
     InsertTab,
     IndentLine,
     OutdentLine,
@@ -56,6 +57,7 @@ pub enum Action {
     AcceptCompletion,
     CycleCompletionNext,
     CycleCompletionPrev,
+    ManualComplete,
 
     // Command Line
     ExecuteCommand,
@@ -149,7 +151,7 @@ pub enum Action {
     BufferNext,
     BufferPrev,
     FilePicker,
-    FdSearch,
+    FdSearch, //tag_fd_action
     BufferList,
     BufferClose,
     Save,

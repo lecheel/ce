@@ -52,4 +52,5 @@ pub fn draw(f: &mut Frame, editor: &mut Editor) {
 
     // Live which-key overlay — derived from pending_keys every frame
     popup::draw_which_key(f, editor);
+    popup::draw_completion_popup(f, editor);
 }

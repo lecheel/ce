@@ -1582,12 +1582,30 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::Undo => {
             let (win, buf) = editor.active_window_and_buf_mut();
-            if let Some(snap) = buf.pop_undo() {
+            let (row, col) = (win.row, win.col); // Capture current cursor
+            if let Some(snap) = buf.pop_undo(row, col) {
                 buf.rope = snap.rope;
                 buf.modified = snap.modified;
                 buf.parse_syntax();
                 win.row = snap.cursor_row;
                 win.col = snap.cursor_col;
+            }
+            editor.comp.on_leave_insert();
+        }
+
+        // Add the Redo action handler
+        Action::Redo => {
+            let (win, buf) = editor.active_window_and_buf_mut();
+            let (row, col) = (win.row, win.col); // Capture current cursor
+            if let Some(snap) = buf.pop_redo(row, col) {
+                buf.rope = snap.rope;
+                buf.modified = snap.modified;
+                buf.parse_syntax();
+                win.row = snap.cursor_row;
+                win.col = snap.cursor_col;
+                editor.set_status_msg("Redo", MessageKind::Info);
+            } else {
+                editor.set_status_msg("Already at newest change", MessageKind::Info);
             }
             editor.comp.on_leave_insert();
         }
@@ -2245,6 +2263,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::TagBack => {
             editor.tag_back();
         }
+        // tag_fd_action_fdsearch
         Action::FdSearch => {
             let root = crate::git::gutter::find_git_root(&std::path::PathBuf::from(
                 editor.active_filename().unwrap_or("."),
@@ -2252,6 +2271,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
             editor.popup.open_fd(&root, "");
+        }
+        Action::ManualComplete => {
+            editor.trigger_manual_completion();
         }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
@@ -2418,7 +2440,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     // (multi-line → error popup, single-line → status bar)
                 }
             }
-            editor.refresh_buffer_words();
+            editor.maybe_refresh_buffer_words();
             {
                 let max_row = editor.buf().len_lines().saturating_sub(1);
                 let safe_row = editor.active_window().row.min(max_row);
@@ -2660,26 +2682,27 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             ("Tab / →".into(), "Accept completion / Tab".into()),
             ("↑ / ↓".into(), "Cycle completion / Move".into()),
             // Alt
-            ("Alt+s".into(), "Search".into()),
-            ("Alt+w".into(), "Save".into()),
-            ("Alt+o".into(), "Save as…".into()),
-            ("Alt+q".into(), "Quit".into()),
-            ("Alt+w".into(), "Force quit".into()),
-            ("Alt+d".into(), "Delete line".into()),
-            ("Alt+j".into(), "Open marks popup".into()), // Update description
-            ("Alt+k".into(), "Delete to EOL".into()),
-            ("Alt+u".into(), "Undo".into()),
-            ("Alt+y".into(), "Yank line".into()),
-            ("Alt+l".into(), "Start/Cancel Selection".into()),
-            ("Alt+b".into(), "Word backward".into()),
-            ("Alt+f".into(), "Word forward".into()),
-            ("Alt+a".into(), "Line start".into()),
-            ("Alt+e".into(), "Line end".into()),
+            ("Alt+/".into(), "Manual complete".into()),
+            ("Alt+1-4".into(), "Switch buffer 1-4".into()),
             ("Alt+<".into(), "First line".into()),
             ("Alt+>".into(), "Last line".into()),
+            ("Alt+a".into(), "Line start".into()),
+            ("Alt+b".into(), "Word backward".into()),
+            ("Alt+d".into(), "Delete line".into()),
+            ("Alt+e".into(), "Line end".into()),
+            ("Alt+f".into(), "Word forward".into()),
+            ("Alt+j".into(), "Open marks popup".into()),
+            ("Alt+k".into(), "Delete to EOL".into()),
+            ("Alt+l".into(), "Start/Cancel Selection".into()),
             ("Alt+n".into(), "Next window".into()),
-            ("Alt+1-4".into(), "Switch buffer 1-4".into()),
+            ("Alt+o".into(), "Save as…".into()),
+            ("Alt+q".into(), "Quit".into()),
+            ("Alt+s".into(), "Search".into()),
+            ("Alt+u".into(), "Undo".into()),
+            ("Alt+w".into(), "Force quit".into()),
+            ("Alt+w".into(), "Save".into()),
             ("Alt+x".into(), "Exit to Normal".into()),
+            ("Alt+y".into(), "Yank line".into()),
             // Ctrl
             ("Ctrl+c".into(), "Copy".into()),
             ("Ctrl+x".into(), "Cut".into()),

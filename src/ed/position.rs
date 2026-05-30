@@ -179,6 +179,6 @@ impl Editor {
             ),
             MessageKind::Info,
         );
-        self.refresh_buffer_words();
+        self.maybe_refresh_buffer_words();
     }
 }

@@ -24,7 +24,7 @@ impl EntryFilter for FdEntry {
     }
 }
 
-// ── Popup ──────────────────────────────────────────────────────────
+// ── Popup tag_fd_popup ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct FdPopup {

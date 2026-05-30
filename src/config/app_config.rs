@@ -65,6 +65,7 @@ fn default_llm_system_prompt() -> String {
     "You are a helpful, concise coding assistant inside a terminal text editor. Provide clear, accurate answers. Use markdown code blocks when providing code examples. Keep responses relatively brief.".to_string()
 }
 
+// tag_whichkey_delay.e
 fn default_which_key_delay_ms() -> u64 {
     300
 }
@@ -205,6 +206,14 @@ pub struct Config {
     #[serde(default = "default_which_key_delay_ms")]
     pub which_key_delay_ms: u64,
 
+    /// Enable scanning the current buffer for completion candidates.
+    #[serde(default = "default_false")]
+    pub buffer_word_scan: bool,
+
+    /// Enable loading the user wordlist file (~/.config/ce/wordlist.txt).
+    #[serde(default = "default_true")]
+    pub vocab_wordlist: bool,
+
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
 }
@@ -219,6 +228,8 @@ impl Default for Config {
             editor_language: "plaintext".to_string(),
             codeium_enabled: false,
             popup_enabled: true,
+            buffer_word_scan: true,
+            vocab_wordlist: true,
             init_mode: "vim".to_string(),
             keybindings: KeybindingsConfig::default(),
             leader: "space".to_string(),
@@ -292,6 +303,8 @@ impl Config {
                 codeium_enabled: false,
                 popup_enabled: true,
                 init_mode: "vim".to_string(),
+                buffer_word_scan: true,
+                vocab_wordlist: true,
 
                 llm_url: "127.0.0.1".to_string(),
                 llm_port: 8080,

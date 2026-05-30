@@ -74,6 +74,7 @@ pub struct Buffer {
     pub filename: Option<String>,
     pub modified: bool,
     pub undo_stack: Vec<UndoSnapshot>,
+    pub redo_stack: Vec<UndoSnapshot>,
     pub syntax: SyntaxState,
     // Gutter States
     pub bookmarks: std::collections::HashSet<usize>, // 0-based document row numbers
@@ -139,6 +140,7 @@ impl Buffer {
             filename: None,
             modified: false,
             undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             syntax: SyntaxState::new(),
 
             bookmarks: std::collections::HashSet::new(),
@@ -365,10 +367,8 @@ impl Buffer {
 
     // ---- Undo ----
 
-    /// Push an undo snapshot.  The caller passes the *window's* current
-    /// cursor position so the snapshot can restore it later.
+    // 3. Update push_undo to clear the redo stack on new edits
     pub fn push_undo(&mut self, cursor_row: usize, cursor_col: usize) {
-        // Don't push undo for special (read-only) buffers
         if self.is_readonly() {
             return;
         }
@@ -382,15 +382,52 @@ impl Buffer {
         if self.undo_stack.len() > 500 {
             self.undo_stack.remove(0);
         }
+
+        // Any new edit invalidates the redo history
+        self.redo_stack.clear();
     }
 
-    /// Pop the most recent undo snapshot.
-    ///
-    /// Returns `Some(UndoSnapshot)` if there was one, `None` otherwise.
-    /// The caller is responsible for applying the rope/modified to the
-    /// buffer and the cursor_row/cursor_col to the window.
-    pub fn pop_undo(&mut self) -> Option<UndoSnapshot> {
-        self.undo_stack.pop()
+    // 4. Update pop_undo to save the current state to the redo stack before restoring
+    pub fn pop_undo(&mut self, cursor_row: usize, cursor_col: usize) -> Option<UndoSnapshot> {
+        let snap = self.undo_stack.pop()?;
+
+        // Save the state we are ABOUT TO leave into the redo stack
+        let redo_snap = UndoSnapshot {
+            rope: self.rope.clone(),
+            modified: self.modified,
+            cursor_row,
+            cursor_col,
+        };
+        self.redo_stack.push(redo_snap);
+
+        // Enforce the limit of 5 redos
+        if self.redo_stack.len() > 5 {
+            self.redo_stack.remove(0);
+        }
+
+        Some(snap)
+    }
+
+    // 5. Add the new pop_redo method
+    /// Pop the most recent redo snapshot, pushing the current state onto the undo stack.
+    pub fn pop_redo(&mut self, cursor_row: usize, cursor_col: usize) -> Option<UndoSnapshot> {
+        let snap = self.redo_stack.pop()?;
+
+        // Save the state we are ABOUT TO leave back into the undo stack
+        let undo_snap = UndoSnapshot {
+            rope: self.rope.clone(),
+            modified: self.modified,
+            cursor_row,
+            cursor_col,
+        };
+        self.undo_stack.push(undo_snap);
+
+        // Enforce the undo stack limit
+        if self.undo_stack.len() > 500 {
+            self.undo_stack.remove(0);
+        }
+
+        Some(snap)
     }
 
     // ---- Display name ----

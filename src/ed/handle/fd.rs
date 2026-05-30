@@ -5,6 +5,7 @@ use crate::popup::dispatch_list_nav;
 use crate::Editor;
 
 impl Editor {
+    // tag_fd_handle
     pub fn handle_fd_key(&mut self, key: crate::event::KeyEvent) {
         if key.kind != crate::event::KeyEventKind::Press {
             return;

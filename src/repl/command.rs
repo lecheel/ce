@@ -432,6 +432,7 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "tags" => {
             editor.show_tag_info();
         }
+        // tag_fd_repl
         "fd" | "fdfind" => {
             let root = crate::git::gutter::find_git_root(&std::path::PathBuf::from(
                 editor.active_filename().unwrap_or("."),

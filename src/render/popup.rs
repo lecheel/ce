@@ -535,6 +535,7 @@ fn draw_buffer_list(f: &mut Frame, editor: &Editor, screen: Rect) {
     f.render_widget(list_widget, list_area);
 }
 
+// tag_fd_draw
 fn draw_fd(f: &mut Frame, editor: &Editor, screen: Rect) {
     let popup = match &editor.popup.fd {
         Some(p) => p,
@@ -1868,6 +1869,7 @@ fn draw_mru(f: &mut Frame, editor: &Editor, screen: Rect) {
 /// Auto-fits width and height to actual content.
 /// Collapses duplicate first-key prefixes into `key+(N)` rows.
 /// Called once from `render::draw`, after `draw_popup`.
+// tag_whichkey_draw.c
 pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
     // ── Debounce: skip rendering if the 150ms window hasn't elapsed ──
     if !editor.is_whichkey_visible() {
@@ -2040,6 +2042,83 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
 
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Floating completion dropdown anchored below the cursor.
+pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
+    let completions = editor.completions();
+    if completions.len() <= 1 {
+        return;
+    }
+    if editor.ghost_text().is_none() {
+        return;
+    }
+
+    let screen = f.area();
+    let win = editor.active_window();
+    let pos = win.position;
+
+    // ── Calculate screen position of the cursor (all usize) ──────
+    let gutter_w = editor.active_gutter_width();
+    let col_offset = win.col.saturating_sub(win.scroll_col);
+    let row_offset = win.row.saturating_sub(win.scroll_line);
+
+    let abs_x: usize = pos.x + gutter_w + col_offset;
+    let abs_y: usize = pos.y + row_offset + 1; // one row below cursor
+
+    // ── Popup dimensions ─────────────────────────────────────────
+    let max_visible = completions.len().min(8);
+    let max_item_w = completions
+        .iter()
+        .map(|c| c.chars().count())
+        .max()
+        .unwrap_or(10)
+        .min(40);
+    let popup_w: usize = max_item_w + 4; // +4: padding + borders
+    let popup_h: usize = max_visible + 2; // +2: borders
+
+    // Clamp to screen (all usize arithmetic)
+    let clamped_x = abs_x.min(screen.width as usize - popup_w.min(screen.width as usize));
+    let clamped_y = abs_y.min(screen.height as usize - popup_h.min(screen.height as usize));
+
+    let area = clamp(
+        screen,
+        Rect {
+            x: clamped_x as u16,
+            y: clamped_y as u16,
+            width: popup_w as u16,
+            height: popup_h as u16,
+        },
+    );
+
+    let selected = editor.completion_idx();
+
+    let items: Vec<ListItem> = completions
+        .iter()
+        .take(max_visible)
+        .enumerate()
+        .map(|(i, text)| {
+            let is_sel = i == selected;
+            let style = if is_sel {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            ListItem::new(Line::from(Span::styled(format!(" {} ", text), style)))
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    f.render_widget(Clear, area);
+    f.render_widget(List::new(items).block(block), area);
 }
 
 fn draw_error(f: &mut Frame, editor: &Editor, screen: Rect) {

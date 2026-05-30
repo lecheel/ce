@@ -1,5 +1,5 @@
 {
-  "api_key": "sk-your-api-key",
+  "api_key": "sk-you-key via ./ce auth",
   "api_url": "https://server.codeium.com",
   "portal_url": "https://codeium.com",
 
@@ -8,52 +8,68 @@
   "llm_system_prompt": "You are a helpful coding assistant. Be concise. Use code examples when relevant. If unsure, say so.",
   "llm_api_key": "your-apikey-here",
 
-  "max_tokens": 256,
-  "editor_language": "rust",
+  "max_tokens": 4096,
   "codeium_enabled": false,
   "popup_enabled": false,
+  "buffer_word_scan": false,
+  "vocab_wordlist": true,
   "init_mode": "vim",
   "keybindings": {
     "normal": {
-      "L": "prevhunk",
-      "k": "rgundercursor",
-      "f9": "tig",
-      "<tab>": "focusnext",
-      "l": "nexthunk",
-      "<leader> q q": "Quit",
-      "<space>": "",
-      "b": "word_backward"
+      "k": "rg_under_cursor",
+      "<tab>": "focus_next_window",
+      "l": "hunk_next",
+      "L": "hunk_prev",
+      "<leader> p p": "clipboard_replace_buffer",
+      "<leader> a": "guide"
     },
     "insert": {
-      "<ctrl> p": "completion_prev",
-      "<ctrl> n": "completion_next",
-      "f9": "tig"
+      "<ctrl> p": "cycle_completion_prev",
+      "<ctrl> n": "cycle_completion_next"
     },
     "brief": {
+      "<alt> ;": "toggle_comment",  
+      "<ctrl> l": "search_next",
+      "<ctrl> p": "search_prev",
+      "<alt> '": "rg_under_cursor",
+      "f3": "enter_window_nav",
+      "f5": "search_next",
+      "f9": "enter_command",
       "f10": "shortcuts"
     },
     "command": {},
     "visual": {},
     "global": {
-      "<alt> e": "filepicker",
-      "<alt> =": "buffernext",
-      "<alt> x": "bufferclose",
-      "<ctrl> b": "mru",
-      "f8": "funlist",
-      "<alt> b": "bufferlist",
+      "<alt> b": "buffer_list",
+      "<alt> e": "file_picker",
+      "<alt> -": "buffer_prev",
+      "<alt> =": "buffer_next",
+      "<alt> x": "buffer_close",
       "<alt> w": "save",
-      "<alt> -": "bufferprev",
-      "<alt> q": "quitall",
-      "f4": "hunkpopup",
-      "f1": "gitstatus",
-      "f11": "lastrg"
+      "<alt> q": "quit_all",
+      "<alt> /": "manual_complete",
+      "<ctrl> b": "mru",
+      "f4": "hunk_popup",
+      "f2": "toggle_comment",
+      "f1": "git_status",
+      "f7": "match_bracket",
+      "f8": "function_list",
+      "f11": "last_rg"
       
     }
   },
   "leader": ",",
+  "scroll_offset": 7,
   "line_numbers_enabled": true,
   "relative_line_numbers": true,
   "git_gutter_enabled": true,
   "bookmarks_enabled": true,
+  "bookmark_popup_goto": true,
+  "show_startup_hints": false,
+  "format_on_save": true,
+  "which_key_delay_ms": 0,
+  "cursor_highlight_color": "Red",
+  "cursor_line_highlight": true,
   "search_wrap_enabled": false
+  
 }

@@ -48,6 +48,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("x", Action::DeleteCharForward),
         ("delete", Action::DeleteCharForward),
         ("u", Action::Undo),
+        ("ctrl+r", Action::Redo),
         ("p", Action::Paste),
         ("g c c", Action::ToggleComment),
         // bookmarks
