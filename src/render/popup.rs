@@ -95,6 +95,12 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    // 5.1 Intercept Registers Popup
+    if editor.popup.registers.is_some() {
+        draw_registers(f, editor, screen);
+        return;
+    }
+
     // 6. Intercept Command Palette
     if editor.popup.command_palette.is_some() {
         draw_command_palette(f, editor, screen);
@@ -1474,6 +1480,87 @@ fn draw_git_hunk_popup(f: &mut Frame, editor: &Editor, screen: Rect) {
             line.clone(),
             style,
         )])));
+    }
+
+    // Pad to content_height so the block doesn't collapse
+    while list_items.len() < content_height {
+        list_items.push(ListItem::new(Line::from("")));
+    }
+
+    let list_widget = List::new(list_items);
+
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(list_widget, inner);
+}
+
+fn draw_registers(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.registers {
+        Some(p) => p,
+        None => return,
+    };
+
+    let width = popup_width(screen);
+    let max_height = (screen.height / 2).max(10) as usize;
+    let content_height = popup.entries.len().min(max_height.saturating_sub(2));
+    let total_height = (content_height as u16).saturating_add(2); // +2 for borders
+
+    // Anchor: bottom of screen, grow upward (2 rows margin for status bar)
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = screen.height.saturating_sub(total_height).saturating_sub(2);
+
+    let area = clamp(
+        screen,
+        Rect {
+            x,
+            y,
+            width,
+            height: total_height,
+        },
+    );
+
+    let prefix = editor
+        .normal_register_prefix
+        .map(|c| format!("\"{}", c))
+        .unwrap_or_else(|| "\"".to_string());
+
+    let title = format!(" Registers ({}) ", popup.entries.len());
+    let footer = format!(" +registers [Esc] cancel ");
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+
+    let mut list_items = Vec::new();
+    for entry in &popup.entries {
+        // Register name with glow
+        let name_style = Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD);
+
+        // Label (type description)
+        let label_style = Style::default().fg(Color::Blue);
+
+        // Preview content
+        let preview_style = Style::default().fg(Color::Gray);
+
+        let line = Line::from(vec![
+            Span::styled(format!(" \"{} ", entry.name), name_style),
+            Span::styled(format!("{:<24} ", entry.label), label_style),
+            Span::styled(&entry.preview, preview_style),
+        ]);
+        list_items.push(ListItem::new(line));
     }
 
     // Pad to content_height so the block doesn't collapse

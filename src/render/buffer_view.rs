@@ -21,6 +21,7 @@ use crate::ed::editor::Editor;
 use crate::ed::mode::Mode;
 use crate::ed::window::{Window, WindowPosition};
 use crate::render::helpers::display_width;
+use crate::Config;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Describes what character occupies a given visual column in a line.
@@ -130,10 +131,6 @@ fn styled_spans_from_highlights(
     spans
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Public entry point
-// ═══════════════════════════════════════════════════════════════════
-
 /// Render all editor windows into `area`.
 ///
 /// Computes layout positions via the editor's layout tree, renders
@@ -142,12 +139,14 @@ fn styled_spans_from_highlights(
 ///
 /// **Caller change:** replace `draw_buffer(f, area, &editor)` with
 /// `draw_windows(f, area, &mut editor)`.
+// ═══════════════════════════════════════════════════════════════════
+// Public entry point
+// ═══════════════════════════════════════════════════════════════════
 pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    // 1. Compute layout positions from the layout tree
     let wp = WindowPosition::new(
         area.x as usize,
         area.y as usize,
@@ -159,8 +158,23 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
     let active_idx = editor.active_window_index();
     let mode = editor.mode();
 
-    // 2. Render each pane
-    for (idx, win) in editor.all_windows().iter().enumerate() {
+    // ── Extract data from editor BEFORE the split borrow ──────────
+    let ghost_text = if mode == Mode::Insert || mode == Mode::Brief {
+        editor.ghost_text().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    let is_block_inserting = editor.visual_block_insert_state.is_some();
+    let block_insert_col = editor.visual_block_insert_state.as_ref().map(|s| s.col);
+    let search_query = editor.last_search_query.clone();
+
+    // Split disjoint borrows: windows (read), buffers (mut), config (read)
+    let windows = &editor.windows;
+    let buffers = &mut editor.buffers;
+    let config = &editor.config;
+
+    for (idx, win) in windows.iter().enumerate() {
         let pos = win.position;
         if !pos.is_visible() {
             continue;
@@ -173,40 +187,49 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
             pos.height as u16,
         );
 
-        // let buf = editor.buf_by_id(win.buffer_id());
         let is_active = idx == active_idx;
-
-        // Only show ghost text in Insert / Brief modes for the active window
-        let ghost = if is_active && (mode == Mode::Insert || mode == Mode::Brief) {
-            editor.ghost_text()
+        let ghost = if is_active {
+            ghost_text.as_deref()
         } else {
             None
         };
 
-        if let Some(buf) = editor.buf_by_id(win.buffer_id()) {
-            draw_pane(f, rect, win, buf, editor, mode, is_active, ghost);
+        if let Some(buf) = buffers.iter_mut().find(|b| b.id == win.buffer_id()) {
+            draw_pane(
+                f,
+                rect,
+                win,
+                buf,
+                config,
+                mode,
+                is_active,
+                ghost,
+                is_block_inserting,
+                block_insert_col,
+                search_query.as_deref(),
+            );
         }
     }
 
-    // 3. Draw dividers between panes
-    draw_dividers(f, editor.all_windows());
+    draw_dividers(f, windows);
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Single pane renderer
 // ═══════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════
-// Single pane renderer
-// ═══════════════════════════════════════════════════════════════════
+#[allow(clippy::too_many_arguments)]
 fn draw_pane(
     f: &mut Frame,
     area: Rect,
     win: &Window,
-    buf: &Buffer,
-    editor: &Editor,
+    buf: &mut Buffer,
+    config: &Config,
     mode: Mode,
     is_active: bool,
     ghost_text: Option<&str>,
+    is_block_inserting: bool,
+    block_insert_col: Option<usize>,
+    search_query: Option<&str>,
 ) {
     let viewport_height = area.height as usize;
     let scroll = win.scroll_line;
@@ -216,7 +239,7 @@ fn draw_pane(
     let total_virtual = virtual_line_count(buf);
     let head_pane = is_head_pane(buf);
 
-    let gutter_width = crate::ed::gutter::gutter_width(buf, win, &editor.config);
+    let gutter_width = crate::ed::gutter::gutter_width(buf, win, config);
     let gutter_style = if is_active {
         Style::default().fg(Color::Rgb(90, 90, 100))
     } else {
@@ -228,7 +251,6 @@ fn draw_pane(
         Style::default().fg(Color::Rgb(140, 140, 140))
     };
 
-    // Padding line style — subtle, clearly not real content
     let pad_bg = Color::Rgb(28, 28, 34);
     let pad_fg = Color::Rgb(60, 60, 72);
     let pad_style = Style::default().fg(pad_fg).bg(pad_bg);
@@ -239,8 +261,7 @@ fn draw_pane(
     let mut rendered_cursor_x: u16 = 0;
     let mut rendered_cursor_y: u16 = 0;
 
-    // ── Pre-compute indent guide depths for all visible lines ──────
-    let tab_size = editor.config.tab_size.max(1);
+    let tab_size = config.tab_size.max(1);
     let indent_guide_style = if is_active {
         Style::default().fg(Color::Rgb(55, 55, 75))
     } else {
@@ -256,10 +277,10 @@ fn draw_pane(
             let blank = is_blank_line(&text);
             line_info.push((level, blank));
         } else {
-            line_info.push((0, true)); // padding row → treat as blank
+            line_info.push((0, true));
         }
     }
-    let guide_depths: Vec<usize> = if editor.config.show_indent_guides {
+    let guide_depths: Vec<usize> = if config.show_indent_guides {
         compute_guide_depths(&line_info)
     } else {
         vec![0; line_info.len()]
@@ -273,13 +294,10 @@ fn draw_pane(
         && is_active;
 
     for virtual_row in scroll..end {
-        // ── Resolve real rope row (or padding) ───────────────────────
         let real_row_opt = resolve_virtual_row(buf.diff_alignment.as_ref(), head_pane, virtual_row);
 
-        // ── Padding line ─────────────────────────────────────────────
         let Some(i) = real_row_opt else {
             let pad_gutter = " ".repeat(gutter_width);
-            // Fill available width with a thin dash pattern
             let text_cols = (area.width as usize).saturating_sub(gutter_width);
             let filler: String = "─ "
                 .chars()
@@ -291,19 +309,13 @@ fn draw_pane(
                 Span::styled(pad_gutter, gutter_style),
                 Span::styled(filler, pad_style),
             ]));
-
-            // The cursor should never land on a padding row, but
-            // if it does, treat it as an off-cursor line so nothing
-            // moves the terminal cursor here.
             continue;
         };
 
-        // ── Normal line (real content) ────────────────────────────────
         let is_cursor_line = i == cursor_row;
         let hscroll = win.scroll_col;
         let line_text = buf.line_text(i);
 
-        // OPTIMIZATION: Only collect and process characters that can fit in the viewport
         let max_visible_chars = (area.width as usize).saturating_mul(2).max(100);
         let mut chars: Vec<char> = line_text
             .chars()
@@ -312,25 +324,18 @@ fn draw_pane(
             .collect();
         let col = cursor_col.saturating_sub(hscroll);
 
-        // Visual selection mask
         let is_selecting = mode == Mode::Visual
             || mode == Mode::VisualLine
             || mode == Mode::VisualBlock
-            || editor.visual_block_insert_state.is_some()
+            || is_block_inserting
             || (mode == Mode::Brief && win.visual_anchor.is_some())
-            || (mode == Mode::Command && win.visual_anchor.is_some()); // NEW: Keep highlight in command mode
-
-        let block_insert_col = editor.visual_block_insert_state.as_ref().map(|s| s.col);
+            || (mode == Mode::Command && win.visual_anchor.is_some());
 
         let mut selected_mask: Vec<bool> = (0..chars.len())
             .map(|c_idx| {
                 if is_selecting {
-                    // If we are in Command mode with a visual anchor, use prev_mode
-                    // to correctly render Visual vs VisualLine vs VisualBlock selections
                     let eval_mode = if mode == Mode::Command && win.visual_anchor.is_some() {
-                        editor.prev_mode
-                    } else if block_insert_col.is_some() {
-                        Mode::VisualBlock
+                        mode
                     } else {
                         mode
                     };
@@ -341,13 +346,12 @@ fn draw_pane(
             })
             .collect();
 
-        // Search highlight mask
         let mut search_mask = vec![false; chars.len()];
-        if let Some(ref query) = editor.last_search_query {
+        if let Some(query) = search_query {
             if !query.is_empty() {
                 let line_str: String = chars.iter().collect();
                 let mut start = 0;
-                while let Some(pos) = line_str[start..].find(query.as_str()) {
+                while let Some(pos) = line_str[start..].find(query) {
                     let abs_pos = start + pos;
                     let char_len = query.chars().count();
                     for offset in 0..char_len {
@@ -360,25 +364,18 @@ fn draw_pane(
             }
         }
 
-        let gutter_spans = crate::ed::gutter::render_gutter_line(buf, win, i, &editor.config);
+        let gutter_spans = crate::ed::gutter::render_gutter_line(buf, win, i, config);
 
-        // ── Cursor Line Background Highlight ──────────────────────────
-        let line_bg = if is_cursor_line && editor.config.cursor_line_highlight {
-            Some(
-                editor
-                    .config
-                    .resolve_color(&editor.config.cursor_line_highlight_color),
-            )
+        let line_bg = if is_cursor_line && config.cursor_line_highlight {
+            Some(config.resolve_color(&config.cursor_line_highlight_color))
         } else {
             None
         };
 
         if is_cursor_line {
-            // let col = col.min(chars.len());
             let raw_line = buf.line_text(i);
             let mut highlights = buf.syntax.get_line_highlights(i, &raw_line);
 
-            // Skip and clamp syntax highlights relative to viewport scroll
             if hscroll < highlights.len() {
                 highlights = highlights.split_off(hscroll);
             } else {
@@ -389,7 +386,6 @@ fn draw_pane(
                 highlights.push(None);
             }
 
-            // ── Apply indent guides (cursor line) ──────────────────
             apply_indent_guides(
                 &mut chars,
                 &mut highlights,
@@ -402,7 +398,6 @@ fn draw_pane(
                 indent_guide_style,
             );
 
-            // ── Grapheme-aware cursor positioning ──────────────────────
             let mut vis_col = 0;
             let mut char_offset = 0;
             let mut cursor_grapheme: Option<&str> = None;
@@ -416,7 +411,6 @@ fn draw_pane(
                     break;
                 }
                 if vis_col < col && vis_col + width > col {
-                    // Cursor is on the right half of a wide grapheme (e.g. 🔴)
                     cursor_grapheme = Some(g);
                     cursor_width = width;
                     break;
@@ -430,7 +424,6 @@ fn draw_pane(
                 display_width(&chars[..safe_offset].iter().collect::<String>()) as u16;
             let mut spans = gutter_spans;
 
-            // Text before cursor
             let before_len = safe_offset.min(highlights.len());
             spans.extend(styled_spans_from_highlights(
                 &chars[..safe_offset],
@@ -441,7 +434,6 @@ fn draw_pane(
                 line_bg,
             ));
 
-            // Ghost text
             let before_str: String = chars[..safe_offset].iter().collect();
             let after: String = chars[safe_offset..].iter().collect();
             let display_ghost = if let Some(ghost) = ghost_text {
@@ -467,12 +459,8 @@ fn draw_pane(
             };
 
             if is_block_cursor {
-                let fg_color = editor
-                    .config
-                    .resolve_color(&editor.config.cursor_text_color);
-                let bg_color = editor
-                    .config
-                    .resolve_color(&editor.config.cursor_highlight_color);
+                let fg_color = config.resolve_color(&config.cursor_text_color);
+                let bg_color = config.resolve_color(&config.cursor_highlight_color);
                 let cursor_style = Style::default().fg(fg_color).bg(bg_color);
 
                 if let Some(g) = cursor_grapheme {
@@ -508,7 +496,6 @@ fn draw_pane(
                 ));
             }
 
-            // ── Pad line highlight to full viewport width ──────────
             if let Some(bg) = line_bg {
                 let width_used: usize = spans.iter().map(|s| display_width(&s.content)).sum();
                 let padding_needed = (area.width as usize).saturating_sub(width_used);
@@ -532,11 +519,9 @@ fn draw_pane(
                 rendered_cursor_x = area.x.saturating_add(offset_x);
             }
         } else {
-            // Non-cursor line
             let raw_line = buf.line_text(i);
             let mut highlights = buf.syntax.get_line_highlights(i, &raw_line);
 
-            // Skip and clamp syntax highlights relative to viewport scroll (fixes off-by-hscroll bug)
             if hscroll < highlights.len() {
                 highlights = highlights.split_off(hscroll);
             } else {
@@ -547,7 +532,6 @@ fn draw_pane(
                 highlights.push(None);
             }
 
-            // ── Apply indent guides (non-cursor line) ──────────────
             apply_indent_guides(
                 &mut chars,
                 &mut highlights,
@@ -567,13 +551,12 @@ fn draw_pane(
                 &highlights,
                 &selected_mask,
                 &search_mask,
-                line_bg, // Will be None for non-cursor lines
+                line_bg,
             ));
             rendered.push(Line::from(spans));
         }
     }
 
-    // EOF padding (rows past end of virtual content)
     while rendered.len() < viewport_height {
         let pad_str = " ".repeat(gutter_width);
         rendered.push(Line::from(vec![
@@ -585,7 +568,6 @@ fn draw_pane(
     let paragraph = Paragraph::new(rendered);
     f.render_widget(paragraph, area);
 
-    // Terminal cursor (active window, insert/brief modes only)
     if is_active {
         match mode {
             Mode::Insert | Mode::Brief => {

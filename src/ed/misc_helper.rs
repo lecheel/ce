@@ -187,3 +187,15 @@ pub fn is_fn_kind(kind: &str) -> bool {
             | "method_declaration"
     )
 }
+
+/// Check if a character is a valid register name.
+pub fn is_valid_register_char(c: char) -> bool {
+    c.is_ascii_lowercase()
+        || c.is_ascii_digit()
+        || c == '+'
+        || c == '*'
+        || c == '_'
+        || c == '%'
+        || c == '/'
+        || c == '-'
+}

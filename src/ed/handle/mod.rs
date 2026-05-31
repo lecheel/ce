@@ -12,6 +12,7 @@ pub mod marks;
 pub mod mru;
 pub mod popup;
 pub mod quit;
+pub mod registers;
 pub mod ripgrep;
 pub mod subst;
 pub mod tag;

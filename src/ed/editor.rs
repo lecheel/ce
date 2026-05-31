@@ -1,21 +1,24 @@
 //! Central editor state and key dispatch.
-use crate::keybind::bindings::Action;
-use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashSet;
-
 use crate::comp::state::CompletionMachine;
 use crate::comp::state::CompletionSource;
 use crate::config::app_config::Config;
 use crate::ed::buffer::{Buffer, BufferKind};
-use crate::ed::misc_helper::count_nested_fns;
-use crate::ed::misc_helper::is_fn_kind;
+use crate::ed::misc_helper::{count_nested_fns, is_fn_kind, is_valid_register_char};
 use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::syntax::TextObject;
 use crate::ed::window::{LayoutNode, Window};
+use crate::keybind::bindings::Action;
 use crate::keybind::bindings::FunctionSpanInfo;
 use crate::popup::{PopupItem, PopupKind, PopupState};
 use crate::render::statusbar_state::StatusBarState;
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, Default)]
+pub struct RegisterBank {
+    pub named: std::collections::HashMap<char, String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct VisualBlockInsertState {
@@ -122,6 +125,13 @@ pub struct Editor {
     pub hunk_cache: Option<crate::ed::implex::HunkCache>,
     pub window_nav_pending: bool,
     pub close_window_nav_pending: bool,
+    pub config_cycle_keys: Vec<(String, Vec<String>)>,
+    pub registers: RegisterBank,
+    pub normal_register_prefix: Option<char>, // Tracks '"' prefix in Normal/Visual mode
+    /// Last yank text (register 0 — only set by yank, not delete).
+    pub yank_register_0: Option<String>,
+    /// Last small delete/change text (register -).
+    pub small_delete_register: Option<String>,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -180,6 +190,7 @@ impl Editor {
             pending_keys_time: None,
             popup: PopupState::new(),
             config_bool_keys: Vec::new(),
+            config_cycle_keys: Vec::new(),
             vocab_words,
             buffer_words: Vec::new(),
             clipboard: None,
@@ -221,6 +232,11 @@ impl Editor {
             hunk_cache: None,
             window_nav_pending: false,
             close_window_nav_pending: false,
+            registers: RegisterBank::default(),
+            normal_register_prefix: None,
+            yank_register_0: None,
+            small_delete_register: None,
+
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
             repeat_pending: false,
@@ -631,6 +647,53 @@ impl Editor {
             return;
         }
 
+        // ── Register prefix for Normal / Visual modes ──────────────
+        if matches!(
+            self.mode,
+            Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+        ) {
+            match self.normal_register_prefix {
+                None => {
+                    // Check for the initial `"` key press
+                    if let KeyCode::Char('"') = key.code {
+                        if key.modifiers.is_empty() {
+                            self.normal_register_prefix = Some('"');
+                            self.open_registers_popup(); // Show the informational popup
+                            return;
+                        }
+                    }
+                }
+                Some('"') => {
+                    // Fallback: If the popup was empty and didn't open,
+                    // we still intercept the register character here.
+                    match key.code {
+                        KeyCode::Char(c) if is_valid_register_char(c) => {
+                            self.normal_register_prefix = Some(c);
+                            self.popup.close(); // Clear both data and kind
+                            self.clear_status_msg();
+                            return;
+                        }
+                        KeyCode::Esc => {
+                            self.normal_register_prefix = None;
+                            self.popup.close();
+                            self.clear_status_msg();
+                            return;
+                        }
+                        _ => {
+                            self.normal_register_prefix = None;
+                            self.popup.close();
+                            self.clear_status_msg();
+                            return;
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Register name is already set (e.g. `+`, `a`),
+                    // fall through to normal key processing so the command (y/d/c) can execute
+                }
+            }
+        }
+
         // ── Count prefix for Normal / Visual modes ─────────────────
         if matches!(
             self.mode,
@@ -708,6 +771,11 @@ impl Editor {
 
         if self.popup.marks.is_some() {
             self.handle_marks_key(key);
+            return;
+        }
+
+        if self.popup.registers.is_some() {
+            self.handle_registers_key(key);
             return;
         }
 
@@ -858,6 +926,12 @@ impl Editor {
 
         if key_str == "esc" {
             let mut handled = false;
+
+            if self.normal_register_prefix.is_some() {
+                self.normal_register_prefix = None;
+                handled = true;
+            }
+
             if !self.pending_keys.is_empty() {
                 self.clear_pending_keys();
                 handled = true;
@@ -1023,7 +1097,7 @@ impl Editor {
         if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&self.config) {
             for (key, value) in map {
                 if let serde_json::Value::Bool(val) = value {
-                    let status = if val { " " } else { " " };
+                    let status = if val { " ON" } else { "OFF" };
                     let human_key = key
                         .split('_')
                         .map(|w| {
@@ -1047,6 +1121,57 @@ impl Editor {
         }
 
         self.config_bool_keys = bool_keys;
+
+        // ── Cycle / selectable items ──────────────────────────────
+        let base_offset = self.config_bool_keys.len();
+        let cycle_defs: Vec<(&str, Vec<&str>)> = vec![
+            ("init_mode", vec!["vim", "brief"]),
+            ("llm_backend", vec!["llamacpp", "ollama"]),
+            ("commit_backend", vec!["llamacpp", "ollama"]),
+        ];
+
+        self.config_cycle_keys = cycle_defs
+            .iter()
+            .map(|(key, opts)| {
+                (
+                    (*key).to_string(),
+                    opts.iter().map(|s| (*s).to_string()).collect(),
+                )
+            })
+            .collect();
+
+        for (i, (key, opts)) in cycle_defs.iter().enumerate() {
+            let current =
+                if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&self.config) {
+                    map.get(*key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(opts[0])
+                        .to_string()
+                } else {
+                    opts[0].to_string()
+                };
+
+            let human_key = key
+                .split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    c.next()
+                        .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            let hint = format!("({})", opts.join("/"));
+
+            items.push(PopupItem {
+                label: format!("{:<25} : [{:<8}]", human_key, current),
+                detail: Some(hint),
+                data: base_offset + i,
+                active: true,
+            });
+        }
+
         self.popup.open_config(items, 0);
     }
 
@@ -1308,7 +1433,6 @@ impl Editor {
             return;
         }
 
-        // 1. Handle Command / Search modes (paste into the prompt, not the buffer)
         if matches!(self.mode, Mode::Command | Mode::Search) {
             for ch in text.chars() {
                 self.push_command(ch);
@@ -1317,7 +1441,6 @@ impl Editor {
             return;
         }
 
-        // 2. General buffer paste
         let bid = self.buf().id;
         let (start_row, start_col) = {
             let win = self.active_window();
@@ -1359,6 +1482,13 @@ impl Editor {
                 final_col = final_col.min(crate::ed::editing::line_display_width(buf, final_row));
             } else {
                 final_col = 0;
+            }
+
+            // ── FIX: enforce trailing-newline invariant ───────────
+            let len = buf.rope.len_chars();
+            if len == 0 || buf.rope.char(len - 1) != '\n' {
+                buf.rope.insert(len, "\n");
+                buf.mark_modified();
             }
 
             win.row = final_row;
@@ -1629,5 +1759,140 @@ impl Editor {
             line_count,
             nested_fn_count,
         })
+    }
+}
+
+impl Editor {
+    /// Yank text into the specified register (or unnamed if None).
+    /// Routes to system clipboard for `+`/`*`, named register for `a`-`z`,
+    /// and always populates the unnamed register.
+    pub fn yank_to_register(&mut self, text: String, register: Option<char>) {
+        match register {
+            Some('+') | Some('*') => {
+                if crate::ed::clipboard::write_system_clipboard(&text) {
+                    self.set_status_msg("Yanked to system clipboard", MessageKind::Success);
+                } else {
+                    self.set_status_msg(
+                        "Yanked internally (system clipboard unavailable)",
+                        MessageKind::Info,
+                    );
+                }
+            }
+            Some(c) if c.is_ascii_lowercase() => {
+                self.registers.named.insert(c, text.clone());
+                self.set_status_msg(&format!("Yanked to register \"{}", c), MessageKind::Info);
+            }
+            _ => {}
+        }
+
+        // Always populate the unnamed register
+        self.clipboard = Some(text);
+        self.clipboard_is_block = false;
+    }
+
+    /// Get text from the specified register (or unnamed if None).
+    /// Routes from system clipboard for `+`/`*`, named register for `a`-`z`,
+    /// and falls back to the unnamed register.
+    pub fn paste_from_register(&mut self, register: Option<char>) -> Option<String> {
+        match register {
+            Some('+') | Some('*') => crate::ed::clipboard::read_system_clipboard(),
+            Some(c) if c.is_ascii_lowercase() => self.registers.named.get(&c).cloned(),
+            _ => self.clipboard.clone(),
+        }
+    }
+    /// Open the registers popup showing all populated registers.
+    pub fn open_registers_popup(&mut self) {
+        let mut entries = Vec::new();
+        let truncate = |s: &str, max: usize| -> String {
+            let single_line = s.replace('\n', "↵");
+            if single_line.chars().count() > max {
+                let end = single_line
+                    .char_indices()
+                    .nth(max)
+                    .map(|(i, _)| i)
+                    .unwrap_or(single_line.len());
+                format!("{}…", &single_line[..end])
+            } else {
+                single_line
+            }
+        };
+
+        // ── Unnamed register (") ─────────────────────────────────
+        if let Some(ref text) = self.clipboard {
+            entries.push(crate::popup::registers::RegisterEntry {
+                name: '"',
+                label: "Unnamed (last d/y)".into(),
+                preview: truncate(text, 50),
+            });
+        }
+
+        // ── Yank register (0) ────────────────────────────────────
+        if let Some(ref text) = self.yank_register_0 {
+            entries.push(crate::popup::registers::RegisterEntry {
+                name: '0',
+                label: "Last yank".into(),
+                preview: truncate(text, 50),
+            });
+        }
+
+        // ── System clipboard (+) ─────────────────────────────────
+        if let Some(text) = crate::ed::clipboard::read_system_clipboard() {
+            entries.push(crate::popup::registers::RegisterEntry {
+                name: '+',
+                label: "System clipboard".into(),
+                preview: truncate(&text, 50),
+            });
+        }
+
+        // ── Small delete register (-) ────────────────────────────
+        if let Some(ref text) = self.small_delete_register {
+            entries.push(crate::popup::registers::RegisterEntry {
+                name: '-',
+                label: "Last small delete".into(),
+                preview: truncate(text, 50),
+            });
+        }
+
+        // ── Current file (%) ─────────────────────────────────────
+        // Always show this register (Vim behavior), even for [No Name] buffers.
+        {
+            let filename = self
+                .active_filename()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "[No Name]".to_string());
+            entries.push(crate::popup::registers::RegisterEntry {
+                name: '%',
+                label: "Current file".into(),
+                preview: filename,
+            });
+        }
+
+        // ── Last search (/) ─────────────────────────────────────
+        if let Some(ref pattern) = self.last_search_query {
+            entries.push(crate::popup::registers::RegisterEntry {
+                name: '/',
+                label: "Last search".into(),
+                preview: pattern.clone(),
+            });
+        }
+
+        // ── Named registers (a-z) ────────────────────────────────
+        for c in 'a'..='z' {
+            if let Some(text) = self.registers.named.get(&c) {
+                entries.push(crate::popup::registers::RegisterEntry {
+                    name: c,
+                    label: format!("Named register '{}'", c),
+                    preview: truncate(text, 50),
+                });
+            }
+        }
+
+        if entries.is_empty() {
+            self.set_status_msg("All registers are empty", MessageKind::Info);
+            return;
+        }
+
+        self.popup.registers = Some(crate::popup::registers::RegistersPopup::new(entries));
+        self.popup.kind = Some(crate::popup::PopupKind::Registers);
     }
 }

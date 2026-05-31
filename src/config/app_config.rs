@@ -70,6 +70,59 @@ fn default_which_key_delay_ms() -> u64 {
     300
 }
 
+fn default_ollama_url() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_ollama_port() -> u16 {
+    11434
+}
+
+fn default_ollama_model() -> String {
+    "gemma4:31b-cloud".to_string()
+}
+
+fn default_commit_backend() -> LlmBackend {
+    LlmBackend::Llamacpp
+}
+
+/// Which local LLM server to route requests to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmBackend {
+    Llamacpp,
+    Ollama,
+}
+
+impl Default for LlmBackend {
+    fn default() -> Self {
+        LlmBackend::Llamacpp
+    }
+}
+
+impl std::fmt::Display for LlmBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmBackend::Llamacpp => write!(f, "llamacpp"),
+            LlmBackend::Ollama => write!(f, "ollama"),
+        }
+    }
+}
+
+impl std::str::FromStr for LlmBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "llamacpp" | "llama_cpp" | "llama.cpp" => Ok(LlmBackend::Llamacpp),
+            "ollama" => Ok(LlmBackend::Ollama),
+            other => Err(format!(
+                "Unknown LLM backend '{}'. Expected 'llamacpp' or 'ollama'",
+                other
+            )),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command Palette Description Overrides
 // ---------------------------------------------------------------------------
@@ -153,9 +206,32 @@ pub struct Config {
     pub llm_port: u16,
     pub llm_api_key: Option<String>,
 
+    // ── Ollama endpoint ────────────────────────────────────────
+    #[serde(default = "default_ollama_url")]
+    pub ollama_url: String,
+    #[serde(default = "default_ollama_port")]
+    pub ollama_port: u16,
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+
+    // ── Backend selection ────────────────────────────────────────────
+    /// Which backend to use for general LLM chat / prompts.
+    #[serde(default)]
+    pub llm_backend: LlmBackend,
+
+    /// Which backend to use for git commit message generation.
+    /// Defaults to whatever `llm_backend` is set to.
+    #[serde(default = "default_commit_backend")]
+    pub commit_backend: LlmBackend,
+
     /// System prompt for LLM assistant
     #[serde(default = "default_llm_system_prompt")]
     pub llm_system_prompt: String,
+
+    /// Optional separate system prompt for commit generation.
+    /// Falls back to `llm_system_prompt` if not set.
+    #[serde(default)]
+    pub commit_system_prompt: Option<String>,
 
     /// Whether the which-key popup is enabled. Defaults to true.
     #[serde(default = "default_true")]
@@ -234,10 +310,24 @@ impl Default for Config {
             keybindings: KeybindingsConfig::default(),
             leader: "space".to_string(),
 
+            // llama.cpp
             llm_url: "127.0.0.1".to_string(),
             llm_port: 8080,
             llm_api_key: None,
+
+            // Ollama
+            ollama_url: "127.0.0.1".to_string(),
+            ollama_port: 11434,
+            ollama_model: "gemma4:31b-cloud".to_string(),
+
+            // Backend selection
+            llm_backend: LlmBackend::Llamacpp,
+            commit_backend: LlmBackend::Llamacpp,
+
+            // Prompts
             llm_system_prompt: default_llm_system_prompt(),
+            commit_system_prompt: None,
+
             cursor_highlight_color: "Cyan".to_string(),
             cursor_text_color: "Black".to_string(),
             cursor_line_highlight: false,
@@ -309,7 +399,14 @@ impl Config {
                 llm_url: "127.0.0.1".to_string(),
                 llm_port: 8080,
                 llm_api_key: None,
+                ollama_url: "127.0.0.1".to_string(),
+                ollama_port: 11434,
+                ollama_model: "llama3".to_string(),
+                llm_backend: LlmBackend::Llamacpp,
+                commit_backend: LlmBackend::Llamacpp,
                 llm_system_prompt: default_llm_system_prompt(),
+                commit_system_prompt: None,
+
                 cursor_line_highlight: false,
                 cursor_line_highlight_color: "Rgb(40, 40, 55)".to_string(),
                 cursor_highlight_color: "Cyan".to_string(),

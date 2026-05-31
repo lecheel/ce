@@ -349,7 +349,12 @@ impl Buffer {
         let start = self.rope.line_to_char(idx);
         let end = self.rope.line_to_char(idx + 1);
         if end > start {
-            self.rope.slice(start..end - 1).to_string()
+            // FIX: only strip the newline if it actually is one
+            if self.rope.char(end - 1) == '\n' {
+                self.rope.slice(start..end - 1).to_string()
+            } else {
+                self.rope.slice(start..end).to_string()
+            }
         } else {
             String::new()
         }
@@ -362,7 +367,13 @@ impl Buffer {
         }
         let start = self.rope.line_to_char(idx);
         let end = self.rope.line_to_char(idx + 1);
-        end.saturating_sub(start).saturating_sub(1)
+        let len = end.saturating_sub(start);
+        // FIX: only subtract 1 for the newline that actually exists
+        if len > 0 && self.rope.char(end - 1) == '\n' {
+            len - 1
+        } else {
+            len
+        }
     }
 
     // ---- Undo ----

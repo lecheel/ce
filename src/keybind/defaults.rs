@@ -55,11 +55,12 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("m", Action::BookmarkSet),
         ("`", Action::BookmarkGoto),
         // Copy
-        ("+ y".into(), Action::YankToSystemClipboard), // "+y  — yank to system
-        ("+ p".into(), Action::PasteFromSystemClipboard), // "+p  — paste from system
-        ("+ d".into(), Action::CutToSystemClipboard),  // "+d  — cut to system
-        ("+ y w".into(), Action::YankWordToSystemClipboard), // "+yw — yank word to system
-        ("+ p u".into(), Action::PutFromSystemClipboardBelow), // "+pu — put below from system
+        ("+".into(), Action::YankToSystemClipboard), // — yank to system
+        // ("+ y".into(), Action::YankToSystemClipboard), // "+y  — yank to system
+        // ("+ p".into(), Action::PasteFromSystemClipboard), // "+p  — paste from system
+        // ("+ d".into(), Action::CutToSystemClipboard),  // "+d  — cut to system
+        // ("+ y w".into(), Action::YankWordToSystemClipboard), // "+yw — yank word to system
+        // ("+ p u".into(), Action::PutFromSystemClipboardBelow), // "+pu — put below from system
         // Command mode
         (":", Action::EnterCommand),
         // Line operations
@@ -109,8 +110,10 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("d i [", Action::DeleteInsideBrackets),
         ("c i [", Action::ChangeInsideBrackets),
         ("d i f", Action::DeleteInsideFunction),
+        ("y i f", Action::YankInsideFunction),
         ("c i f", Action::ChangeInsideFunction),
         ("d a f", Action::DeleteAroundFunction),
+        ("y a f", Action::YankAroundFunction),
         ("v", Action::EnterVisual),
         ("V", Action::EnterVisualLine),
         ("ctrl+v", Action::EnterVisualBlock),

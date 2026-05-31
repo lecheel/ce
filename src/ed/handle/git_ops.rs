@@ -23,6 +23,12 @@ impl Editor {
 
         let target_filename = "*git-status*";
 
+        // Build the status hint showing which LLM backend commits will use
+        let commit_hint = format!(
+            "Git Status — c: commit ({})  Enter: open file  q: close",
+            self.config.commit_backend
+        );
+
         if let Some(id) = self
             .buffers
             .iter()
@@ -30,10 +36,7 @@ impl Editor {
             .map(|b| b.id)
         {
             self.set_window_to_buffer(id);
-            self.set_status_msg(
-                "Git Status — c: commit  Enter: open file  q: close",
-                MessageKind::Info,
-            );
+            self.set_status_msg(&commit_hint, MessageKind::Info);
             return;
         }
 
@@ -54,10 +57,7 @@ impl Editor {
         );
         self.set_window_to_buffer(bid);
         self.enter_normal();
-        self.set_status_msg(
-            "Git Status — c: commit  Enter: open file  q: close",
-            MessageKind::Info,
-        );
+        self.set_status_msg(&commit_hint, MessageKind::Info);
     }
 
     pub fn open_git_log(&mut self, limit: Option<usize>) {

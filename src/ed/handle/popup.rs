@@ -95,15 +95,20 @@ impl Editor {
             _ => return,
         };
 
-        // 2. Figure out which config key to flip
+        // 2. Figure out which config key this item refers to
         let key_idx = match &self.popup.content {
             Some(PopupContent::Config { items, .. }) => items.get(saved_idx).map(|item| item.data),
             _ => None,
         };
 
-        if let Some(data) = key_idx {
+        let Some(data) = key_idx else { return };
+
+        // 3. Check if this is a boolean key
+        let bool_offset = self.config_bool_keys.len();
+
+        if data < bool_offset {
+            // ── Boolean toggle ─────────────────────────────────────────
             if let Some(key) = self.config_bool_keys.get(data).cloned() {
-                // 3. Toggle the boolean value
                 if let Ok(mut json_val) = serde_json::to_value(&self.config) {
                     if let Some(field) = json_val.get_mut(&key) {
                         if let serde_json::Value::Bool(ref mut v) = field {
@@ -116,13 +121,37 @@ impl Editor {
                     }
                 }
 
-                // 4. Rebuild popup (this resets selected → 0)
                 self.open_config_popup();
 
-                // 5. Restore the cursor position
                 if let Some(PopupContent::Config { selected, .. }) = &mut self.popup.content {
                     *selected = saved_idx;
                 }
+            }
+            return;
+        }
+
+        // 4. Check if this is a cycle key
+        let cycle_idx = data - bool_offset;
+        if let Some((key, options)) = self.config_cycle_keys.get(cycle_idx).cloned() {
+            if let Ok(mut json_val) = serde_json::to_value(&self.config) {
+                if let Some(field) = json_val.get_mut(&key) {
+                    let current = field.as_str().unwrap_or("").to_string();
+                    let next = match options.iter().position(|o| o == &current) {
+                        Some(idx) => options[(idx + 1) % options.len()].clone(),
+                        None => options[0].clone(),
+                    };
+                    *field = serde_json::Value::String(next);
+                }
+                if let Ok(updated) = serde_json::from_value(json_val) {
+                    self.config = updated;
+                    let _ = self.config.save();
+                }
+            }
+
+            self.open_config_popup();
+
+            if let Some(PopupContent::Config { selected, .. }) = &mut self.popup.content {
+                *selected = saved_idx;
             }
         }
     }

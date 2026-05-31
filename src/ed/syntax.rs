@@ -1,19 +1,19 @@
+//--+ ed/syntax.rs
 //! Tree-sitter syntax parsing, highlighting, and text objects.
-
 use ratatui::style::{Color, Modifier, Style};
 use ropey::Rope;
 use tree_sitter::{Node, Point, Tree};
-
 // ---------------------------------------------------------------------------
 // Syntax State
 // ---------------------------------------------------------------------------
-
 pub struct SyntaxState {
     pub tree: Option<Tree>,
     parser: Option<tree_sitter::Parser>,
     pub language_id: Option<String>,
+    // ── Highlight cache (avoids O(N*V) traversals per frame) ──────────
+    highlight_cache: std::collections::HashMap<usize, Vec<Option<Style>>>,
+    cache_valid: bool,
 }
-
 impl std::fmt::Debug for SyntaxState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyntaxState")
@@ -21,43 +21,46 @@ impl std::fmt::Debug for SyntaxState {
             .finish()
     }
 }
-
 impl Clone for SyntaxState {
     fn clone(&self) -> Self {
         Self {
             tree: self.tree.clone(),
             parser: None, // Parser doesn't impl Clone; it gets recreated on next parse
             language_id: self.language_id.clone(),
+            highlight_cache: std::collections::HashMap::new(),
+            cache_valid: false,
         }
     }
 }
-
 impl SyntaxState {
     pub fn new() -> Self {
         Self {
             tree: None,
             parser: Some(tree_sitter::Parser::new()),
             language_id: None,
+            highlight_cache: std::collections::HashMap::new(),
+            cache_valid: false,
         }
     }
-
     /// Way 1: Force a full parse from scratch.
-    /// Ideal for large blocks, pastes, loading, saving, or structural deletes.
     pub fn parse_full(&mut self, rope: &Rope, language_id: Option<&str>) {
         let lang_id = language_id.unwrap_or("unknown");
-        self.language_id = Some(lang_id.to_string()); // ← must be before early return
-
+        self.language_id = Some(lang_id.to_string());
+        self.cache_valid = false;
         if matches!(lang_id, "gitlog" | "gitstatus") {
             self.tree = None;
-            return; // line-based only, no tree-sitter needed
+            return;
         }
-
         if let Some(parser) = &mut self.parser {
             match get_language(lang_id) {
                 Some(lang) => {
                     let _ = parser.set_language(&lang);
-                    let text = rope.to_string();
-                    self.tree = parser.parse(&text, None);
+                    let callback = &mut |byte_offset: usize, _: Point| -> &[u8] {
+                        let (chunk, chunk_byte_start, _, _) = rope.chunk_at_byte(byte_offset);
+                        let start_in_chunk = byte_offset - chunk_byte_start;
+                        &chunk.as_bytes()[start_in_chunk..]
+                    };
+                    self.tree = parser.parse_with(callback, None);
                 }
                 None => {
                     self.tree = None;
@@ -65,9 +68,7 @@ impl SyntaxState {
             }
         }
     }
-
     /// Way 2: Perform an incremental parse using `InputEdit`.
-    /// Ideal for lightweight edits like single-character typing, backspaces, and single deletes.
     pub fn parse_incremental(
         &mut self,
         rope: &Rope,
@@ -75,33 +76,28 @@ impl SyntaxState {
         edit: tree_sitter::InputEdit,
     ) {
         let lang_id = language_id.unwrap_or("unknown");
-
-        // Fall back to a full parse if the language changed
         if self.language_id.as_deref() != Some(lang_id) {
             self.parse_full(rope, language_id);
             return;
         }
-
+        self.cache_valid = false;
         if let Some(parser) = &mut self.parser {
             if let Some(mut tree) = self.tree.take() {
-                // Apply the edit to the current AST first
                 tree.edit(&edit);
-
-                let text = rope.to_string();
-                // Pass the edited tree to parser.parse to perform incremental updates
-                self.tree = parser.parse(&text, Some(&tree));
+                let callback = &mut |byte_offset: usize, _: Point| -> &[u8] {
+                    let (chunk, chunk_byte_start, _, _) = rope.chunk_at_byte(byte_offset);
+                    let start_in_chunk = byte_offset - chunk_byte_start;
+                    &chunk.as_bytes()[start_in_chunk..]
+                };
+                self.tree = parser.parse_with(callback, Some(&tree));
             } else {
-                // No existing tree to update; fall back to a full parse
                 self.parse_full(rope, language_id);
             }
         }
     }
-
     /// Parse or incrementally update the syntax tree.
     pub fn parse(&mut self, rope: &Rope, language_id: Option<&str>) {
         let lang_id = language_id.unwrap_or("unknown");
-
-        // Only re-parse if the language changed or we have a parser
         if self.language_id.as_deref() != Some(lang_id) {
             self.language_id = Some(lang_id.to_string());
             if matches!(lang_id, "gitlog" | "gitstatus") {
@@ -117,53 +113,70 @@ impl SyntaxState {
                 }
             }
         }
-
         if matches!(lang_id, "gitlog" | "gitstatus") {
             self.tree = None;
             return;
         }
-
+        self.cache_valid = false;
         if let Some(parser) = &mut self.parser {
-            let text = rope.to_string();
-            let tree = parser.parse(&text, self.tree.as_ref());
+            let callback = &mut |byte_offset: usize, _: Point| -> &[u8] {
+                let (chunk, chunk_byte_start, _, _) = rope.chunk_at_byte(byte_offset);
+                let start_in_chunk = byte_offset - chunk_byte_start;
+                &chunk.as_bytes()[start_in_chunk..]
+            };
+            let tree = parser.parse_with(callback, self.tree.as_ref());
             self.tree = tree;
         }
     }
-
     /// Get syntax styles for a specific line.
-    /// Accept raw line text to handle non-AST formats like "gitlog".
-    pub fn get_line_highlights(&self, row: usize, line_text: &str) -> Vec<Option<Style>> {
+    pub fn get_line_highlights(&mut self, row: usize, line_text: &str) -> Vec<Option<Style>> {
+        // ── Return from cache if tree hasn't changed ──────────────
+        if self.cache_valid {
+            if let Some(cached) = self.highlight_cache.get(&row) {
+                return cached.clone();
+            }
+        } else {
+            self.highlight_cache.clear();
+            self.cache_valid = true;
+        }
         let line_len = line_text.chars().count();
         let mut char_styles = vec![None; line_len];
-
         match self.language_id.as_deref() {
             Some("gitlog") => {
                 if let Some(style) = style_for_git_log_line(line_text) {
                     char_styles.fill(Some(style));
                 }
-                return char_styles; // never touches tree
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
             }
             Some("gitstatus") => {
-                return style_for_git_status_line(line_text);
+                char_styles = style_for_git_status_line(line_text);
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
             }
             Some("rg") => {
-                return style_for_rg_line(line_text);
+                char_styles = style_for_rg_line(line_text);
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
             }
             Some("checkhealth") => {
-                return crate::ed::health::style_for_checkhealth_line(line_text);
+                char_styles = crate::ed::health::style_for_checkhealth_line(line_text);
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
             }
-            None => return char_styles,
+            None => {
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
+            }
             _ => {}
         }
-
         if let Some(tree) = &self.tree {
             let root = tree.root_node();
-            // Pass line_text into collect_highlights
             Self::collect_highlights(root, row, line_text, &mut char_styles);
         }
+        self.highlight_cache.insert(row, char_styles.clone());
         char_styles
     }
-
     fn collect_highlights(
         root: Node,
         row: usize,
@@ -172,40 +185,52 @@ impl SyntaxState {
     ) {
         let mut cursor = root.walk();
         let mut done = false;
-
         while !done {
             let node = cursor.node();
-
             if node.start_position().row <= row && node.end_position().row >= row {
-                // ── Node overlaps the target row ──────────────────────
-                if let Some(style) = style_for_kind(node.kind()) {
-                    let start_col = if node.start_position().row < row {
-                        0
-                    } else {
-                        let byte = node.start_position().column.min(line_text.len());
-                        line_text[..byte].chars().count()
-                    };
-                    let end_col = if node.end_position().row > row {
-                        char_styles.len()
-                    } else {
-                        let byte = node.end_position().column.min(line_text.len());
-                        line_text[..byte].chars().count().min(char_styles.len())
-                    };
-                    for i in start_col..end_col {
-                        char_styles[i] = Some(style);
+                let is_string_kind = matches!(
+                    node.kind(),
+                    "string"
+                        | "string_content"
+                        | "string_literal"
+                        | "interpreted_string_literal"
+                        | "char_literal"
+                );
+
+                // Check if this is an unclosed string node.
+                // We skip both painting AND descending into unclosed strings,
+                // which prevents the green leak into subsequent characters/lines.
+                let is_unclosed = is_string_kind && !is_string_closed(&node, row, line_text);
+
+                if !is_unclosed {
+                    if let Some(style) = style_for_kind(node.kind()) {
+                        let start_col = if node.start_position().row < row {
+                            0
+                        } else {
+                            let byte = node.start_position().column.min(line_text.len());
+                            line_text[..byte].chars().count()
+                        };
+                        let end_col = if node.end_position().row > row {
+                            char_styles.len()
+                        } else {
+                            let byte = node.end_position().column.min(line_text.len());
+                            line_text[..byte].chars().count().min(char_styles.len())
+                        };
+                        for i in start_col..end_col {
+                            char_styles[i] = Some(style);
+                        }
+                    }
+                    // Only descend into children when NOT an unclosed string.
+                    // Skipping goto_first_child() prunes the entire subtree
+                    // (string_content, escape_sequence, etc.) so nothing inside
+                    // an unclosed string can paint green either.
+                    if cursor.goto_first_child() {
+                        continue;
                     }
                 }
-
-                // ONLY descend into children when the parent overlaps
-                // the target row — children are always within the parent
-                // range, so non-overlapping parents have no relevant children.
-                if cursor.goto_first_child() {
-                    continue;
-                }
+                // unclosed string: fall through to sibling/parent traversal,
+                // skipping this node and all its children entirely.
             }
-            // ── Node does NOT overlap, or has no children ────────────
-            // Skip to next sibling (prunes the entire subtree for
-            // non-overlapping nodes — this is the missing optimisation).
             while !cursor.goto_next_sibling() {
                 if !cursor.goto_parent() {
                     done = true;
@@ -214,11 +239,9 @@ impl SyntaxState {
             }
         }
     }
-
     // -----------------------------------------------------------------------
     // Text Objects
     // -----------------------------------------------------------------------
-
     /// Find the range of a text object enclosing the cursor.
     pub fn text_object_range(
         &self,
@@ -231,9 +254,7 @@ impl SyntaxState {
         let tree = self.tree.as_ref()?;
         let root = tree.root_node();
         let point = Point::new(row, col);
-
         let mut node = root.descendant_for_point_range(point, point)?;
-
         match obj {
             TextObject::Function => loop {
                 let kind = node.kind();
@@ -401,37 +422,29 @@ impl SyntaxState {
     fn extract_text(rope: &Rope, node: &tree_sitter::Node) -> String {
         let start_byte = node.start_byte();
         let end_byte = node.end_byte();
-
         // Clamp to rope bounds
         let rope_len = rope.len_bytes();
         if start_byte >= rope_len || end_byte > rope_len || start_byte > end_byte {
             return String::new();
         }
-
         let start = rope.byte_to_char(start_byte);
         let end = rope.byte_to_char(end_byte);
-
         if end <= start {
             return String::new();
         }
-
         rope.slice(start..end).to_string()
     }
-
     /// Find the current scope (impl/struct/class + function/method) at the cursor.
     pub fn current_scope(&self, rope: &Rope, row: usize, col: usize) -> Option<String> {
         let tree = self.tree.as_ref()?;
         let root = tree.root_node();
         let point = Point::new(row, col);
         let node = root.descendant_for_point_range(point, point)?;
-
         let mut fn_name = None;
         let mut ctx_name = None; // impl / struct / class / trait
-
         let mut current = Some(node);
         while let Some(n) = current {
             let kind = n.kind();
-
             // Functions / Methods
             let is_fn = kind == "function_item"
                 || kind == "function_signature_item"
@@ -440,7 +453,6 @@ impl SyntaxState {
                 || kind == "arrow_function"
                 || kind == "method_definition"
                 || kind.contains("method"); // catches instance_method, class_method, etc.
-
             if fn_name.is_none() && is_fn {
                 if let Some(name_node) = n.child_by_field_name("name") {
                     fn_name = Some(Self::extract_text(rope, &name_node));
@@ -450,7 +462,6 @@ impl SyntaxState {
                     }
                 }
             }
-
             // Context (impl, struct, enum, trait, class)
             let is_ctx = kind == "enum_item"
                 || kind == "enum_specifier"
@@ -460,7 +471,6 @@ impl SyntaxState {
                 || kind == "impl_item"
                 || kind == "trait_item"
                 || kind.contains("class"); // catches class, class_definition, class_declaration
-
             if ctx_name.is_none() && is_ctx {
                 if let Some(name_node) = n.child_by_field_name("name") {
                     ctx_name = Some(Self::extract_text(rope, &name_node));
@@ -470,10 +480,8 @@ impl SyntaxState {
                     }
                 }
             }
-
             current = n.parent();
         }
-
         match (ctx_name, fn_name) {
             (Some(ctx), Some(func)) => Some(format!("{}::{}", ctx, func)),
             (Some(ctx), None) => Some(ctx),
@@ -488,26 +496,21 @@ impl SyntaxState {
         let tree = self.tree.as_ref()?;
         let root = tree.root_node();
         let point = Point::new(row, col);
-
         // Find the node exactly at the cursor
         let node = root.descendant_for_point_range(point, point)?;
         let kind = node.kind();
-
         // Only trigger on bracket characters
         if !matches!(kind, "{" | "}" | "(" | ")" | "[" | "]") {
             return None;
         }
-
         // The bracket's parent is the structural node (e.g., 'block', 'parameters')
         let parent = node.parent()?;
-
         // Opening brackets are always the first child, closing brackets are the last.
         let matching_node = if matches!(kind, "{" | "(" | "[") {
             parent.child(parent.child_count() - 1)?
         } else {
             parent.child(0)?
         };
-
         // Sanity check: ensure the matching node is actually the opposite bracket
         // (If the code has syntax errors, the tree might be malformed)
         let expected = match kind {
@@ -519,7 +522,6 @@ impl SyntaxState {
             "]" => "[",
             _ => unreachable!(),
         };
-
         if matching_node.kind() == expected {
             Some((
                 matching_node.start_position().row,
@@ -530,11 +532,9 @@ impl SyntaxState {
         }
     }
 }
-
 // ---------------------------------------------------------------------------
 // Text Object & Style Maps
 // ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextObject {
     Function,
@@ -545,7 +545,6 @@ pub enum TextObject {
     Braces,
     Brackets,
 }
-
 fn get_language(id: &str) -> Option<tree_sitter::Language> {
     match id {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
@@ -553,6 +552,75 @@ fn get_language(id: &str) -> Option<tree_sitter::Language> {
         "javascript" | "typescript" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "diff" => Some(tree_sitter_diff::LANGUAGE.into()),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// is_string_closed
+//
+// Single source of truth for "is this string node complete?".
+// No `source: &str` parameter needed — we have everything we need from the
+// node's position metadata and the already-available `line_text`.
+//
+// Strategy (in priority order):
+//
+// 1. SAME-ROW node: read the node's actual text slice from `line_text` using
+//    byte-column offsets and check that the last character is a matching
+//    closing delimiter.  This is grammar-agnostic and handles every case
+//    correctly, including macro token-tree strings like println!("…").
+//
+// 2. MULTI-ROW node: a legitimately multi-line string (raw string literal,
+//    Python triple-quote, JS template literal) — trust `is_missing()` on the
+//    last child.  If there is no last child at all the node is empty/broken,
+//    so treat it as unclosed.
+// ---------------------------------------------------------------------------
+fn is_string_closed(node: &Node, row: usize, line_text: &str) -> bool {
+    let start_row = node.start_position().row;
+    let end_row = node.end_position().row;
+
+    if start_row == row && end_row == row {
+        // ── Same-row: check the actual characters ──────────────────────
+        // Use byte columns (tree-sitter always gives byte offsets).
+        // Clamp to line_text length so we never panic on a stale tree.
+        let start_byte = node.start_position().column.min(line_text.len());
+        let end_byte = node.end_position().column.min(line_text.len());
+
+        if end_byte <= start_byte {
+            return false; // zero-width or inverted — treat as unclosed
+        }
+
+        // Work with chars so we handle multi-byte correctly.
+        let slice: &str = &line_text[start_byte..end_byte];
+        let mut chars = slice.chars();
+
+        let open = match chars.next() {
+            Some(c) => c,
+            None => return false,
+        };
+
+        // Must start with a quote character we recognise.
+        if !matches!(open, '"' | '\'' | '`') {
+            // Not a simple string delimiter (e.g. a raw_string_literal
+            // starting with `r#` will fail here — that is fine; raw strings
+            // that touch the same row are closed by definition if tree-sitter
+            // accepted the token, so we fall through to returning true).
+            return true;
+        }
+
+        // The closing character must be the same quote and there must be at
+        // least two characters (open + close) for the string to be closed.
+        let last = slice.chars().last().unwrap_or('\0');
+        last == open && slice.chars().count() >= 2
+    } else {
+        // ── Multi-row: rely on is_missing() for the closing delimiter ──
+        let count = node.child_count();
+        if count == 0 {
+            return false;
+        }
+        match node.child(count - 1) {
+            Some(last_child) => !last_child.is_missing(),
+            None => false,
+        }
     }
 }
 
@@ -580,22 +648,18 @@ fn style_for_kind(kind: &str) -> Option<Style> {
                 .fg(Color::Rgb(203, 166, 247))
                 .add_modifier(Modifier::BOLD),
         ),
-
         // ── self / Self / this (Pink #f38ba8) ───────────────────────────
         "self" | "Self" | "this" => Some(
             Style::default().fg(Color::Rgb(243, 139, 168))
         ),
-
         // ── Lifetimes (Light Magenta #f5c2e7) ───────────────────────────
         "lifetime" => Some(
             Style::default().fg(Color::Rgb(245, 194, 231))
         ),
-
         // ── Macros (Yellow #f9e2af) ──────────────────────────────────────
         "macro_invocation" | "macro_definition" => Some(
             Style::default().fg(Color::Rgb(249, 226, 175))
         ),
-
         // ── Strings (Green #a6e3a1) ──────────────────────────────────────
         "string"
         | "string_content"
@@ -605,23 +669,19 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         | "char_literal" => Some(
             Style::default().fg(Color::Rgb(166, 227, 161))
         ),
-
         // ── Escape sequences (Light Pink #eba0ac) ───────────────────────
         "escape_sequence" => Some(
             Style::default().fg(Color::Rgb(235, 160, 172))
         ),
-
         // ── Numbers (Orange #bf5c26) ─────────────────────────────────────
         "integer_literal" | "float_literal" | "number"
         | "integer" | "float" => Some(
             Style::default().fg(Color::Rgb(191, 92, 38))
         ),
-
         // ── Booleans (Peach #fab387) ─────────────────────────────────────
         "boolean_literal" => Some(
             Style::default().fg(Color::Rgb(250, 179, 135))
         ),
-
         // ── Type identifiers (Sapphire #349beb) ─────────────────────────
         "type_identifier"
         | "struct_item"
@@ -632,7 +692,6 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         | "type_alias" => Some(
             Style::default().fg(Color::Rgb(52, 155, 235))
         ),
-
         // ── Function / method definitions (Cyan #82d7fa) ─────────────────
         "function_item"
         | "function_definition"
@@ -640,20 +699,17 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         | "function_signature_item" => Some(
             Style::default().fg(Color::Rgb(130, 215, 250))
         ),
-
         // ── Function / method calls (Light Cyan #74c7ec) ─────────────────
         "call_expression"
         | "method_call_expression" => Some(
             Style::default().fg(Color::Rgb(116, 199, 236))
         ),
-
         // ── Constants (Peach #fab387) ────────────────────────────────────
         "const_item"
         | "static_item"
         | "enum_variant" => Some(
             Style::default().fg(Color::Rgb(250, 179, 135))
         ),
-
         // ── Properties / fields (Off-white #cdd6f4) ──────────────────────
         "field_identifier"
         | "property_identifier"
@@ -661,7 +717,6 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         | "field_declaration" => Some(
             Style::default().fg(Color::Rgb(205, 214, 244))
         ),
-
         // ── Operators (Blue #89b4fa) ──────────────────────────────────────
         "operator"
         | "unary_operator"
@@ -669,26 +724,22 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         | "assignment_operator" => Some(
             Style::default().fg(Color::Rgb(137, 180, 250))
         ),
-
         // ── Delimiters / punctuation (Grayish Blue #9399b2) ──────────────
         "{" | "}" | "(" | ")" | "[" | "]"
         | "," | "." | ";" | ":" | "::"
         | "->" | "=>" | "|" => Some(
             Style::default().fg(Color::Rgb(147, 153, 178))
         ),
-
         // ── Attributes (Muted Gray #6c7086) ──────────────────────────────
         "attribute_item"
         | "inner_attribute_item"
         | "attribute" => Some(
             Style::default().fg(Color::Rgb(108, 112, 134))
         ),
-
         // ── Labels (Warm Yellow #fadc96) ─────────────────────────────────
         "label" => Some(
             Style::default().fg(Color::Rgb(250, 220, 150))
         ),
-
         // ── Comments (Overlay0 #5e6978, italic) ──────────────────────────
         "comment"
         | "line_comment"
@@ -697,14 +748,12 @@ fn style_for_kind(kind: &str) -> Option<Style> {
                 .fg(Color::Rgb(94, 105, 120))
                 .add_modifier(Modifier::ITALIC),
         ),
-
         // ── Doc comments (Lighter slate #73718d, italic) ─────────────────
         "doc_comment" => Some(
             Style::default()
                 .fg(Color::Rgb(115, 125, 145))
                 .add_modifier(Modifier::ITALIC),
         ),
-
         // ── Git diff kinds (unchanged from before) ───────────────────────
         "added_line" | "addition" => Some(
             Style::default().fg(Color::Rgb(166, 227, 161))
@@ -721,14 +770,16 @@ fn style_for_kind(kind: &str) -> Option<Style> {
                 .fg(Color::Rgb(137, 180, 250))
                 .add_modifier(Modifier::BOLD)
         ),
-
+        "ERROR" => Some(
+            Style::default()
+                .fg(Color::Rgb(243, 139, 168))
+                .add_modifier(Modifier::UNDERLINED),
+        ),
         _ => None,
     }
 }
-
 fn style_for_git_log_line(line: &str) -> Option<Style> {
     let trimmed = line.trim_start();
-
     if trimmed.starts_with("commit ") {
         Some(
             Style::default()
@@ -760,12 +811,9 @@ fn style_for_git_log_line(line: &str) -> Option<Style> {
         None
     }
 }
-
-// Style formatting function added at the bottom of the file:
 fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
     let chars: Vec<char> = line.chars().collect();
     let mut styles = vec![None; chars.len()];
-
     // Mute comment and config lines
     if line.trim_start().starts_with('#') || line.starts_with("  [RG]") || line.starts_with("  ───")
     {
@@ -775,7 +823,6 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
         styles.fill(Some(comment_style));
         return styles;
     }
-
     // Bold Blue for File Headers
     if line.ends_with(':') {
         let path_style = Style::default()
@@ -786,11 +833,9 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
         }
         if !chars.is_empty() {
             styles[chars.len() - 1] = Some(Style::default().fg(Color::Rgb(94, 105, 120)));
-            // Overlay0
         }
         return styles;
     }
-
     // Yellow/Orange for Line Numbers preceding ": "
     if let Some(colon_pos) = line.find(": ") {
         let prefix = &line[..colon_pos];
@@ -806,22 +851,18 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
             }
         }
     }
-
     styles
 }
-
 fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
     let chars: Vec<char> = line.chars().collect();
     let mut styles = vec![None; chars.len()];
     let trimmed = line.trim();
-
     // 1. Muted dividers and "(none)" lines
     if trimmed.starts_with('─') || trimmed == "(none)" {
         let mute_style = Style::default().fg(Color::Rgb(94, 105, 120)); // Overlay0
         styles.fill(Some(mute_style));
         return styles;
     }
-
     // 2. Bold/colored Section Headers
     if trimmed.starts_with("Stage Changes") {
         let header_style = Style::default()
@@ -851,7 +892,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         styles.fill(Some(sep_style));
         return styles;
     }
-
     // 3. Staged items (Green)
     if line.starts_with("   ") && !line.starts_with("    ") && !trimmed.is_empty() {
         let file_style = Style::default().fg(Color::Rgb(166, 227, 161)); // Green
@@ -860,7 +900,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         }
         return styles;
     }
-
     // 4. Unstaged items (Yellow)
     if line.starts_with("  [") && line.ends_with(']') {
         let file_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
@@ -876,7 +915,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         }
         return styles;
     }
-
     // 5. Untracked files (Red)
     if line.starts_with("    ")
         && !line.starts_with("      ")
@@ -889,7 +927,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         }
         return styles;
     }
-
     // 6. Active branch vs normal branch
     if line.starts_with("    * ") {
         let active_style = Style::default()
@@ -898,11 +935,9 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         let date_style = Style::default()
             .fg(Color::Rgb(94, 105, 120)) // Overlay0
             .add_modifier(Modifier::ITALIC);
-
         if chars.len() > 4 {
             styles[4] = Some(active_style); // '*'
         }
-
         let words: Vec<&str> = trimmed.split_whitespace().collect();
         if words.len() >= 2 {
             let branch_name = words[1];
@@ -922,7 +957,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         let date_style = Style::default()
             .fg(Color::Rgb(94, 105, 120)) // Overlay0
             .add_modifier(Modifier::ITALIC);
-
         let words: Vec<&str> = trimmed.split_whitespace().collect();
         if !words.is_empty() {
             let branch_name = words[0];
@@ -937,14 +971,12 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         }
         return styles;
     }
-
     // 7. Stash entries
     if trimmed.starts_with("stash@{") {
         let stash_ref_style = Style::default()
             .fg(Color::Rgb(203, 166, 247)) // Mauve
             .add_modifier(Modifier::BOLD);
         let stash_msg_style = Style::default().fg(Color::Rgb(205, 214, 244)); // Text
-
         if let Some(colon_pos) = line.find(':') {
             for i in 0..=colon_pos {
                 styles[i] = Some(stash_ref_style);
@@ -955,7 +987,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         }
         return styles;
     }
-
     // 8. Help/footer hotkeys
     let mut in_bracket = false;
     let bracket_style = Style::default().fg(Color::Rgb(128, 135, 162)); // Overlay1
@@ -963,7 +994,6 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
         .fg(Color::Rgb(137, 180, 250)) // Blue
         .add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(Color::Rgb(205, 214, 244)); // Text
-
     for i in 0..chars.len() {
         if chars[i] == '[' {
             in_bracket = true;
@@ -977,6 +1007,5 @@ fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
             styles[i] = Some(text_style);
         }
     }
-
     styles
 }

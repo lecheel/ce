@@ -125,6 +125,8 @@ pub enum Action {
     DeleteInsideBrackets,
     ChangeInsideBrackets,
     DeleteAroundFunction,
+    YankAroundFunction,
+    YankInsideFunction,
     ClearSearchHighlight,
 
     BookmarkSet,

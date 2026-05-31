@@ -127,7 +127,86 @@ impl Editor {
         // Clear any leftover system_prompt override from a previous call
         self.llm.system_prompt = None;
 
-        // ── 5. Create / reuse GitCommit buffer ───────────────
+        let start_dir = self
+            .buf()
+            .filename
+            .as_ref()
+            .and_then(|p| std::path::Path::new(p).parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        let git_root = match crate::git::gutter::find_git_root(&start_dir) {
+            Some(root) => root,
+            None => {
+                self.set_status_msg("Not in a git repository", MessageKind::Error);
+                return;
+            }
+        };
+
+        // ── Gather diffs (same as before) ─────────────────────────────
+        let staged_output = match std::process::Command::new("git")
+            .args(["diff", "--cached", "-U3", "--diff-algorithm=minimal"])
+            .current_dir(&git_root)
+            .output()
+        {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+            Err(e) => {
+                self.set_status_msg(
+                    &format!("Failed to run git diff --cached: {}", e),
+                    MessageKind::Error,
+                );
+                return;
+            }
+        };
+
+        let unstaged_output = match std::process::Command::new("git")
+            .args(["diff", "-U3", "--diff-algorithm=minimal"])
+            .current_dir(&git_root)
+            .output()
+        {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+            Err(e) => {
+                self.set_status_msg(
+                    &format!("Failed to run git diff: {}", e),
+                    MessageKind::Error,
+                );
+                return;
+            }
+        };
+
+        if staged_output.trim().is_empty() && unstaged_output.trim().is_empty() {
+            self.set_status_msg("No staged or unstaged changes found", MessageKind::Error);
+            return;
+        }
+
+        let diff_output = if !staged_output.trim().is_empty() && !unstaged_output.trim().is_empty()
+        {
+            format!(
+                "Staged changes:\n{}\nUnstaged changes:\n{}",
+                staged_output, unstaged_output
+            )
+        } else if !staged_output.trim().is_empty() {
+            staged_output
+        } else {
+            format!("Unstaged changes:\n{}", unstaged_output)
+        };
+
+        let recent_commits = match std::process::Command::new("git")
+            .args(["log", "-2", "--format=%B"])
+            .current_dir(&git_root)
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => "(no recent commits)".to_string(),
+        };
+
+        let user_prompt = COMMIT_PROMPT_TEMPLATE
+            .replace("{recent_commits}", &recent_commits)
+            .replace("{diff}", &diff_output);
+
+        self.llm.system_prompt = None;
+
+        // ── 5. Create / reuse GitCommit buffer (unchanged) ────────────
         self.git_commit_start_time = Some(std::time::Instant::now());
 
         let target_filename = "*git-commit*";
@@ -177,31 +256,42 @@ impl Editor {
             id
         };
 
-        // ── Switch to the commit buffer ──
         self.active_window_mut().save_jump_position();
         self.switch_window_to_buffer(buffer_id);
         self.git_commit_buffer_id = Some(buffer_id);
 
-        // ── 6. Fire the LLM request using structured messages ──
-        log::debug!(
-            "[GitCommit] Spawning LLM request. Prompt length: {}",
-            user_prompt.len()
-        );
+        // ══════════════════════════════════════════════════════════════
+        // 6. KEY CHANGE: Use commit_backend + commit_system_prompt
+        // ══════════════════════════════════════════════════════════════
+        let backend = self.config.commit_backend;
+
+        let commit_system = self
+            .config
+            .commit_system_prompt
+            .as_deref()
+            .unwrap_or(&self.config.llm_system_prompt);
 
         let messages = vec![
             (
                 "system".to_string(),
-                "You are a git commit message generator. Generate concise, conventional-commit-style \
-                 messages based on diffs. Output ONLY the commit message text — no explanations, \
-                 no markdown code fences, no preamble."
+                "You are a git commit message generator. Generate concise, \
+                 conventional-commit-style messages based on diffs. Output \
+                 ONLY the commit message text — no explanations, no markdown \
+                 code fences, no preamble."
                     .to_string(),
             ),
             ("user".to_string(), user_prompt),
         ];
 
-        self.spawn_llm_request(messages);
+        log::debug!("[GitCommit] Spawning LLM request via {} backend", backend);
 
-        self.set_status_msg("Generating commit message…", MessageKind::Info);
+        // Use the explicit-backend variant
+        self.spawn_llm_request_with_backend(messages, backend);
+
+        self.set_status_msg(
+            &format!("Generating commit message via {}…", backend),
+            MessageKind::Info,
+        );
     }
 
     /// Route a successful LLM response into the commit buffer.

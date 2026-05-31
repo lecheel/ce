@@ -444,6 +444,7 @@ fn exits_insert_mode(action: Action) -> bool {
 
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
+    let register = editor.normal_register_prefix.take();
 
     // ── Consume count prefix ─────────────────────────────────────────
     let count = editor.current_count.max(1);
@@ -924,12 +925,11 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 editor.change_mode(target_mode);
             }
         }
-
         Action::YankSelection => {
             let mode = editor.mode();
             if mode == Mode::VisualBlock {
                 if let Some(text) = yank_block(editor) {
-                    editor.clipboard = Some(text);
+                    editor.yank_to_register(text, register);
                     editor.clipboard_is_block = true;
                     editor.set_status_msg("Yanked rectangular block", MessageKind::Info);
                 }
@@ -940,7 +940,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 };
                 if let Some((start_char, end_char)) = range {
                     let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.clipboard = Some(text);
+                    editor.yank_to_register(text, register);
                     editor.clipboard_is_block = false;
                     editor.set_status_msg("Yanked selection", MessageKind::Info);
                 }
@@ -956,7 +956,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let mode = editor.mode();
             if mode == Mode::VisualBlock {
                 if let Some(text) = yank_block(editor) {
-                    editor.clipboard = Some(text);
+                    editor.yank_to_register(text, register);
                     editor.clipboard_is_block = true;
                 }
                 delete_block(editor);
@@ -967,7 +967,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 };
                 if let Some((start_char, end_char)) = range {
                     let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.clipboard = Some(text);
+                    editor.yank_to_register(text, register);
                     editor.clipboard_is_block = false;
                     let (win, buf) = editor.active_window_and_buf_mut();
                     buf.rope.remove(start_char..end_char);
@@ -1349,6 +1349,110 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::ChangeInsideBrackets => {
             editor.edit_text_object(crate::ed::syntax::TextObject::Brackets, true, true);
         }
+        Action::YankAroundFunction => {
+            if let Err(msg) = check_around_function_safetynet(editor) {
+                editor.set_status_msg(&msg, MessageKind::Error);
+                return;
+            }
+
+            let (orig_row, orig_col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
+
+            let info = editor.function_around_span_info();
+
+            let info = if info.is_none() {
+                let new_col = {
+                    let buf = editor.buf();
+                    if orig_row < buf.len_lines() {
+                        let line = buf.line_text(orig_row);
+                        line.chars().position(|c| !c.is_whitespace())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(col) = new_col {
+                    if col != orig_col {
+                        editor.active_window_mut().col = col;
+                        let i = editor.function_around_span_info();
+                        editor.active_window_mut().col = orig_col;
+                        i
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                info
+            };
+
+            let info = if info.is_none() && orig_col > 0 {
+                editor.active_window_mut().col = orig_col - 1;
+                let i = editor.function_around_span_info();
+                editor.active_window_mut().col = orig_col;
+                i
+            } else {
+                info
+            };
+
+            {
+                let win = editor.active_window_mut();
+                win.row = orig_row;
+                win.col = orig_col;
+            }
+
+            if let Some(info) = info {
+                let text = {
+                    let buf = editor.buf();
+                    let start_char = buf.rope.line_to_char(info.start_row);
+                    let end_row_exclusive = (info.end_row + 1).min(buf.len_lines());
+                    let end_char = if end_row_exclusive < buf.len_lines() {
+                        buf.rope.line_to_char(end_row_exclusive)
+                    } else {
+                        buf.rope.len_chars()
+                    };
+                    buf.rope.slice(start_char..end_char).to_string()
+                };
+
+                editor.yank_to_register(text, register);
+            } else {
+                editor.set_status_msg("No function found around cursor", MessageKind::Error);
+            }
+        }
+
+        Action::YankInsideFunction => {
+            let (row, col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
+
+            if let Some((sr, sc, er, ec)) = editor.buf().syntax.text_object_range(
+                row,
+                col,
+                crate::ed::syntax::TextObject::Function,
+                true,
+            ) {
+                let buf = editor.buf();
+                if sr >= buf.len_lines() || er >= buf.len_lines() {
+                    editor.set_status_msg("Invalid text object range", MessageKind::Error);
+                    return;
+                }
+                let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+
+                if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                    editor.set_status_msg("Invalid text object range", MessageKind::Error);
+                    return;
+                }
+
+                let text = buf.rope.slice(start_offset..end_offset).to_string();
+                editor.yank_to_register(text, register);
+            } else {
+                editor.set_status_msg("No function found around cursor", MessageKind::Error);
+            }
+        }
 
         Action::DeleteAroundFunction => {
             if let Err(msg) = check_around_function_safetynet(editor) {
@@ -1435,8 +1539,8 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     text
                 }; // win and buf dropped here
 
-                // Yank the deleted text
-                editor.clipboard = Some(deleted);
+                // Yank the deleted text via register system
+                editor.yank_to_register(deleted, register);
 
                 // Reposition cursor
                 {
@@ -1569,7 +1673,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 };
                 if let Some((start_char, end_char)) = range {
                     let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.clipboard = Some(text);
+                    editor.yank_to_register(text, register);
                     editor.clipboard_is_block = false;
                     editor.set_status_msg("Copied selection", MessageKind::Info);
                 }
@@ -1577,7 +1681,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
             // If no selection, do nothing (NOP)
         }
-
         Action::BriefCutSelection => {
             if editor.active_window().visual_anchor.is_some() {
                 let range = {
@@ -1586,7 +1689,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 };
                 if let Some((start_char, end_char)) = range {
                     let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.clipboard = Some(text);
+                    editor.yank_to_register(text, register);
                     editor.clipboard_is_block = false;
 
                     let (win, buf) = editor.active_window_and_buf_mut();
@@ -1613,7 +1716,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 let (win, buf) = editor.active_window_and_buf_mut();
                 editing::delete_current_line(win, buf);
             }
-            editor.clipboard = Some(deleted_text);
+            editor.yank_to_register(deleted_text, register);
 
             // Recalculate column boundary with visual dimensions
             let (win, buf) = editor.active_window_and_buf_mut();
@@ -2121,7 +2224,20 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
 
             editor.paste_from_system_clipboard();
 
-            // Reset to top, clamp, parse once.
+            // ── FIX: enforce trailing-newline invariant ───────────────
+            // Without this the rope can end without '\n', which causes
+            // line_text / line_char_len to strip a real character on the
+            // last line.  After :save the file lacks '\n'; on next open,
+            // open_file appends one → visible "ghost" extra line.
+            {
+                let buf = editor.buf_mut();
+                let len = buf.rope.len_chars();
+                if len == 0 || buf.rope.char(len - 1) != '\n' {
+                    buf.rope.insert(len, "\n");
+                    buf.mark_modified();
+                }
+            }
+
             {
                 let win = editor.active_window_mut();
                 win.row = 0;
@@ -2540,34 +2656,43 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::YankCurrentLine => {
             let is_brief_selecting =
                 editor.mode() == Mode::Brief && editor.active_window().visual_anchor.is_some();
-            if is_brief_selecting {
+
+            let yanked_text = if is_brief_selecting {
+                // Yank selection
                 let range = {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     win.get_selection_range(buf, Mode::Visual)
                 };
                 if let Some((start_char, end_char)) = range {
-                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.clipboard = Some(text);
-                    editor.set_status_msg("Yanked selection", MessageKind::Info);
+                    editor.buf().rope.slice(start_char..end_char).to_string()
+                } else {
+                    String::new()
                 }
-                editor.active_window_mut().visual_anchor = None;
             } else {
-                let mut yanked_text = String::new();
+                // Yank line(s)
+                let mut text = String::new();
                 {
                     let win = editor.active_window();
                     let buf = editor.buf();
                     let end_row = (win.row + count).min(buf.len_lines());
                     for r in win.row..end_row {
-                        yanked_text.push_str(&buf.line_text(r));
-                        yanked_text.push('\n');
+                        text.push_str(&buf.line_text(r));
+                        text.push('\n');
                     }
                 }
-                editor.clipboard = Some(yanked_text);
-                if count > 1 {
-                    editor.set_status_msg(&format!("Yanked {} lines", count), MessageKind::Info);
-                } else {
-                    editor.set_status_msg("Yanked 1 line", MessageKind::Info);
-                }
+                text
+            };
+
+            // Track as last pure yank (register 0)
+            editor.yank_register_0 = Some(yanked_text.clone());
+            editor.yank_to_register(yanked_text, register);
+
+            if is_brief_selecting {
+                editor.active_window_mut().visual_anchor = None;
+            } else if count > 1 {
+                editor.set_status_msg(&format!("Yanked {} lines", count), MessageKind::Info);
+            } else {
+                editor.set_status_msg("Yanked 1 line", MessageKind::Info);
             }
         }
         Action::YankCurrentWord => {
@@ -2577,7 +2702,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 execute_action(editor, Action::YankCurrentLine);
             } else {
                 if let Some(word) = editor.get_word_under_cursor() {
-                    editor.clipboard = Some(word.clone());
+                    editor.yank_to_register(word.clone(), register);
                     editor.set_status_msg(&format!("Yanked word: {}", word), MessageKind::Info);
                 } else {
                     editor.set_status_msg("No word under cursor", MessageKind::Error);
@@ -2585,13 +2710,13 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
         }
         Action::Paste => {
-            if let Some(text) = editor.clipboard.clone() {
-                if editor.clipboard_is_block {
+            let text = editor.paste_from_register(register);
+            if let Some(text) = text {
+                if editor.clipboard_is_block && register.is_none() {
                     paste_block(editor, &text);
                     editor.comp.on_edit();
                 } else {
                     let (win, buf) = editor.active_window_and_buf_mut();
-                    let (row, col) = (win.row, win.col);
                     if text.ends_with('\n') {
                         editing::paste_line_below(win, buf, &text);
                     } else {
@@ -2600,7 +2725,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     editor.comp.on_edit();
                 }
             } else {
-                editor.set_status_msg("Yank register is empty", MessageKind::Error);
+                editor.set_status_msg("Register is empty", MessageKind::Error);
             }
         }
 
@@ -2724,6 +2849,8 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             // generic action_display_name is terse
             bindings.push(("z z".into(), "Center cursor on screen".into()));
             bindings.push(("d a f".into(), "Delete around function".into()));
+            bindings.push(("y a f".into(), "Yank around function".into()));
+            bindings.push(("y i f".into(), "Yank inside function".into()));
             bindings
         }
 

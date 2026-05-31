@@ -16,7 +16,7 @@
   "init_mode": "vim",
   "keybindings": {
     "normal": {
-      "k": "rg_under_cursor",
+      "K": "rg_under_cursor",
       "<tab>": "focus_next_window",
       "l": "hunk_next",
       "L": "hunk_prev",

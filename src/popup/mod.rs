@@ -11,6 +11,7 @@ pub mod git_hunk;
 pub mod guide;
 pub mod marks;
 pub mod mru;
+pub mod registers;
 pub mod tag_candidates;
 
 pub use buffer_list::{BufferEntry, BufferList};
@@ -84,6 +85,7 @@ pub enum PopupKind {
     FilePicker,
     BufferList,
     Marks,
+    Registers,
     Mru,
     Guide,
     GitHunk,
@@ -158,6 +160,7 @@ pub struct PopupState {
     pub error: Option<ErrorPopup>,
     pub tag_candidates: Option<tag_candidates::TagCandidatesPopup>,
     pub fd: Option<FdPopup>, // tag_fd_struct
+    pub registers: Option<crate::popup::registers::RegistersPopup>,
 }
 
 impl PopupState {
@@ -179,6 +182,7 @@ impl PopupState {
             mru: None,
             content: None,
             marks: None,
+            registers: None,
             guide: None,
             tag_candidates: None,
             command_palette: None,
@@ -196,10 +200,12 @@ impl PopupState {
             || self.git_hunk.is_some()
             || self.buffer_list.is_some()
             || self.marks.is_some()
+            || self.registers.is_some()
             || self.guide.is_some()
             || self.command_palette.is_some()
             || self.error.is_some()
             || self.fd.is_some()
+            || self.tag_candidates.is_some()
     }
 
     pub fn close(&mut self) {
@@ -218,10 +224,12 @@ impl PopupState {
         self.git_hunk = None;
         self.buffer_list = None;
         self.marks = None;
+        self.registers = None;
         self.guide = None;
         self.command_palette = None;
         self.error = None;
         self.fd = None;
+        self.tag_candidates = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {

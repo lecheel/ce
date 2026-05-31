@@ -15,7 +15,7 @@ use crate::ed::MessageKind;
 // ---------------------------------------------------------------------------
 
 /// Read the current system clipboard contents as a String.
-fn read_system_clipboard() -> Option<String> {
+pub fn read_system_clipboard() -> Option<String> {
     match arboard::Clipboard::new() {
         Ok(mut cb) => match cb.get_text() {
             Ok(text) => Some(text),
@@ -26,7 +26,7 @@ fn read_system_clipboard() -> Option<String> {
 }
 
 /// Write a string to the system clipboard.
-fn write_system_clipboard(text: &str) -> bool {
+pub fn write_system_clipboard(text: &str) -> bool {
     match arboard::Clipboard::new() {
         Ok(mut cb) => cb.set_text(text).is_ok(),
         Err(_) => false,

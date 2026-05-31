@@ -5,6 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
+use crate::config::app_config::LlmBackend;
 use crate::ed::buffer::BufferKind;
 use crate::ed::ext::CommandResult;
 use crate::ed::Buffer;
@@ -169,29 +170,56 @@ impl Editor {
         id
     }
 
-    /// Spawns the async task using the background Tokio runtime.
+    /// Spawns the async LLM request, dispatching to the correct backend.
     pub fn spawn_llm_request(&mut self, messages: Vec<(String, String)>) {
+        self.spawn_llm_request_with_backend(messages, self.config.llm_backend);
+    }
+
+    /// Spawns the async LLM request with an explicit backend override.
+    pub fn spawn_llm_request_with_backend(
+        &mut self,
+        messages: Vec<(String, String)>,
+        backend: LlmBackend,
+    ) {
         if let Some(handle) = self.llm.task_handle.take() {
             handle.abort();
         }
 
         let tx = self.llm.response_tx.clone();
 
-        let url = self.config.llm_url.clone();
-        let port = self.config.llm_port;
-        let api_key = self.config.llm_api_key.clone();
+        match backend {
+            LlmBackend::Llamacpp => {
+                let url = self.config.llm_url.clone();
+                let port = self.config.llm_port;
+                let api_key = self.config.llm_api_key.clone();
 
-        let handle = tokio::spawn(async move {
-            log::debug!("[LLM] Inside tokio task, calling query_llamacpp_local...");
-            let res = query_llamacpp_local(messages, &url, port, api_key.as_deref()).await;
-            log::debug!(
-                "[LLM] query_llamacpp_local returned. Is Ok: {}",
-                res.is_ok()
-            );
-            let _ = tx.send(res);
-        });
+                let handle = tokio::spawn(async move {
+                    log::debug!("[LLM] Using llama.cpp backend ({}:{})", url, port);
+                    let res = query_llamacpp_local(messages, &url, port, api_key.as_deref()).await;
+                    let _ = tx.send(res);
+                });
 
-        self.llm.task_handle = Some(handle);
+                self.llm.task_handle = Some(handle);
+            }
+            LlmBackend::Ollama => {
+                let url = self.config.ollama_url.clone();
+                let port = self.config.ollama_port;
+                let model = self.config.ollama_model.clone();
+
+                let handle = tokio::spawn(async move {
+                    log::debug!(
+                        "[LLM] Using Ollama backend ({}:{}, model={})",
+                        url,
+                        port,
+                        model
+                    );
+                    let res = query_ollama_local(messages, &url, port, &model).await;
+                    let _ = tx.send(res);
+                });
+
+                self.llm.task_handle = Some(handle);
+            }
+        }
     }
 
     /// Animates the status infobar with a spinner while a general LLM request is processing.
@@ -380,7 +408,7 @@ impl Editor {
 
     /// Handles sending data from the general interactive prompt
     pub fn llm_send_from_prompt(&mut self, input: String) -> CommandResult {
-        // Append prompt silently to the background history buffer
+        // ── Append to history buffer (unchanged) ──
         let history_id = self.ensure_llm_buffer_exists();
         let mut total_lines = 0;
         if let Some(buf) = self.buf_mut_by_id(history_id) {
@@ -392,7 +420,6 @@ impl Editor {
             total_lines = buf.len_lines();
         }
 
-        // Scroll any windows viewing the history buffer to the bottom
         for win in &mut self.windows {
             if win.buffer_id() == history_id {
                 win.row = total_lines.saturating_sub(1);
@@ -403,22 +430,25 @@ impl Editor {
             }
         }
 
-        self.set_status_msg("Querying llama.cpp...", crate::ed::mode::MessageKind::Info);
+        let backend = self.config.llm_backend;
+        self.set_status_msg(
+            &format!("Querying {}…", backend),
+            crate::ed::mode::MessageKind::Info,
+        );
 
-        // Extract system prompt config fallback
         let system_prompt = self
             .llm
             .system_prompt
             .clone()
             .unwrap_or_else(|| self.config.llm_system_prompt.clone());
 
-        // Structure prompt into system + user messages
         let messages = vec![
             ("system".to_string(), system_prompt),
             ("user".to_string(), input),
         ];
 
-        self.spawn_llm_request(messages);
+        // Use the general llm_backend for chat
+        self.spawn_llm_request_with_backend(messages, backend);
         CommandResult::Handled
     }
 
@@ -612,4 +642,97 @@ async fn query_llamacpp_local(
     }
 
     Ok(parsed.choices[0].message.content.clone())
+}
+
+/// Communicates with a local Ollama server via its native `/api/chat` endpoint.
+///
+/// Ollama defaults to port 11434. The response envelope is simpler than
+/// the OpenAI format: `{"message":{"content":"..."}}`
+async fn query_ollama_local(
+    messages: Vec<(String, String)>,
+    url: &str,
+    port: u16,
+    model: &str,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let path = "/api/chat";
+
+    let json_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
+        .collect();
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": json_messages,
+        "stream": false
+    });
+
+    let body =
+        serde_json::to_string(&payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
+
+    let clean_host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+
+    let addr = format!("{}:{}", clean_host, port);
+
+    let request = format!(
+        "POST {} HTTP/1.0\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        path,
+        addr,
+        body.len(),
+        body
+    );
+
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("Failed to connect to Ollama at {}: {}", addr, e))?;
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write payload to Ollama: {}", e))?;
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("Failed to read stream contents: {}", e))?;
+
+    let response_str = String::from_utf8_lossy(&response);
+
+    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+    if parts.len() < 2 {
+        return Err("Malformed HTTP response from Ollama".to_string());
+    }
+
+    let http_body = parts[1];
+
+    // Ollama /api/chat response:
+    //   {"model":"llama3","message":{"role":"assistant","content":"..."},"done":true}
+    #[derive(serde::Deserialize)]
+    struct OllamaMessage {
+        content: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OllamaChatResponse {
+        message: OllamaMessage,
+    }
+
+    let parsed: OllamaChatResponse = serde_json::from_str(http_body).map_err(|e| {
+        format!(
+            "Failed to parse Ollama response: {}. Body: {}",
+            e, http_body
+        )
+    })?;
+
+    Ok(parsed.message.content)
 }
