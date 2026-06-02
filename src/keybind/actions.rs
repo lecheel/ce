@@ -152,6 +152,7 @@ pub enum Action {
     BufferPrev,
     FilePicker,
     FdSearch, //tag_fd_action
+    SearchSymbols,
     BufferList,
     BufferClose,
     Save,

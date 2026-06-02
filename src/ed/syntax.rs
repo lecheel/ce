@@ -177,6 +177,7 @@ impl SyntaxState {
         self.highlight_cache.insert(row, char_styles.clone());
         char_styles
     }
+
     fn collect_highlights(
         root: Node,
         row: usize,
@@ -239,6 +240,7 @@ impl SyntaxState {
             }
         }
     }
+
     // -----------------------------------------------------------------------
     // Text Objects
     // -----------------------------------------------------------------------
@@ -770,11 +772,7 @@ fn style_for_kind(kind: &str) -> Option<Style> {
                 .fg(Color::Rgb(137, 180, 250))
                 .add_modifier(Modifier::BOLD)
         ),
-        "ERROR" => Some(
-            Style::default()
-                .fg(Color::Rgb(243, 139, 168))
-                .add_modifier(Modifier::UNDERLINED),
-        ),
+        "ERROR" => None,
         _ => None,
     }
 }

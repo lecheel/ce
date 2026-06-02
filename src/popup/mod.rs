@@ -13,6 +13,7 @@ pub mod marks;
 pub mod mru;
 pub mod registers;
 pub mod tag_candidates;
+pub mod workspace_symbols;
 
 pub use buffer_list::{BufferEntry, BufferList};
 pub use command_palette::CommandPalettePopup;
@@ -91,6 +92,7 @@ pub enum PopupKind {
     GitHunk,
     FunctionList,
     Fd,
+    WorkspaceSymbols,
     Error, // Added for multi-line error redirection
 }
 
@@ -161,6 +163,7 @@ pub struct PopupState {
     pub tag_candidates: Option<tag_candidates::TagCandidatesPopup>,
     pub fd: Option<FdPopup>, // tag_fd_struct
     pub registers: Option<crate::popup::registers::RegistersPopup>,
+    pub workspace_symbols: Option<crate::popup::workspace_symbols::WorkspaceSymbolsPopup>,
 }
 
 impl PopupState {
@@ -187,6 +190,7 @@ impl PopupState {
             tag_candidates: None,
             command_palette: None,
             error: None,
+            workspace_symbols: None,
             fd: None, // tag_fd_new
         }
     }
@@ -206,6 +210,7 @@ impl PopupState {
             || self.error.is_some()
             || self.fd.is_some()
             || self.tag_candidates.is_some()
+            || self.workspace_symbols.is_some()
     }
 
     pub fn close(&mut self) {
@@ -230,6 +235,7 @@ impl PopupState {
         self.error = None;
         self.fd = None;
         self.tag_candidates = None;
+        self.workspace_symbols = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {
@@ -328,6 +334,14 @@ impl PopupState {
         self.close();
         self.git_hunk = Some(crate::popup::git_hunk::GitHunkPopup::new(lines));
         self.kind = Some(PopupKind::GitHunk);
+    }
+
+    pub fn open_workspace_symbols(&mut self, entries: Vec<crate::lsp::ctagd::SymbolResult>) {
+        self.close();
+        self.workspace_symbols = Some(crate::popup::workspace_symbols::WorkspaceSymbolsPopup::new(
+            entries,
+        ));
+        self.kind = Some(PopupKind::WorkspaceSymbols);
     }
 
     pub fn open_function_list(

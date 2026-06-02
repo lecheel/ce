@@ -10,6 +10,17 @@ use anyhow::{Context, Result};
 use ropey::Rope;
 use std::path::Path;
 
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub line: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+    pub message: String,
+    pub is_error: bool,
+    pub end_line: usize,
+    pub severity: u32,
+}
+
 // ---------------------------------------------------------------------------
 // BufferKind — distinguishes normal files from special viewers
 // ---------------------------------------------------------------------------
@@ -82,6 +93,7 @@ pub struct Buffer {
     // ── Special buffer support ─────────────────────────────────────
     /// Kind of buffer — controls read-only semantics and key overrides.
     pub kind: BufferKind,
+    pub diagnostics: Vec<Diagnostic>,
     /// Opaque state when `kind == BufferKind::GitLog`.
     pub git_log_state: Option<crate::git::log::GitLogState>,
     pub git_status_state: Option<crate::git::status::GitStatusState>,
@@ -149,6 +161,7 @@ impl Buffer {
             kind: BufferKind::Normal,
             git_log_state: None,
             git_status_state: None,
+            diagnostics: Vec::new(),
 
             ripgrep_results: Vec::new(),
             ripgrep_line_map: Vec::new(),

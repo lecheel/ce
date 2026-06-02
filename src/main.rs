@@ -15,8 +15,11 @@ mod ai;
 mod comp;
 mod config;
 mod ed;
+mod file_lang;
 mod git;
 mod keybind;
+pub mod lsp;
+mod msgbox;
 mod popup;
 mod render;
 mod repl;
@@ -42,8 +45,11 @@ type ServerCell =
     std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<ai::codeium::CodeiumServer>>>>;
 
 // ---------------------------------------------------------------------------
-// AppMessage — internal event bus
+// AppMessage — internal event bus for the main loop
 // ---------------------------------------------------------------------------
+// NOTE: This is the *main-loop* message enum. The LSP task uses its own
+// `msgbox::AppMessage` for LSP-specific responses, which is drained
+// separately via `editor.poll_lsp_responses()`.
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
@@ -60,7 +66,7 @@ pub enum AppMessage {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "codeium-editor")]
+#[command(name = "ce")]
 #[command(
     version,
     about = "Mini vim buffer editor with Codeium AI ghost-text completions and multi-buffer support"
@@ -165,7 +171,6 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
     for arg in all_args {
         if let Some(num_str) = arg.strip_prefix('+') {
             if num_str.is_empty() {
-                // A bare `+` means "jump to the last line" in Vim
                 initial_line = Some(usize::MAX);
             } else if let Ok(num) = num_str.parse::<usize>() {
                 initial_line = Some(num);
@@ -179,10 +184,8 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
     let mut editor = Editor::new(first_file)?;
 
     // ── Apply +N line override ────────────────────────────────────────
-    // Because Editor::new sets `needs_initial_scroll = true`, overriding
-    // the row here will automatically center the viewport on the first frame!
     if let Some(line) = initial_line {
-        let row = line.saturating_sub(1); // 1-based to 0-based
+        let row = line.saturating_sub(1);
         let (win, buf) = editor.active_window_and_buf_mut();
         win.row = row.min(buf.len_lines().saturating_sub(1));
         win.col = 0;
@@ -194,7 +197,7 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
         editor.open_buffer(Some(extra.clone()));
     }
 
-    // Terminal setup - Enabling raw mode, alternate screen, and bracketed paste mode
+    // Terminal setup
     enable_raw_mode().context("Failed to enable raw mode")?;
     let mut stdout = io::stdout().lock();
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)
@@ -225,7 +228,10 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
 
     let result = run_loop(&mut term, &mut editor, server_cell).await;
 
-    // Terminal teardown - Disabling raw mode, leaving screen, and turning off bracketed paste mode
+    // ── Shutdown LSP before terminal teardown ────────────────────────
+    editor.lsp_shutdown();
+
+    // Terminal teardown
     disable_raw_mode().context("Failed to disable raw mode")?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableBracketedPaste)
         .context("Failed to leave alternate screen")?;
@@ -236,7 +242,6 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
 // Completion providers
 // ---------------------------------------------------------------------------
 
-/// Run local word-completion in a background task.
 async fn local_complete(
     vocab: Vec<String>,
     buf_words: Vec<String>,
@@ -270,9 +275,6 @@ async fn local_complete(
     out
 }
 
-/// Spawn whichever completion provider is appropriate and send the result
-/// back as a `CompletionResponse`.  Always sends — even on error — so the
-/// machine can exit `Pending` state.
 fn spawn_completion(
     id: usize,
     text: String,
@@ -289,7 +291,6 @@ fn spawn_completion(
     };
 
     if let Some(server) = server_opt {
-        // --- Codeium cloud ---
         tokio::spawn(async move {
             let items = server
                 .fetch_completion_items(&text, offset, &lang)
@@ -301,7 +302,6 @@ fn spawn_completion(
             let _ = tx.send(AppMessage::CompletionResponse(id, items)).await;
         });
     } else {
-        // --- Local word completion ---
         let vocab = editor.vocab_words.iter().cloned().collect::<Vec<_>>();
         let cached = editor.buffer_words.clone();
         let line = editor.get_current_line_text();
@@ -325,7 +325,7 @@ async fn run_loop(
 ) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppMessage>(100);
 
-    // Blocking input reader thread - updated to poll and read Paste events
+    // Blocking input reader thread
     {
         let tx = tx.clone();
         std::thread::spawn(move || loop {
@@ -373,10 +373,8 @@ async fn run_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Modifier-only events carry no action — skip redraw
                 if matches!(key.code, crossterm::event::KeyCode::Modifier(_)) {
-                    editor.handle_key(key); // still call it so modifiers are tracked
-                                            // do NOT set needs_redraw = true
+                    editor.handle_key(key);
                     continue;
                 }
                 editor.handle_key(key);
@@ -397,33 +395,34 @@ async fn run_loop(
             }
 
             AppMessage::Tick => {
-                // 1. LSP loading indicator
+                // 1. LSP loading indicator (Codeium)
                 let server_ready = !editor.config.codeium_enabled
                     || server_cell.read().map(|g| g.is_some()).unwrap_or(false);
                 editor.set_lsp_loading(!server_ready);
                 editor.tick_spinner();
 
-                // 2. Ask the machine if a request should fire.
+                // 2. Ask the completion machine if a request should fire.
                 if let Some((id, text, offset, lang)) = editor.poll_completion() {
                     spawn_completion(id, text, offset, lang, editor, &server_cell, tx.clone());
                 }
 
-                // 3. Poll git debounce timer and background diff results
+                // 3. Poll LSP responses from the background LspManager task
+                //    (diagnostics, inlay hints, signature help, completions, formatting)
+                editor.poll_lsp_responses();
+
+                // 4. Poll git debounce timer and background diff results
                 editor.run_git_tasks();
 
-                // 4. Poll background LLM task responses
+                // 5. Poll background LLM task responses
                 editor.poll_llm_responses();
 
-                // 5. Animate the git commit generation buffer
+                // 6. Animate the git commit generation buffer
                 editor.tick_git_commit();
 
-                // 6. Animate general LLM prompt spinner
+                // 7. Animate general LLM prompt spinner
                 editor.tick_llm_prompt();
 
-                // 7. Trigger redraw if which-key debounce just elapsed
-                // This ensures the popup appears after 150ms of pause,
-                // even if no new key is pressed.
-                // tag_whichkey.a
+                // 8. Trigger redraw if which-key debounce just elapsed
                 if editor.is_whichkey_visible() {
                     needs_redraw = true;
                 }

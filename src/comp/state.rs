@@ -231,11 +231,8 @@ impl CompletionMachine {
     fn rebuild_merged(&mut self) {
         let prefix = &self.current_prefix;
         let version = self.prefix_version;
+        let prefix_lower = prefix.to_lowercase();
 
-        let mut seen: HashMap<String, CompletionSource> = HashMap::new();
-        let mut candidates: Vec<CompletionCandidate> = Vec::new();
-
-        // Source priority: Lsp > Manual > BufferWords > VocabWords
         let source_priority = |s: CompletionSource| -> usize {
             match s {
                 CompletionSource::Lsp => 0,
@@ -246,21 +243,27 @@ impl CompletionMachine {
             }
         };
 
+        let mut seen: HashMap<String, CompletionSource> = HashMap::new();
+        let mut candidates: Vec<CompletionCandidate> = Vec::new();
+
         for (source, bucket) in &self.source_results {
             if bucket.version != version {
-                continue; // stale
+                continue;
             }
 
             for text in &bucket.items {
-                // Skip exact prefix match (no point completing "apple" with "apple")
                 if text == prefix {
                     continue;
                 }
 
-                let score = text.len(); // shorter = better
+                // ── Gate: only keep items that match the current prefix ──
+                if !prefix.is_empty() && !text.to_lowercase().starts_with(&prefix_lower) {
+                    continue;
+                }
+
+                let score = text.len();
 
                 if let Some(existing_source) = seen.get(text) {
-                    // Keep the higher-priority source
                     if source_priority(*source) < source_priority(*existing_source) {
                         seen.insert(text.clone(), *source);
                     }
@@ -275,21 +278,19 @@ impl CompletionMachine {
             }
         }
 
-        // Sort: shortest first (best match), then alphabetically
-        candidates.sort_by(|a, b| a.score.cmp(&b.score).then_with(|| a.text.cmp(&b.text)));
+        // Sort: shortest first, then source priority (LSP wins ties), then alpha
+        candidates.sort_by(|a, b| {
+            a.score
+                .cmp(&b.score)
+                .then_with(|| source_priority(a.source).cmp(&source_priority(b.source)))
+                .then_with(|| a.text.cmp(&b.text))
+        });
 
         self.merged = candidates;
 
-        // Clamp selection
         if self.completion_idx >= self.merged.len() {
             self.completion_idx = 0;
         }
-
-        log::debug!(
-            "[comp:rebuild] merged {} candidates from {} sources",
-            self.merged.len(),
-            self.source_results.len(),
-        );
     }
 
     /// Update ghost text from the first (best) merged candidate.
@@ -375,6 +376,11 @@ impl CompletionMachine {
     /// Sets the current prefix being completed.
     pub fn set_prefix(&mut self, prefix: String) {
         self.current_prefix = prefix;
+    }
+
+    /// Gets the current prefix being completed.
+    pub fn prefix(&self) -> &str {
+        &self.current_prefix
     }
 
     /// Gets the current prefix version.

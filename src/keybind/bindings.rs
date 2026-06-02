@@ -2439,6 +2439,17 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::ManualComplete => {
             editor.trigger_manual_completion();
         }
+        Action::SearchSymbols => {
+            // Use the word under cursor as the initial query.
+            if let Some(word) = editor.get_word_under_cursor() {
+                editor.symbols_search(&word);
+            } else {
+                editor.set_status_msg(
+                    "No word under cursor. Use :symbols <query>",
+                    MessageKind::Info,
+                );
+            }
+        }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
@@ -2615,15 +2626,15 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             match editor.save_active_buffer() {
                 Ok(Some(_warning)) => {
                     // Warning already displayed by save_active_buffer()
-                    // (multi-line → error popup, single-line → status bar)
                 }
                 Ok(None) => {
                     let name = editor.active_filename().unwrap_or("?").to_string();
                     editor.set_status_msg(&format!("Saved {}", name), MessageKind::Success);
+                    // ← Notify ctagd daemon so it updates its DB + LSP
+                    editor.notify_ctagd_saved();
                 }
                 Err(_e) => {
                     // Error already displayed by save_active_buffer()
-                    // (multi-line → error popup, single-line → status bar)
                 }
             }
             editor.maybe_refresh_buffer_words();
@@ -2851,6 +2862,7 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             bindings.push(("d a f".into(), "Delete around function".into()));
             bindings.push(("y a f".into(), "Yank around function".into()));
             bindings.push(("y i f".into(), "Yank inside function".into()));
+            bindings.push(("g d".into(), "Go to definition (ctagd → ctags)".into()));
             bindings
         }
 

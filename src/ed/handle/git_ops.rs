@@ -543,6 +543,7 @@ impl Editor {
             git_diffs: std::collections::HashMap::new(),
             named_bookmarks: std::collections::HashMap::new(),
             kind,
+            diagnostics: Vec::new(),
             git_log_state,
             git_status_state,
             ripgrep_results: Vec::new(),

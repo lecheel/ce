@@ -9,9 +9,9 @@ use crate::config::app_config::LlmBackend;
 use crate::ed::buffer::BufferKind;
 use crate::ed::ext::CommandResult;
 use crate::ed::Buffer;
+use crate::ed::MessageKind;
 use crate::ed::Mode;
 use crate::Editor;
-
 // ── Supporting LLM structures ─────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +163,10 @@ impl Editor {
 
         let mut buf = Buffer::new(id, Some("*llm-chat*".to_string())).unwrap();
         buf.kind = BufferKind::Llm;
-        buf.rope = ropey::Rope::from_str("=== LLM Chat History ===\n");
+        buf.rope = ropey::Rope::from_str(&format!(
+            "=== LLM Chat History ({}) ===\n",
+            self.config.llm_backend
+        ));
 
         self.buffers.push(buf);
         self.llm.buffer_id = Some(id);
@@ -228,7 +231,10 @@ impl Editor {
             self.tick_spinner();
             let spinner = SPINNER_CHARS[self.spinner_frame() % SPINNER_CHARS.len()];
             self.set_status_msg(
-                &format!("{} LLM is thinking...", spinner),
+                &format!(
+                    "{} LLM is thinking ({})...",
+                    spinner, self.config.llm_backend
+                ),
                 crate::ed::mode::MessageKind::Info,
             );
         }
@@ -245,44 +251,47 @@ impl Editor {
                     if self.git_commit_buffer_id.is_some() {
                         self.git_commit_on_llm_response(&response_text);
                     } else {
-                        // Cache response inside background state
                         self.llm.buffer.text = response_text.clone();
 
-                        // Append response silently to the background history buffer
+                        // Insert first, then read the line count for scrolling
                         let history_id = self.ensure_llm_buffer_exists();
-                        let mut total_lines = 0;
                         if let Some(buf) = self.buf_mut_by_id(history_id) {
                             let current_len = buf.rope.len_chars();
                             buf.rope
                                 .insert(current_len, &format!("\nLLM: {}\n", response_text));
                             buf.mark_modified();
                             buf.parse_syntax();
-                            total_lines = buf.len_lines();
                         }
 
-                        // Scroll any windows viewing the history buffer to the bottom
-                        for win in &mut self.windows {
-                            if win.buffer_id() == history_id {
-                                win.row = total_lines.saturating_sub(1);
-                                win.col = 0;
-                                let h = win.position.height;
-                                let w = win.position.width;
-                                win.scroll_to_cursor(h, w, 0);
+                        // Now read line count after the insert
+                        let total_lines = self
+                            .buf_by_id(history_id)
+                            .map(|b| b.len_lines())
+                            .unwrap_or(1);
+
+                        for win in self.windows.iter_mut() {
+                            if win.buffer_id() != history_id {
+                                continue;
                             }
+                            // Clamp to actual buffer length — guards against stale state
+                            let target_row = total_lines.saturating_sub(1);
+                            let h = win.position.height;
+                            let w = win.position.width;
+                            win.row = target_row;
+                            win.col = 0;
+                            win.scroll_line = target_row.saturating_sub(h.saturating_sub(1));
+                            win.scroll_col = 0;
+                            win.desired_col = 0;
+                            // Don't call scroll_to_cursor here — we already computed scroll_line
                         }
 
-                        // Simply display the completion message, keeping current layout intact
-                        self.set_status_msg(
-                            "Response is ready",
-                            crate::ed::mode::MessageKind::Success,
-                        );
+                        self.set_status_msg("Response is ready", MessageKind::Success);
                     }
                 }
                 Err(err) => {
                     if self.git_commit_buffer_id.is_some() {
                         self.git_commit_on_llm_error(&err);
                     } else {
-                        // Append error silently to the background history buffer
                         let history_id = self.ensure_llm_buffer_exists();
                         if let Some(buf) = self.buf_mut_by_id(history_id) {
                             let current_len = buf.rope.len_chars();
@@ -291,11 +300,7 @@ impl Editor {
                             buf.mark_modified();
                             buf.parse_syntax();
                         }
-
-                        self.set_status_msg(
-                            &format!("LLM Error: {}", err),
-                            crate::ed::mode::MessageKind::Error,
-                        );
+                        self.set_status_msg(&format!("LLM Error: {}", err), MessageKind::Error);
                     }
                 }
             }
@@ -304,12 +309,8 @@ impl Editor {
 
     /// Horizontally splits the window and establishes an interactive LLM chat session.
     pub fn open_llm_chat_session(&mut self) {
-        use crate::ed::MessageKind;
-
-        // 1. Create or fetch the Llm chat history buffer
         let history_id = self.ensure_llm_buffer_exists();
 
-        // 2. Create or fetch the LlmInput query buffer
         let input_id = self
             .buffers
             .iter()
@@ -318,61 +319,98 @@ impl Editor {
             .unwrap_or_else(|| {
                 let id = self.next_buf_id;
                 self.next_buf_id += 1;
-
                 let mut buf = Buffer::new(id, Some("*llm-input*".to_string())).unwrap();
                 buf.kind = BufferKind::LlmInput;
                 buf.rope = ropey::Rope::from_str("");
-
                 self.buffers.push(buf);
                 id
             });
 
-        // Track the active history buffer in your LlmState
         self.llm.buffer_id = Some(history_id);
 
-        // 3. Perform a horizontal subdivision
-        // This splits window 0, creating window 1 (bottom) and focusing it.
         self.split_horizontal();
 
-        // Since split_horizontal focuses the bottom window (index 1), assign input_id to it.
+        // Bottom (active after split) → input
         self.active_window_mut().set_buffer_id(input_id);
 
-        // Switch to the top window (index 0) and assign history_id to it.
+        // Top → history
         self.focus_prev_window();
         self.active_window_mut().set_buffer_id(history_id);
 
-        // Focus back down to the bottom window (index 1) so it is active.
+        let prev_idx = self.active_window_idx;
+        self.clamp_window_row_to_buf(prev_idx);
+
+        // Back to input pane — this is the one the user types in
         self.focus_next_window();
 
-        // Automatically enter insert mode so you can begin typing immediately.
+        // Sanity check: active window must be showing the input buffer
+        debug_assert_eq!(self.active_window().buffer_id(), input_id);
+
+        // Set cursor to end of input buffer (it's empty, so row=0 col=0)
+        {
+            let win = self.active_window_mut();
+            win.row = 0;
+            win.col = 0;
+            win.scroll_line = 0;
+            win.scroll_col = 0;
+            win.desired_col = 0;
+        }
+
         self.enter_insert();
 
+        let backend = self.config.llm_backend;
         self.set_status_msg(
-            "LLM Chat Session — Type and press Enter to send, 'q' to close split",
+            &format!(
+                "LLM input [{}] — Enter: newline  Ctrl-Enter: send  q(normal): close",
+                backend
+            ),
             MessageKind::Info,
         );
     }
 
     // handke_llm_input_buffer_key move to ed/handle_key.rs
-
+    /// Send the current content of the LlmInput buffer as a chat message.
+    /// Clears the input buffer and resets cursor on success.
+    /// Send the current content of the LlmInput buffer as a chat message.
+    /// Clears the input buffer and resets cursor on success.
+    /// Send the current content of the LlmInput buffer as a chat message.
+    /// Clears the input buffer and resets cursor on success.
     pub fn llm_send_input_buffer(&mut self) -> CommandResult {
+        let input_bid = self.active_window().buffer_id();
         let input = self.buf().rope.to_string();
 
-        // Clear the LlmInput query buffer so the user can type the next message
-        let input_bid = self.active_window().buffer_id();
+        if input.trim().is_empty() {
+            self.set_status_msg("Empty message — type something first", MessageKind::Info);
+            return CommandResult::Handled;
+        }
+
+        // Clear the input buffer
         if let Some(buf) = self.buf_mut_by_id(input_bid) {
             buf.rope = ropey::Rope::from_str("");
             buf.mark_modified();
             buf.parse_syntax();
         }
 
-        // Focus/reset cursor in the active LlmInput window
-        let win = self.active_window_mut();
-        win.row = 0;
-        win.col = 0;
-        win.scroll_line = 0;
-        win.scroll_col = 0;
-        win.desired_col = 0;
+        // Reset cursor — buffer is now one empty line
+        {
+            let win = self.active_window_mut();
+            win.row = 0;
+            win.col = 0;
+            win.scroll_line = 0;
+            win.scroll_col = 0;
+            win.desired_col = 0;
+        }
+
+        // Stay in whatever mode the user was in. If they were in Normal and
+        // pressed Enter to send, they stay in Normal. If Insert, they stay
+        // in Insert so they can immediately type the next message.
+        // Only explicitly switch to Insert if the buffer was just cleared
+        // and the mode is not already one of the input modes.
+        if !matches!(self.mode, Mode::Insert | Mode::Brief) {
+            // Caller came from Normal — switch to Insert so the buffer is
+            // ready for the next message. This is opt-in rather than forced.
+            self.enter_insert();
+        }
 
         self.llm_send_from_prompt(input)
     }
@@ -391,6 +429,8 @@ impl Editor {
             return;
         }
 
+        // Prefer a real file buffer; fall back to any Normal buffer;
+        // as a last resort create a fresh unnamed buffer rather than quitting.
         let target_id = self
             .buffers
             .iter()
@@ -398,12 +438,14 @@ impl Editor {
             .or_else(|| self.buffers.iter().find(|b| b.kind == BufferKind::Normal))
             .map(|b| b.id);
 
-        let target_id = match target_id {
-            Some(id) => id,
-            None => self.buffers.first().map(|b| b.id).unwrap_or(0),
-        };
-
-        self.switch_window_to_buffer(target_id);
+        match target_id {
+            Some(id) => self.switch_window_to_buffer(id),
+            None => {
+                // No normal buffer at all — open a fresh unnamed one
+                // rather than leaving the user stuck in an LLM buffer.
+                self.open_buffer(None);
+            }
+        }
     }
 
     /// Handles sending data from the general interactive prompt
@@ -420,13 +462,15 @@ impl Editor {
             total_lines = buf.len_lines();
         }
 
-        for win in &mut self.windows {
+        for win in self.windows.iter_mut() {
             if win.buffer_id() == history_id {
-                win.row = total_lines.saturating_sub(1);
-                win.col = 0;
+                let target_row = total_lines.saturating_sub(1);
                 let h = win.position.height;
-                let w = win.position.width;
-                win.scroll_to_cursor(h, w, 0);
+                win.row = target_row;
+                win.col = 0;
+                win.scroll_line = target_row.saturating_sub(h.saturating_sub(1));
+                win.scroll_col = 0;
+                win.desired_col = 0;
             }
         }
 
@@ -511,6 +555,22 @@ impl Editor {
             }
             PromptAction::None => CommandResult::Handled,
         }
+    }
+
+    /// True when the active window is viewing the LLM chat input buffer.
+    pub fn is_in_llm_input(&self) -> bool {
+        let bid = self.active_window().buffer_id();
+        self.buffers
+            .iter()
+            .any(|b| b.id == bid && b.kind == BufferKind::LlmInput)
+    }
+
+    /// True when the active window is viewing the LLM chat history buffer.
+    pub fn is_in_llm_history(&self) -> bool {
+        let bid = self.active_window().buffer_id();
+        self.buffers
+            .iter()
+            .any(|b| b.id == bid && b.kind == BufferKind::Llm)
     }
 }
 

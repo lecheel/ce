@@ -470,6 +470,39 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             }
         }
 
+        // ---- Workspace Symbol Search ----
+        s if s.starts_with("sym ") || s.starts_with("symbols ") => {
+            let query = if let Some(q) = s.strip_prefix("symbols ") {
+                q
+            } else {
+                s.strip_prefix("sym ").unwrap()
+            }
+            .trim();
+
+            if query.is_empty() {
+                editor.set_status_msg("Usage: :symbols <query>", MessageKind::Error);
+            } else {
+                editor.symbols_search(query);
+            }
+        }
+        "sym" | "symbols" => {
+            // No query: open a prompt-style search (use word under cursor if any)
+            if let Some(word) = editor.get_word_under_cursor() {
+                editor.symbols_search(&word);
+            } else {
+                editor.set_status_msg("Usage: :symbols <query>", MessageKind::Error);
+            }
+        }
+        "ctagd" | "ctagd info" => {
+            editor.daemon_info();
+        }
+        "ctagd status" => {
+            editor.daemon_status();
+        }
+        "ctagd scan" => {
+            editor.daemon_scan();
+        }
+
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
         "sp" | "split" => {
@@ -525,6 +558,8 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "w" => {
             if let Err(e) = editor.save_active_buffer() {
                 editor.set_status_msg(&format!("Save failed: {}", e), MessageKind::Error);
+            } else {
+                editor.notify_ctagd_saved();
             }
         }
         s if s.starts_with("w ") => {
@@ -533,6 +568,8 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 editor.set_active_filename(path.to_string());
                 if let Err(e) = editor.save_active_buffer() {
                     editor.set_status_msg(&format!("Save failed: {}", e), MessageKind::Error);
+                } else {
+                    editor.notify_ctagd_saved();
                 }
             }
         }
@@ -580,15 +617,27 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             let comment = s.strip_prefix("stash ").unwrap().trim();
             editor.handle_stash_command(comment);
         }
+        // In the match block, replace the current "llm" arm:
         "llm" => {
             editor.open_llm_chat_session();
         }
-        s if s.starts_with("prompt ") || s.starts_with("> ") => {
-            let prompt_text = if s.starts_with("prompt ") {
-                s.strip_prefix("prompt ").unwrap().trim()
+        s if s.starts_with("llm ") => {
+            // :llm <message> — send without opening the split UI
+            let msg = s.strip_prefix("llm ").unwrap().trim().to_string();
+            if msg.is_empty() {
+                editor.open_llm_chat_session();
             } else {
-                s.strip_prefix("> ").unwrap().trim()
-            };
+                editor.llm_send_from_prompt(msg);
+            }
+        }
+        // Restore prompt aliases — these were lost in the refactor
+        s if s.starts_with("prompt ") || s.starts_with("> ") => {
+            let prompt_text = if let Some(p) = s.strip_prefix("prompt ") {
+                p
+            } else {
+                s.strip_prefix("> ").unwrap()
+            }
+            .trim();
             if !prompt_text.is_empty() {
                 editor.llm_send_from_prompt(prompt_text.to_string());
             } else {
@@ -671,7 +720,8 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
-        "tag", "ta", "retag", "tags", "sort", "fd", 
+        "tag", "ta", "retag", "tags", "sort", "fd",
+        "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

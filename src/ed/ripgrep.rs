@@ -422,6 +422,7 @@ impl Editor {
                 modified: false,
                 undo_stack: Vec::new(),
                 redo_stack: Vec::new(),
+                diagnostics: Vec::new(),
                 syntax: crate::ed::syntax::SyntaxState::new(),
                 bookmarks: std::collections::HashSet::new(),
                 git_diffs: std::collections::HashMap::new(),

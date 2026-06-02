@@ -239,6 +239,9 @@ pub struct Config {
     #[serde(default = "default_init_mode")]
     pub init_mode: String,
 
+    #[serde(default = "default_true")]
+    pub insert_spaces: bool,
+
     // Unified namespaced keybindings
     #[serde(default)]
     pub keybindings: KeybindingsConfig,
@@ -290,6 +293,11 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub vocab_wordlist: bool,
 
+    /// Enable LSP completion requests. Other LSP features (diagnostics,
+    /// goto-definition, signature help, formatting) remain active.
+    #[serde(default = "default_false")]
+    pub lsp_completion_enabled: bool,
+
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
 }
@@ -306,6 +314,7 @@ impl Default for Config {
             popup_enabled: true,
             buffer_word_scan: true,
             vocab_wordlist: true,
+            lsp_completion_enabled: false,
             init_mode: "vim".to_string(),
             keybindings: KeybindingsConfig::default(),
             leader: "space".to_string(),
@@ -344,6 +353,7 @@ impl Default for Config {
             which_key_delay_ms: 300,
             show_indent_guides: true,
             tab_size: 4,
+            insert_spaces: true,
             format_on_save: false,
         }
     }
@@ -395,6 +405,8 @@ impl Config {
                 init_mode: "vim".to_string(),
                 buffer_word_scan: true,
                 vocab_wordlist: true,
+                lsp_completion_enabled: false,
+                insert_spaces: true,
 
                 llm_url: "127.0.0.1".to_string(),
                 llm_port: 8080,

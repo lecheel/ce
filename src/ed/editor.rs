@@ -9,6 +9,13 @@ use crate::ed::syntax::TextObject;
 use crate::ed::window::{LayoutNode, Window};
 use crate::keybind::bindings::Action;
 use crate::keybind::bindings::FunctionSpanInfo;
+use crate::lsp::TextEdit;
+use crate::lsp::{
+    path_to_uri, uri_to_path, CompletionItem, FormattingOptions, InlayHint, Location, LspManager,
+    LspMessage, OffsetEncoding, SignatureHelpState,
+};
+use crate::msgbox::AppMessage;
+use crate::msgbox::AppMessage as LspAppMessage;
 use crate::popup::{PopupItem, PopupKind, PopupState};
 use crate::render::statusbar_state::StatusBarState;
 use anyhow::Result;
@@ -132,6 +139,24 @@ pub struct Editor {
     pub yank_register_0: Option<String>,
     /// Last small delete/change text (register -).
     pub small_delete_register: Option<String>,
+    pub ctagd: crate::lsp::RustLspClient,
+
+    /// Channel to send requests INTO the LSP task.
+    pub lsp_tx: Option<tokio::sync::mpsc::UnboundedSender<LspMessage>>,
+    /// Channel to receive responses FROM the LSP task.
+    pub lsp_rx: Option<std::sync::mpsc::Receiver<LspAppMessage>>,
+    /// Handle to the background tokio runtime (keeps it alive).
+    _lsp_runtime: Option<std::sync::Arc<tokio::runtime::Runtime>>,
+    /// Cached LSP offset encoding (set after initialization).
+    pub lsp_offset_encoding: OffsetEncoding,
+    /// Current inlay hints keyed by URI.
+    pub inlay_hints: std::collections::HashMap<String, Vec<InlayHint>>,
+    /// Current signature help state.
+    pub signature_help: Option<SignatureHelpState>,
+    /// Per-URI open file version tracking (for incremental sync).
+    pub lsp_file_versions: std::collections::HashMap<String, i32>,
+    /// Whether the full LSP (not just ctagd) is active.
+    pub lsp_full_active: bool,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -236,6 +261,16 @@ impl Editor {
             normal_register_prefix: None,
             yank_register_0: None,
             small_delete_register: None,
+            ctagd: crate::lsp::RustLspClient::new(),
+
+            lsp_tx: None,
+            lsp_rx: None,
+            _lsp_runtime: None,
+            lsp_offset_encoding: OffsetEncoding::default(),
+            inlay_hints: std::collections::HashMap::new(),
+            signature_help: None,
+            lsp_file_versions: std::collections::HashMap::new(),
+            lsp_full_active: false,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -244,6 +279,14 @@ impl Editor {
             insert_buffer: None,
             quit_prompt: QuitPrompt::None,
         };
+
+        // ── Spawn LSP background task ────────────────────────────
+        editor.spawn_lsp_task();
+
+        // ── Open initial file with LSP ───────────────────────────
+        if let Some(ref name) = filename {
+            editor.lsp_notify_open(std::path::PathBuf::from(name));
+        }
 
         if let Some(name) = editor.active_filename() {
             let path_buf = std::path::PathBuf::from(name);
@@ -283,6 +326,42 @@ impl Editor {
 
         editor.maybe_refresh_buffer_words();
         Ok(editor)
+    }
+
+    /// Spawn the LspManager in a background tokio runtime.
+    fn spawn_lsp_task(&mut self) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create LSP tokio runtime");
+
+        let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel::<LspAppMessage>();
+        let (sync_tx, sync_rx): (
+            std::sync::mpsc::Sender<LspAppMessage>,
+            std::sync::mpsc::Receiver<LspAppMessage>,
+        ) = std::sync::mpsc::channel();
+
+        runtime.spawn(async move {
+            while let Some(msg) = async_rx.recv().await {
+                if sync_tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut lsp_manager = LspManager::new(async_tx);
+        let lsp_tx = lsp_manager.get_sender();
+
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                lsp_manager.run().await;
+            });
+        });
+
+        self.lsp_tx = Some(lsp_tx);
+        self.lsp_rx = Some(sync_rx);
+        self._lsp_runtime = None;
+        self.lsp_full_active = true;
     }
 
     /// Current scope (impl::function) at the active cursor position.
@@ -733,6 +812,11 @@ impl Editor {
             return;
         }
 
+        if self.popup.workspace_symbols.is_some() {
+            self.handle_workspace_symbols_key(key);
+            return;
+        }
+
         if self.substitution_state.is_some() {
             self.handle_substitution_key(key);
             return;
@@ -890,8 +974,7 @@ impl Editor {
                 BufferKind::GitCommit => self.handle_git_commit_key(key),
                 BufferKind::GitStatus => self.handle_git_status_key(key),
                 BufferKind::CheckHealth => self.handle_checkhealth_key(key),
-                BufferKind::Llm => self.handle_llm_key(key),
-                BufferKind::LlmInput => self.handle_llm_input_key(key),
+                BufferKind::Llm | BufferKind::LlmInput => self.handle_llm_buffer_key(key),
                 _ => false,
             };
             if handled {
@@ -1516,6 +1599,7 @@ impl Editor {
 
 impl Editor {
     /// Called by the main loop on every edit while in Insert/Brief mode.
+    /// Called by the main loop on every edit while in Insert/Brief mode.
     pub fn on_completion_edit(&mut self) {
         self.comp.on_edit();
 
@@ -1579,11 +1663,41 @@ impl Editor {
                 .merge_source(CompletionSource::VocabWords, matches, version);
         }
 
-        // ── Source 4: LSP (async, response arrives later) ──────────
-        if self.lsp_loading {
-            let (req_id, version) = self.comp.start_source_request(CompletionSource::Lsp);
-            let _ = (req_id, version, row, col);
+        // ── Source 4: LSP (async — response arrives in poll_lsp_responses) ──
+        if self.lsp_full_active && self.config.lsp_completion_enabled {
+            let (_req_id, version) = self.comp.start_source_request(CompletionSource::Lsp);
+            if let Some(filename) = self.active_filename() {
+                let path = std::path::PathBuf::from(filename);
+                let lsp_line = row as u32;
+                let lsp_col = col as u32;
+                self.lsp_request_completion(&path, lsp_line, lsp_col, version);
+            } else {
+                self.comp
+                    .merge_source(CompletionSource::Lsp, Vec::new(), version);
+            }
         }
+    }
+
+    /// Handle LSP completion response — called from handle_lsp_message.
+    pub fn apply_lsp_completion(&mut self, items: Option<Vec<CompletionItem>>, version: u64) {
+        let prefix = self.comp.prefix().to_string();
+        let prefix_lower = prefix.to_lowercase();
+        let labels = match items {
+            Some(items) => items
+                .into_iter()
+                .filter_map(|item| {
+                    // Use filter_text if the server provides it, else label
+                    let filter_key = item.filter_text.as_deref().unwrap_or(&item.label);
+                    if !prefix.is_empty() && !filter_key.to_lowercase().starts_with(&prefix_lower) {
+                        return None;
+                    }
+                    Some(item.get_insert_text().unwrap_or_else(|| item.label.clone()))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        self.comp
+            .merge_source(CompletionSource::Lsp, labels, version);
     }
 
     /// LSP response handler — called when the LSP server replies.
@@ -1894,5 +2008,326 @@ impl Editor {
 
         self.popup.registers = Some(crate::popup::registers::RegistersPopup::new(entries));
         self.popup.kind = Some(crate::popup::PopupKind::Registers);
+    }
+}
+
+impl Editor {
+    /// Get the LSP sender, if available.
+    fn lsp_sender(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<LspMessage>> {
+        self.lsp_tx.as_ref()
+    }
+
+    // ── File lifecycle ────────────────────────────────────────────
+
+    pub fn lsp_notify_open(&mut self, path: std::path::PathBuf) {
+        if let Some(tx) = self.lsp_sender() {
+            let _ = tx.send(LspMessage::OpenFile(path));
+        }
+    }
+
+    pub fn lsp_notify_close(&mut self, path: std::path::PathBuf) {
+        if let Some(tx) = self.lsp_sender() {
+            let _ = tx.send(LspMessage::CloseFile(path));
+        }
+    }
+
+    pub fn lsp_notify_change(&mut self, path: std::path::PathBuf) {
+        if self.lsp_tx.is_none() {
+            return;
+        }
+        let uri = path_to_uri(&path);
+        let version = {
+            let v = self.lsp_file_versions.entry(uri).or_insert(1);
+            *v += 1;
+            *v
+        };
+        let text = self.buf().rope.to_string();
+        if let Some(tx) = self.lsp_tx.as_ref() {
+            let _ = tx.send(LspMessage::ChangeFile(path, String::new(), text, version));
+        }
+    }
+
+    pub fn lsp_notify_save(&mut self, path: std::path::PathBuf) {
+        if let Some(tx) = self.lsp_sender() {
+            let _ = tx.send(LspMessage::SaveFile(path));
+        }
+    }
+
+    pub fn lsp_notify_change_incremental(
+        &mut self,
+        path: std::path::PathBuf,
+        start_line: u32,
+        start_char: u32,
+        end_line: u32,
+        end_char: u32,
+        new_text: String,
+    ) {
+        if self.lsp_tx.is_none() {
+            return;
+        }
+        let uri = path_to_uri(&path);
+        let version = {
+            let v = self.lsp_file_versions.entry(uri).or_insert(1);
+            *v += 1;
+            *v
+        };
+        if let Some(tx) = self.lsp_tx.as_ref() {
+            let _ = tx.send(LspMessage::ChangeFileIncremental {
+                path,
+                version,
+                start_line,
+                start_char,
+                end_line,
+                end_char,
+                new_text,
+            });
+        }
+    }
+
+    // ── Go-to-definition ──────────────────────────────────────────
+
+    pub fn lsp_goto_definition(&mut self, path: std::path::PathBuf, line: u32, col: u32) {
+        if let Some(tx) = self.lsp_sender() {
+            let (respond_tx, respond_rx) = tokio::sync::oneshot::channel::<Vec<Location>>();
+            let _ = tx.send(LspMessage::GotoDefinition {
+                path,
+                line,
+                col,
+                respond_to: respond_tx,
+            });
+
+            // The response arrives asynchronously via AppMessage.
+            // We store the oneshot receiver so the main loop can await it.
+            // (Alternatively, just let it flow through AppMessage — see §4)
+        }
+    }
+
+    // ── Completion request ────────────────────────────────────────
+    pub fn lsp_request_completion(
+        &mut self,
+        path: &std::path::PathBuf,
+        line: u32,
+        col: u32,
+        version: u64,
+    ) {
+        if let Some(tx) = self.lsp_sender() {
+            let _ = tx.send(LspMessage::RequestCompletion(
+                path.clone(),
+                line,
+                col,
+                None,
+                version,
+            ));
+        }
+    }
+
+    // ── Signature help ────────────────────────────────────────────
+
+    pub fn lsp_request_signature_help(&mut self, path: &std::path::PathBuf, line: u32, col: u32) {
+        if let Some(tx) = self.lsp_sender() {
+            let _ = tx.send(LspMessage::RequestSignatureHelp(path.clone(), line, col));
+        }
+    }
+
+    // ── Formatting ────────────────────────────────────────────────
+    pub fn lsp_request_formatting(
+        &mut self,
+        path: std::path::PathBuf,
+        buffer_idx: usize,
+        save_after: bool,
+    ) {
+        if let Some(tx) = self.lsp_sender() {
+            let win = self.active_window();
+            let cursor = Some((win.row, win.col));
+            let text = self.buf().rope.to_string();
+            let tab_size = self.config.tab_size as u32;
+            let options = FormattingOptions {
+                tab_size,
+                insert_spaces: self.config.insert_spaces,
+                trim_trailing_whitespace: Some(true),
+                insert_final_newline: Some(true),
+                trim_final_newlines: Some(true),
+            };
+            let _ = tx.send(LspMessage::RequestFormatting(
+                path, text, options, buffer_idx, cursor, save_after,
+            ));
+        }
+    }
+
+    // ── Inlay hints ───────────────────────────────────────────────
+
+    pub fn lsp_request_inlay_hints(&mut self, path: &std::path::PathBuf, version: i32) {
+        if let Some(tx) = self.lsp_sender() {
+            let total_lines = self.buf().len_lines();
+            let _ = tx.send(LspMessage::RequestInlayHintsRange(
+                path.clone(),
+                0,
+                total_lines as usize,
+                version,
+            ));
+        }
+    }
+
+    fn apply_lsp_diagnostics(
+        &mut self,
+        uri: &str,
+        diagnostics: Vec<crate::ed::buffer::Diagnostic>,
+    ) {
+        let path = uri_to_path(uri);
+        for buf in &mut self.buffers {
+            if buf.filename.as_deref() == path.to_str() {
+                buf.diagnostics = diagnostics;
+                return;
+            }
+        }
+    }
+
+    fn apply_lsp_format(
+        &mut self,
+        result: Result<Option<Vec<TextEdit>>, String>,
+        buffer_idx: usize,
+        cursor_state: Option<(usize, usize)>,
+        save_after: bool,
+    ) {
+        let edits = match result {
+            Ok(Some(edits)) => edits,
+            Ok(None) => return,
+            Err(e) => {
+                self.set_status_msg(&format!("Format error: {}", e), MessageKind::Error);
+                return;
+            }
+        };
+
+        if edits.is_empty() {
+            return;
+        }
+
+        if buffer_idx >= self.buffers.len() {
+            return;
+        }
+
+        // ── Apply edits in a scoped block to release the borrow ──────
+        let (line_count, filename) = {
+            let buf = &mut self.buffers[buffer_idx];
+
+            let mut sorted_edits = edits.clone();
+            sorted_edits.sort_by(|a, b| {
+                let a_start =
+                    a.range.start.line as usize * 1_000_000 + a.range.start.character as usize;
+                let b_start =
+                    b.range.start.line as usize * 1_000_000 + b.range.start.character as usize;
+                b_start.cmp(&a_start)
+            });
+
+            for edit in &sorted_edits {
+                let start_line = edit.range.start.line as usize;
+                let start_char = edit.range.start.character as usize;
+                let end_line = edit.range.end.line as usize;
+                let end_char = edit.range.end.character as usize;
+
+                if start_line >= buf.len_lines() || end_line >= buf.len_lines() {
+                    continue;
+                }
+
+                let start_offset = buf.rope.line_to_char(start_line)
+                    + start_char.min(buf.line_char_len(start_line));
+                let end_offset =
+                    buf.rope.line_to_char(end_line) + end_char.min(buf.line_char_len(end_line));
+
+                if end_offset > start_offset {
+                    buf.rope.remove(start_offset..end_offset);
+                }
+                if !edit.new_text.is_empty() {
+                    buf.rope.insert(start_offset, &edit.new_text);
+                }
+            }
+
+            buf.mark_modified();
+            buf.parse_syntax();
+
+            (buf.len_lines(), buf.filename.clone())
+        };
+
+        // ── Restore cursor (borrow on buffers is now released) ───────
+        if let Some((row, col)) = cursor_state {
+            let win = self.active_window_mut();
+            win.row = row.min(line_count.saturating_sub(1));
+            win.col = col;
+        }
+
+        // ── Optionally save after formatting ─────────────────────────
+        if save_after && filename.is_some() {
+            let _ = self.save_active_buffer();
+        }
+    }
+
+    fn apply_lsp_inlay_hints(&mut self, uri: String, hints: Vec<InlayHint>, _version: i32) {
+        self.inlay_hints.insert(uri, hints);
+    }
+
+    // ── Shutdown ──────────────────────────────────────────────────
+
+    pub fn lsp_shutdown(&mut self) {
+        if let Some(tx) = self.lsp_sender() {
+            let _ = tx.send(LspMessage::Shutdown);
+        }
+    }
+}
+
+impl Editor {
+    /// Drain all pending LSP responses. Call this once per main-loop tick.
+    pub fn poll_lsp_responses(&mut self) {
+        let messages: Vec<_> = {
+            let Some(rx) = &mut self.lsp_rx else { return };
+            std::iter::from_fn(|| rx.try_recv().ok()).collect()
+        };
+        for msg in messages {
+            self.handle_lsp_message(msg);
+        }
+    }
+
+    fn handle_lsp_message(&mut self, msg: AppMessage) {
+        match msg {
+            AppMessage::LspDiagnostics {
+                uri, diagnostics, ..
+            } => {
+                self.apply_lsp_diagnostics(&uri, diagnostics);
+            }
+
+            AppMessage::LspFormatResult {
+                result,
+                buffer_idx,
+                cursor_state,
+                save_after,
+            } => {
+                self.apply_lsp_format(result, buffer_idx, cursor_state, save_after);
+            }
+
+            AppMessage::LspInlayHints {
+                uri,
+                hints,
+                version,
+            } => {
+                self.apply_lsp_inlay_hints(uri, hints, version);
+            }
+
+            AppMessage::LspSignatureHelp(state) => {
+                self.signature_help = state;
+            }
+
+            AppMessage::LspCompletion { items, version } => {
+                self.apply_lsp_completion(items, version);
+            }
+
+            AppMessage::LspCompletionResolved(item) => {
+                // Could update a detail popup, etc.
+                log::debug!("Resolved completion item: {:?}", item.label);
+            }
+
+            AppMessage::LspError(e) => {
+                log::warn!("LSP error: {}", e);
+                // Optionally show in status bar on first error
+            }
+        }
     }
 }
