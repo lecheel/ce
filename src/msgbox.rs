@@ -5,7 +5,7 @@
 //! The LSP task sends these through a tokio channel → std::sync bridge →
 //! `editor.lsp_rx`, which is drained by `editor.poll_lsp_responses()`.
 
-use crate::lsp::lsp::{CompletionItem, InlayHint, SignatureHelpState, TextEdit};
+use crate::lsp::lsp::{CompletionItem, InlayHint, Location, SignatureHelpState, TextEdit};
 
 /// Sender half of the LSP response channel.
 pub type AppSender = tokio::sync::mpsc::UnboundedSender<AppMessage>;
@@ -37,4 +37,8 @@ pub enum AppMessage {
     },
     LspCompletionResolved(CompletionItem),
     LspError(String),
+    /// Response to textDocument/definition.
+    LspGotoDefinitionResult {
+        locations: Vec<Location>,
+    },
 }

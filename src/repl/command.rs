@@ -523,12 +523,14 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             let pattern = s.strip_prefix("rg ").unwrap().trim();
             editor.ripgrep_search(pattern); // Direct execution on editor
         }
-
-        "cn" => {
+        "copen" | "cw" | "cwindow" => {
+            editor.open_quickfix_popup();
+        }
+        "cn" | "cnext" => {
             editor.ripgrep_next_result(); // Direct execution on editor
             editor.record_action(RepeatableAction::QuickfixNext, 1);
         }
-        "cp" => {
+        "cp" | "cprev" => {
             editor.ripgrep_prev_result(); // Direct execution on editor
             editor.record_action(RepeatableAction::QuickfixPrev, 1);
         }

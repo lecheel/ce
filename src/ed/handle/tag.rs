@@ -10,17 +10,26 @@
 //! - `C-t`          → `tag_back` — return from tag jump
 //! - `:symbols <q>` → `symbols_search` — workspace symbol search
 
+use crate::ed::editor::PendingLspGoto;
 use crate::ed::tag::{TagEntry, TagStackEntry};
 use crate::ed::MessageKind;
+use crate::lsp::lsp::Location;
 use crate::Editor;
 use crossterm::event::KeyCode;
+
+pub(crate) const LSP_GOTO_TIMEOUT_MS: u64 = 300;
 
 impl Editor {
     // ═══════════════════════════════════════════════════════════════════
     // Public API
     // ═══════════════════════════════════════════════════════════════════
 
-    /// `C-]` / `gd` — jump to the definition of the word under the cursor.
+    /// `C-]` / `gd` — jump to definition.
+    ///
+    /// Auto-selects the best available backend:
+    ///   1. LSP  — semantic, async (~50-300ms)
+    ///   2. ctagd — indexed patterns, sync socket (~5ms)
+    ///   3. ctags — tags file, always available (~0ms)
     pub fn tag_under_cursor(&mut self) {
         let word = match self.get_word_under_cursor() {
             Some(w) => w,
@@ -30,27 +39,38 @@ impl Editor {
             }
         };
 
-        // ── Attempt 1: ctagd `definition` ─────────────────────────
+        // ── Tier 1: LSP (if a language server is running for this file) ──
+        if self.lsp_full_active {
+            if let Some(()) = self.lsp_goto_attempt(&word) {
+                return; // async — resolves in poll_lsp_responses
+            }
+        }
+
+        // ── Tier 2: ctagd (if daemon socket exists) ──────────────────────
         if self.ctagd.is_available() {
             if let Some(()) = self.ctagd_definition(&word) {
                 return;
             }
         }
 
-        // ── Attempt 2: ctags fallback ────────────────────────────────
+        // ── Tier 3: ctags (always available) ─────────────────────────────
         self.ctags_jump(&word);
     }
 
     /// `:tag <name>` — jump to a named tag.
     pub fn jump_to_tag(&mut self, name: &str) {
-        // ── Attempt 1: ctagd `goto` ───────────────────────────────
+        if self.lsp_full_active {
+            if let Some(()) = self.lsp_goto_attempt(name) {
+                return;
+            }
+        }
+
         if self.ctagd.is_available() {
             if let Some(()) = self.ctagd_goto(name) {
                 return;
             }
         }
 
-        // ── Attempt 2: ctags fallback ────────────────────────────────
         self.ctags_jump(name);
     }
 
@@ -223,7 +243,6 @@ impl Editor {
         }
     }
 
-    /// `:tags` — show tag manager status.
     pub fn show_tag_info(&mut self) {
         let count = self.tag_manager.tag_count();
         let depth = self.tag_manager.stack_depth();
@@ -233,22 +252,17 @@ impl Editor {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "none".to_string());
 
-        let daemon = if self.ctagd.is_available() {
-            if let Some(repo_root) = self.resolve_repo_root() {
-                match self.ctagd.info(&repo_root) {
-                    Some(info) => format!("{} ({})", info.backend, info.index_status),
-                    None => "available".to_string(),
-                }
-            } else {
-                "available".to_string()
-            }
+        let daemon = if self.lsp_full_active {
+            "lsp+ctagd".to_string()
+        } else if self.ctagd.is_available() {
+            "ctagd".to_string()
         } else {
-            "unavailable".to_string()
+            "ctags".to_string()
         };
 
         self.set_status_msg(
             &format!(
-                "Tags: {} | Stack: {} | Root: {} | ctagd: {}",
+                "Tags: {} | Stack: {} | Root: {} | Backend: {}",
                 count,
                 depth,
                 short_repo_name(&root),
@@ -262,7 +276,7 @@ impl Editor {
     // ctagd helpers
     // ═══════════════════════════════════════════════════════════════════
 
-    fn ctagd_definition(&mut self, symbol: &str) -> Option<()> {
+    pub fn ctagd_definition(&mut self, symbol: &str) -> Option<()> {
         let (repo_root, file) = self.repo_root_and_relative_file()?;
         let (line, col) = {
             let win = self.active_window();
@@ -432,7 +446,7 @@ impl Editor {
     // ctags fallback
     // ═══════════════════════════════════════════════════════════════════
 
-    fn ctags_jump(&mut self, name: &str) {
+    pub fn ctags_jump(&mut self, name: &str) {
         let repo_root = match self.resolve_repo_root() {
             Some(r) => r,
             None => {
@@ -869,6 +883,118 @@ impl Editor {
                 );
             }
         }
+    }
+
+    /// Jump to a single LSP Location.
+    pub fn lsp_do_goto_jump(&mut self, location: &Location, name: &str, total: usize) {
+        let path = crate::lsp::uri_to_path(&location.uri);
+        let path_str = path.to_string_lossy().to_string();
+        let target_line = location.range.start.line as usize;
+        let target_col = location.range.start.character as usize;
+
+        let existing_bid = self
+            .buffers
+            .iter()
+            .find(|b| b.filename.as_deref() == Some(path_str.as_str()))
+            .map(|b| b.id);
+
+        if let Some(bid) = existing_bid {
+            self.switch_window_to_buffer(bid);
+        } else if path.exists() {
+            self.open_buffer(Some(path_str.clone()));
+        } else {
+            self.tag_manager.pop();
+            self.set_status_msg(
+                &format!("LSP: file not found: {}", path_str),
+                MessageKind::Error,
+            );
+            return;
+        }
+
+        {
+            let (win, buf) = self.active_window_and_buf_mut();
+            let max_row = buf.len_lines().saturating_sub(1);
+            win.row = target_line.min(max_row);
+            win.col = target_col;
+            win.desired_col = win.col;
+            win.save_jump_position();
+        }
+
+        self.refine_jump_position(name, target_line, target_col);
+        self.center_viewport_on_cursor();
+
+        let multi = if total > 1 {
+            format!(" ({} locations)", total)
+        } else {
+            String::new()
+        };
+
+        self.set_status_msg(
+            &format!("LSP: {} → {}:{}{}", name, path_str, target_line + 1, multi),
+            MessageKind::Info,
+        );
+    }
+
+    /// Show picker for multiple LSP definitions.
+    pub fn lsp_goto_picker(&mut self, locations: Vec<Location>, symbol: &str) {
+        let entries: Vec<TagEntry> = locations
+            .iter()
+            .map(|loc| {
+                let path = crate::lsp::uri_to_path(&loc.uri);
+                TagEntry {
+                    name: symbol.to_string(),
+                    file: path,
+                    line: loc.range.start.line as usize + 1,
+                    kind: Some("lsp".to_string()),
+                }
+            })
+            .collect();
+
+        self.popup.tag_candidates = Some(crate::popup::tag_candidates::TagCandidatesPopup::new(
+            entries,
+        ));
+        self.set_status_msg(
+            &format!(
+                "LSP: {} definitions for '{}'. Select one.",
+                locations.len(),
+                symbol
+            ),
+            MessageKind::Info,
+        );
+    }
+
+    /// Send an async LSP go-to-definition request.
+    /// Returns `Some(())` if the request was sent (caller should return).
+    /// Returns `None` if no LSP sender is available.
+    fn lsp_goto_attempt(&mut self, symbol: &str) -> Option<()> {
+        let filename = self.active_filename()?;
+        let path = std::path::PathBuf::from(&filename);
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+
+        // Clone the sender so we don't hold an immutable borrow across
+        // the mutable borrow in push_tag_stack().
+        let tx = self.lsp_tx.as_ref().cloned()?;
+
+        let _ = self.push_tag_stack();
+
+        let _ = tx.send(crate::lsp::LspMessage::GotoDefinition {
+            path,
+            line: row as u32,
+            col: col as u32,
+        });
+
+        self.pending_lsp_goto = Some(PendingLspGoto {
+            symbol: symbol.to_string(),
+            pushed_tag_stack: true,
+            created_at: std::time::Instant::now(),
+        });
+
+        self.set_status_msg(&format!("LSP: resolving '{}'…", symbol), MessageKind::Info);
+
+        Some(())
     }
 }
 

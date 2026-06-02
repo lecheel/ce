@@ -119,6 +119,12 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    // 8.5 Intercept Quickfix Popup
+    if editor.popup.quickfix.is_some() {
+        draw_quickfix(f, editor, screen);
+        return;
+    }
+
     if editor.popup.fd.is_some() {
         draw_fd(f, editor, screen);
         return;
@@ -1566,6 +1572,115 @@ fn draw_registers(f: &mut Frame, editor: &Editor, screen: Rect) {
     // Pad to content_height so the block doesn't collapse
     while list_items.len() < content_height {
         list_items.push(ListItem::new(Line::from("")));
+    }
+
+    let list_widget = List::new(list_items);
+
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(list_widget, inner);
+}
+
+fn draw_quickfix(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.quickfix {
+        Some(p) => p,
+        None => return,
+    };
+
+    let width = popup_width(screen);
+    let max_height = (screen.height / 2).max(10) as usize;
+    let content_height = popup.entries.len().min(max_height.saturating_sub(2));
+    let total_height = (content_height as u16).saturating_add(2);
+
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = screen.height.saturating_sub(total_height).saturating_sub(2);
+
+    let area = clamp(
+        screen,
+        Rect {
+            x,
+            y,
+            width,
+            height: total_height,
+        },
+    );
+
+    let title = format!(" Quickfix ({}) ", popup.entries.len());
+    let footer = " [Enter] jump  [n/p] next/prev  [Esc] close ";
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(footer, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+
+    let mut list_items = Vec::new();
+    for i in 0..content_height {
+        let entry_idx = popup.scroll + i;
+        if entry_idx < popup.entries.len() {
+            let entry = &popup.entries[entry_idx];
+            let is_selected = entry_idx == popup.selected;
+
+            let row_style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default()
+            };
+
+            // Relative path for display
+            let display_path = entry
+                .file_path
+                .strip_prefix(&popup.root_dir)
+                .unwrap_or(&entry.file_path);
+
+            let idx_style = if is_selected {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let path_style = if is_selected {
+                Style::default()
+                    .fg(Color::Blue)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Blue)
+            };
+
+            let line_style = if is_selected {
+                Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+
+            let text_style = if is_selected {
+                Style::default().fg(Color::White).bg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            let line = Line::from(vec![
+                Span::styled(format!(" {:>3} ", entry_idx + 1), idx_style),
+                Span::styled(format!("{} ", display_path.display()), path_style),
+                Span::styled(format!(":{} ", entry.line_number), line_style),
+                Span::styled(entry.line_text.clone(), text_style),
+            ])
+            .style(row_style);
+
+            list_items.push(ListItem::new(line));
+        } else {
+            list_items.push(ListItem::new(Line::from("")));
+        }
     }
 
     let list_widget = List::new(list_items);

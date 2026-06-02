@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 use ropey::Rope;
@@ -538,7 +538,6 @@ pub enum LspMessage {
         path: PathBuf,
         line: u32,
         col: u32,
-        respond_to: oneshot::Sender<Vec<Location>>,
     },
     RequestFormatting(
         PathBuf,
@@ -555,7 +554,7 @@ pub enum LspMessage {
 // ============================================================================
 
 enum PendingKind {
-    GotoDefinition(oneshot::Sender<Vec<Location>>),
+    GotoDefinition,
     Formatting {
         buffer_idx: usize,
         cursor_state: Option<(usize, usize)>,
@@ -1058,21 +1057,16 @@ impl LspManager {
         let is_error = msg.get("error").is_some();
 
         match kind {
-            PendingKind::GotoDefinition(tx) => {
+            PendingKind::GotoDefinition => {
                 let locations = if is_error || result.is_null() {
                     Vec::new()
                 } else {
-                    // try single Location
                     if let Ok(loc) = serde_json::from_value::<Location>(result.clone()) {
                         vec![loc]
-                    }
-                    // try array of Locations
-                    else if let Ok(locs) = serde_json::from_value::<Vec<Location>>(result.clone())
+                    } else if let Ok(locs) = serde_json::from_value::<Vec<Location>>(result.clone())
                     {
                         locs
-                    }
-                    // (optional) support LocationLink array
-                    else if let Ok(links) =
+                    } else if let Ok(links) =
                         serde_json::from_value::<Vec<crate::lsp::LocationLink>>(result.clone())
                     {
                         links
@@ -1086,8 +1080,11 @@ impl LspManager {
                         Vec::new()
                     }
                 };
-                let _ = tx.send(locations);
+                let _ = self
+                    .app_tx
+                    .send(AppMessage::LspGotoDefinitionResult { locations });
             }
+
             PendingKind::Formatting {
                 buffer_idx,
                 cursor_state,
@@ -1161,8 +1158,10 @@ impl LspManager {
 
     fn reject_pending(&self, kind: PendingKind, _reason: &str) {
         match kind {
-            PendingKind::GotoDefinition(tx) => {
-                let _ = tx.send(Vec::new());
+            PendingKind::GotoDefinition => {
+                let _ = self.app_tx.send(AppMessage::LspGotoDefinitionResult {
+                    locations: Vec::new(),
+                });
             }
             PendingKind::Formatting {
                 buffer_idx,
@@ -1185,19 +1184,18 @@ impl LspManager {
 
     async fn dispatch_editor_msg(&mut self, msg: LspMessage) {
         match msg {
-            LspMessage::GotoDefinition {
-                path,
-                line,
-                col,
-                respond_to,
-            } => {
+            LspMessage::GotoDefinition { path, line, col } => {
                 let Some(lsp) = &mut self.active_lsp else {
-                    let _ = respond_to.send(Vec::new());
+                    let _ = self.app_tx.send(AppMessage::LspGotoDefinitionResult {
+                        locations: Vec::new(),
+                    });
                     return;
                 };
                 let uri = path_to_uri(&path);
                 if !self.opened_files.contains(&uri) {
-                    let _ = respond_to.send(Vec::new());
+                    let _ = self.app_tx.send(AppMessage::LspGotoDefinitionResult {
+                        locations: Vec::new(),
+                    });
                     return;
                 }
                 match lsp
@@ -1211,11 +1209,12 @@ impl LspManager {
                     .await
                 {
                     Ok(id) => {
-                        self.pending
-                            .insert(id, PendingKind::GotoDefinition(respond_to));
+                        self.pending.insert(id, PendingKind::GotoDefinition);
                     }
                     Err(_) => {
-                        let _ = respond_to.send(Vec::new());
+                        let _ = self.app_tx.send(AppMessage::LspGotoDefinitionResult {
+                            locations: Vec::new(),
+                        });
                     }
                 }
             }

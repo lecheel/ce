@@ -11,6 +11,7 @@ pub mod git_hunk;
 pub mod guide;
 pub mod marks;
 pub mod mru;
+pub mod quickfix;
 pub mod registers;
 pub mod tag_candidates;
 pub mod workspace_symbols;
@@ -22,6 +23,7 @@ pub use file_picker::FilePicker;
 pub use function_list::FunctionListPopup;
 pub use marks::{MarkEntry, MarksPopup};
 pub use mru::{MruEntry, MruPopup};
+pub use quickfix::QuickfixPopup;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -93,6 +95,7 @@ pub enum PopupKind {
     FunctionList,
     Fd,
     WorkspaceSymbols,
+    Quickfix,
     Error, // Added for multi-line error redirection
 }
 
@@ -164,6 +167,7 @@ pub struct PopupState {
     pub fd: Option<FdPopup>, // tag_fd_struct
     pub registers: Option<crate::popup::registers::RegistersPopup>,
     pub workspace_symbols: Option<crate::popup::workspace_symbols::WorkspaceSymbolsPopup>,
+    pub quickfix: Option<QuickfixPopup>,
 }
 
 impl PopupState {
@@ -192,6 +196,7 @@ impl PopupState {
             error: None,
             workspace_symbols: None,
             fd: None, // tag_fd_new
+            quickfix: None,
         }
     }
 
@@ -211,6 +216,7 @@ impl PopupState {
             || self.fd.is_some()
             || self.tag_candidates.is_some()
             || self.workspace_symbols.is_some()
+            || self.quickfix.is_some()
     }
 
     pub fn close(&mut self) {
@@ -236,6 +242,7 @@ impl PopupState {
         self.fd = None;
         self.tag_candidates = None;
         self.workspace_symbols = None;
+        self.quickfix = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {
@@ -363,5 +370,15 @@ impl PopupState {
         self.close();
         self.fd = Some(FdPopup::new(root_dir, pattern));
         self.kind = Some(PopupKind::Fd);
+    }
+
+    pub fn open_quickfix(
+        &mut self,
+        entries: Vec<crate::ed::ripgrep::RipgrepResult>,
+        root_dir: std::path::PathBuf,
+    ) {
+        self.close();
+        self.quickfix = Some(QuickfixPopup::new(entries, root_dir));
+        self.kind = Some(PopupKind::Quickfix);
     }
 }

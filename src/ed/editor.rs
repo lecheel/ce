@@ -3,6 +3,7 @@ use crate::comp::state::CompletionMachine;
 use crate::comp::state::CompletionSource;
 use crate::config::app_config::Config;
 use crate::ed::buffer::{Buffer, BufferKind};
+use crate::ed::handle::tag::LSP_GOTO_TIMEOUT_MS;
 use crate::ed::misc_helper::{count_nested_fns, is_fn_kind, is_valid_register_char};
 use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::syntax::TextObject;
@@ -21,6 +22,14 @@ use crate::render::statusbar_state::StatusBarState;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
+
+/// In-flight LSP go-to-definition request.
+#[derive(Debug)]
+pub struct PendingLspGoto {
+    pub symbol: String,
+    pub pushed_tag_stack: bool,
+    pub created_at: std::time::Instant,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EasyMotionPhase {
@@ -180,6 +189,7 @@ pub struct Editor {
     /// Whether the full LSP (not just ctagd) is active.
     pub lsp_full_active: bool,
     pub easymotion: Option<EasyMotionState>,
+    pub pending_lsp_goto: Option<PendingLspGoto>,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -295,6 +305,7 @@ impl Editor {
             lsp_file_versions: std::collections::HashMap::new(),
             lsp_full_active: false,
             easymotion: None,
+            pending_lsp_goto: None,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -305,11 +316,13 @@ impl Editor {
         };
 
         // ── Spawn LSP background task ────────────────────────────
-        editor.spawn_lsp_task();
+        if editor.config.lsp_enabled {
+            editor.spawn_lsp_task();
 
-        // ── Open initial file with LSP ───────────────────────────
-        if let Some(ref name) = filename {
-            editor.lsp_notify_open(std::path::PathBuf::from(name));
+            // ── Open initial file with LSP ───────────────────────
+            if let Some(ref name) = filename {
+                editor.lsp_notify_open(std::path::PathBuf::from(name));
+            }
         }
 
         if let Some(name) = editor.active_filename() {
@@ -885,6 +898,11 @@ impl Editor {
 
         if self.popup.marks.is_some() {
             self.handle_marks_key(key);
+            return;
+        }
+
+        if self.popup.quickfix.is_some() {
+            self.handle_quickfix_key(key);
             return;
         }
 
@@ -2114,24 +2132,6 @@ impl Editor {
         }
     }
 
-    // ── Go-to-definition ──────────────────────────────────────────
-
-    pub fn lsp_goto_definition(&mut self, path: std::path::PathBuf, line: u32, col: u32) {
-        if let Some(tx) = self.lsp_sender() {
-            let (respond_tx, respond_rx) = tokio::sync::oneshot::channel::<Vec<Location>>();
-            let _ = tx.send(LspMessage::GotoDefinition {
-                path,
-                line,
-                col,
-                respond_to: respond_tx,
-            });
-
-            // The response arrives asynchronously via AppMessage.
-            // We store the oneshot receiver so the main loop can await it.
-            // (Alternatively, just let it flow through AppMessage — see §4)
-        }
-    }
-
     // ── Completion request ────────────────────────────────────────
     pub fn lsp_request_completion(
         &mut self,
@@ -2305,7 +2305,6 @@ impl Editor {
 }
 
 impl Editor {
-    /// Drain all pending LSP responses. Call this once per main-loop tick.
     pub fn poll_lsp_responses(&mut self) {
         let messages: Vec<_> = {
             let Some(rx) = &mut self.lsp_rx else { return };
@@ -2314,6 +2313,8 @@ impl Editor {
         for msg in messages {
             self.handle_lsp_message(msg);
         }
+
+        self.check_lsp_goto_timeout();
     }
 
     fn handle_lsp_message(&mut self, msg: AppMessage) {
@@ -2350,15 +2351,73 @@ impl Editor {
             }
 
             AppMessage::LspCompletionResolved(item) => {
-                // Could update a detail popup, etc.
                 log::debug!("Resolved completion item: {:?}", item.label);
             }
 
             AppMessage::LspError(e) => {
                 log::warn!("LSP error: {}", e);
-                // Optionally show in status bar on first error
+            }
+
+            AppMessage::LspGotoDefinitionResult { locations } => {
+                self.handle_lsp_goto_result(locations);
             }
         }
+    }
+
+    /// LSP responded to go-to-definition.
+    fn handle_lsp_goto_result(&mut self, locations: Vec<Location>) {
+        let pending = match self.pending_lsp_goto.take() {
+            Some(p) => p,
+            None => return,
+        };
+
+        if locations.is_empty() {
+            // LSP says no definition — fall through to ctagd / ctags
+            if pending.pushed_tag_stack {
+                self.tag_manager.pop();
+            }
+            self.tag_goto_fallback(&pending.symbol);
+            return;
+        }
+
+        if locations.len() == 1 {
+            self.lsp_do_goto_jump(&locations[0], &pending.symbol, 1);
+        } else {
+            self.lsp_goto_picker(locations, &pending.symbol);
+        }
+    }
+
+    /// LSP timeout — fall back to ctagd / ctags.
+    pub fn check_lsp_goto_timeout(&mut self) {
+        let timed_out = self.pending_lsp_goto.as_ref().map_or(false, |p| {
+            p.created_at.elapsed() > std::time::Duration::from_millis(LSP_GOTO_TIMEOUT_MS)
+        });
+
+        if !timed_out {
+            return;
+        }
+
+        let pending = self.pending_lsp_goto.take().unwrap();
+        if pending.pushed_tag_stack {
+            self.tag_manager.pop();
+        }
+
+        self.set_status_msg(
+            &format!("LSP timeout — falling back for '{}'", pending.symbol),
+            MessageKind::Info,
+        );
+
+        self.tag_goto_fallback(&pending.symbol);
+    }
+
+    /// Fall back to ctagd → ctags (used when LSP times out or returns empty).
+    fn tag_goto_fallback(&mut self, symbol: &str) {
+        if self.ctagd.is_available() {
+            if let Some(()) = self.ctagd_definition(symbol) {
+                return;
+            }
+        }
+        self.ctags_jump(symbol);
     }
 }
 

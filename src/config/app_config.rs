@@ -298,6 +298,12 @@ pub struct Config {
     #[serde(default = "default_false")]
     pub lsp_completion_enabled: bool,
 
+    /// Completely disable the LSP subsystem. No language server will be
+    /// started, and no LSP requests (diagnostics, completion, goto-definition,
+    /// formatting, etc.) will be sent.
+    #[serde(default = "default_false")]
+    pub lsp_enabled: bool,
+
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
 }
@@ -349,6 +355,7 @@ impl Default for Config {
             bookmark_popup_goto: false,
             search_wrap_enabled: false,
             show_startup_hints: true,
+            lsp_enabled: false,
             scroll_offset: 0,
             which_key_delay_ms: 300,
             show_indent_guides: true,

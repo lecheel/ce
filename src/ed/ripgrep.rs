@@ -274,6 +274,7 @@ impl Editor {
         let escaped = escape_regex(pattern);
         match run_ripgrep(&escaped, root_dir) {
             Ok(output) => {
+                let count = output.results.len();
                 let output: RipgrepOutput = output;
                 self.last_rg_pattern = Some(pattern.to_string());
                 self.last_rg_root_dir = Some(root_dir.to_path_buf());
@@ -281,6 +282,10 @@ impl Editor {
                 let _ = save_last_rg_output(&output);
 
                 self.populate_ripgrep_buffer(pattern, output);
+                // Also open the quickfix popup for easy navigation
+                if count > 0 {
+                    self.open_quickfix_popup();
+                };
             }
             Err(e) => {
                 self.set_status_msg(&format!("Ripgrep failed: {}", e), MessageKind::Error);
@@ -528,7 +533,7 @@ impl Editor {
 
     pub fn quickfix_next(&mut self) {
         if self.quickfix_results.is_empty() {
-            self.set_status_msg("No ripgrep results. Run :rg first.", MessageKind::Error);
+            self.set_status_msg("No quickfix results. Run :rg first.", MessageKind::Error);
             return;
         }
 
@@ -540,6 +545,11 @@ impl Editor {
         self.quickfix_index += 1;
         let result = self.quickfix_results[self.quickfix_index].clone();
         self.open_file_at_line(&result.file_path, result.line_number);
+
+        // Sync popup selection if open
+        if let Some(ref mut p) = self.popup.quickfix {
+            p.selected = self.quickfix_index;
+        }
 
         let display_name = self.buf().display_name();
         self.set_status_msg(
@@ -556,7 +566,7 @@ impl Editor {
 
     pub fn quickfix_prev(&mut self) {
         if self.quickfix_results.is_empty() {
-            self.set_status_msg("No ripgrep results. Run :rg first.", MessageKind::Error);
+            self.set_status_msg("No quickfix results. Run :rg first.", MessageKind::Error);
             return;
         }
 
@@ -569,6 +579,11 @@ impl Editor {
         let result = self.quickfix_results[self.quickfix_index].clone();
         self.open_file_at_line(&result.file_path, result.line_number);
 
+        // Sync popup selection if open
+        if let Some(ref mut p) = self.popup.quickfix {
+            p.selected = self.quickfix_index;
+        }
+
         let display_name = self.buf().display_name();
         self.set_status_msg(
             &format!(
@@ -577,6 +592,89 @@ impl Editor {
                 self.quickfix_results.len(),
                 display_name,
                 result.line_number
+            ),
+            MessageKind::Info,
+        );
+    }
+    /// Open the quickfix popup from the current ripgrep results.
+    pub fn open_quickfix_popup(&mut self) {
+        if self.quickfix_results.is_empty() {
+            self.set_status_msg("No quickfix results. Run :rg first.", MessageKind::Error);
+            return;
+        }
+
+        let root_dir = self
+            .last_rg_root_dir
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        self.popup
+            .open_quickfix(self.quickfix_results.clone(), root_dir);
+
+        // Set selected to current quickfix_index if valid
+        if let Some(ref mut p) = self.popup.quickfix {
+            p.selected = self.quickfix_index.min(p.entries.len().saturating_sub(1));
+        }
+    }
+
+    /// Key handler for the Quickfix popup.
+    pub fn handle_quickfix_key(&mut self, key: crate::event::KeyEvent) {
+        match key.code {
+            crossterm::event::KeyCode::Esc => {
+                self.popup.close();
+            }
+            crossterm::event::KeyCode::Up
+            | crossterm::event::KeyCode::Char('k')
+            | crossterm::event::KeyCode::Char('p') => {
+                if let Some(ref mut p) = self.popup.quickfix {
+                    p.move_up();
+                }
+            }
+            crossterm::event::KeyCode::Down
+            | crossterm::event::KeyCode::Char('j')
+            | crossterm::event::KeyCode::Char('n') => {
+                if let Some(ref mut p) = self.popup.quickfix {
+                    p.move_down();
+                }
+            }
+            crossterm::event::KeyCode::Enter => {
+                let selected = self
+                    .popup
+                    .quickfix
+                    .as_ref()
+                    .map(|p| p.selected)
+                    .unwrap_or(0);
+
+                self.popup.close();
+                self.quickfix_jump_to(selected);
+            }
+            _ => {}
+        }
+    }
+
+    /// Jump to a specific quickfix result by index.
+    fn quickfix_jump_to(&mut self, index: usize) {
+        let result = match self.quickfix_results.get(index).cloned() {
+            Some(r) => r,
+            None => return,
+        };
+
+        self.quickfix_index = index;
+        self.open_file_at_line(&result.file_path, result.line_number);
+
+        let display_path = result
+            .file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+
+        self.set_status_msg(
+            &format!(
+                "Quickfix {}/{}: {}:{}",
+                index + 1,
+                self.quickfix_results.len(),
+                display_path,
+                result.line_number,
             ),
             MessageKind::Info,
         );
