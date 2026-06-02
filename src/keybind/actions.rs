@@ -49,7 +49,8 @@ pub enum Action {
     EnterCommand,
     EnterBrief,
     EnterNormal,
-   ExitMode,
+    ExitMode,
+    EasyMotion,
 
     // Completion
     AcceptCompletion,

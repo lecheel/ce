@@ -32,6 +32,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("pagedown", Action::PageDown),
         ("z z", Action::ScrollCenter),
         // searching
+        ("s", Action::EasyMotion),
         ("%", Action::MatchBracket),
         ("/", Action::EnterSearch),
         ("n", Action::SearchNext),

@@ -2450,6 +2450,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 );
             }
         }
+        Action::EasyMotion => {
+            editor.enter_easymotion();
+        }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {

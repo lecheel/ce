@@ -169,6 +169,15 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
     let block_insert_col = editor.visual_block_insert_state.as_ref().map(|s| s.col);
     let search_query = editor.last_search_query.clone();
 
+    let easymotion_targets: Option<Vec<crate::ed::editor::EasyMotionTarget>> =
+        editor.easymotion.as_ref().and_then(|em| {
+            if matches!(em.phase, crate::ed::editor::EasyMotionPhase::Selecting) {
+                Some(em.targets.clone())
+            } else {
+                None
+            }
+        });
+
     // Split disjoint borrows: windows (read), buffers (mut), config (read)
     let windows = &editor.windows;
     let buffers = &mut editor.buffers;
@@ -194,6 +203,12 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
             None
         };
 
+        let em_targets = if is_active {
+            easymotion_targets.as_deref()
+        } else {
+            None
+        };
+
         if let Some(buf) = buffers.iter_mut().find(|b| b.id == win.buffer_id()) {
             draw_pane(
                 f,
@@ -207,6 +222,7 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
                 is_block_inserting,
                 block_insert_col,
                 search_query.as_deref(),
+                em_targets,
             );
         }
     }
@@ -230,6 +246,7 @@ fn draw_pane(
     is_block_inserting: bool,
     block_insert_col: Option<usize>,
     search_query: Option<&str>,
+    easymotion_targets: Option<&[crate::ed::editor::EasyMotionTarget]>,
 ) {
     let viewport_height = area.height as usize;
     let scroll = win.scroll_line;
@@ -398,6 +415,16 @@ fn draw_pane(
                 indent_guide_style,
             );
 
+            apply_easymotion_overlay(
+                &mut chars,
+                &mut highlights,
+                &mut selected_mask,
+                &mut search_mask,
+                i,
+                hscroll,
+                easymotion_targets,
+            );
+
             let mut vis_col = 0;
             let mut char_offset = 0;
             let mut cursor_grapheme: Option<&str> = None;
@@ -542,6 +569,16 @@ fn draw_pane(
                 tab_size,
                 guide_depths[virtual_row - scroll],
                 indent_guide_style,
+            );
+
+            apply_easymotion_overlay(
+                &mut chars,
+                &mut highlights,
+                &mut selected_mask,
+                &mut search_mask,
+                i,
+                hscroll,
+                easymotion_targets,
             );
 
             let mut spans = gutter_spans;
@@ -894,6 +931,50 @@ fn apply_indent_guides(
             }
             VisualColContent::Tab | VisualColContent::NonSpace => {
                 // Hide guide: do nothing, don't disrupt tabs or non-space characters
+            }
+        }
+    }
+}
+
+/// Overlay EasyMotion label characters onto a line's render arrays.
+fn apply_easymotion_overlay(
+    chars: &mut Vec<char>,
+    highlights: &mut Vec<Option<Style>>,
+    selected_mask: &mut Vec<bool>,
+    search_mask: &mut Vec<bool>,
+    row: usize,
+    hscroll: usize,
+    targets: Option<&[crate::ed::editor::EasyMotionTarget]>,
+) {
+    let Some(targets) = targets else { return };
+
+    let label_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::Rgb(220, 80, 40))
+        .add_modifier(Modifier::BOLD);
+
+    for target in targets {
+        if target.row != row {
+            continue;
+        }
+        if target.col < hscroll {
+            continue; // off-screen left
+        }
+
+        for (li, label_char) in target.label.chars().enumerate() {
+            let col_offset = target.col - hscroll + li;
+            if col_offset >= chars.len() {
+                break; // off-screen right
+            }
+            chars[col_offset] = label_char;
+            if col_offset < highlights.len() {
+                highlights[col_offset] = Some(label_style);
+            }
+            if col_offset < selected_mask.len() {
+                selected_mask[col_offset] = false;
+            }
+            if col_offset < search_mask.len() {
+                search_mask[col_offset] = false;
             }
         }
     }

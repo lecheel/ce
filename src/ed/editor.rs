@@ -22,6 +22,28 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EasyMotionPhase {
+    Collecting,
+    Selecting,
+}
+
+#[derive(Debug, Clone)]
+pub struct EasyMotionTarget {
+    pub row: usize,
+    pub col: usize, // char-offset within the line (matches win.col semantics)
+    pub label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EasyMotionState {
+    pub prefix: String,
+    pub phase: EasyMotionPhase,
+    pub targets: Vec<EasyMotionTarget>,
+    pub partial_label: String,
+    pub label_len: usize, // 1 if ≤26 targets, 2 if ≤676
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RegisterBank {
     pub named: std::collections::HashMap<char, String>,
@@ -157,6 +179,7 @@ pub struct Editor {
     pub lsp_file_versions: std::collections::HashMap<String, i32>,
     /// Whether the full LSP (not just ctagd) is active.
     pub lsp_full_active: bool,
+    pub easymotion: Option<EasyMotionState>,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -271,6 +294,7 @@ impl Editor {
             signature_help: None,
             lsp_file_versions: std::collections::HashMap::new(),
             lsp_full_active: false,
+            easymotion: None,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -669,6 +693,12 @@ impl Editor {
             if let Some(act) = action {
                 crate::keybind::bindings::execute_action(self, act);
             }
+            return;
+        }
+
+        // ── EasyMotion intercept ─────────────────────────────────────
+        if self.easymotion.is_some() {
+            self.handle_easymotion_key(key);
             return;
         }
 
@@ -2329,5 +2359,233 @@ impl Editor {
                 // Optionally show in status bar on first error
             }
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Selection Text Extraction
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
+    /// Extract text from an inclusive line range in the active buffer.
+    /// Returns `None` if the range is invalid.
+    pub fn extract_line_range_text(&self, start_row: usize, end_row: usize) -> Option<String> {
+        let buf = self.buf();
+        if end_row >= buf.len_lines() || start_row > end_row {
+            return None;
+        }
+        let mut result = String::new();
+        for r in start_row..=end_row {
+            let line = buf.line_text(r);
+            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+            result.push_str(trimmed);
+            result.push('\n');
+        }
+        Some(result)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EasyMotion
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
+    /// Enter EasyMotion mode (triggered by `s` in Normal mode).
+    pub fn enter_easymotion(&mut self) {
+        self.easymotion = Some(EasyMotionState {
+            prefix: String::new(),
+            phase: EasyMotionPhase::Collecting,
+            targets: Vec::new(),
+            partial_label: String::new(),
+            label_len: 1,
+        });
+        self.set_status_msg("EasyMotion: _", MessageKind::Info);
+    }
+
+    /// Handle a key event while EasyMotion state is active.
+    fn handle_easymotion_key(&mut self, key: KeyEvent) {
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            return;
+        }
+
+        let phase = self
+            .easymotion
+            .as_ref()
+            .map(|em| em.phase.clone())
+            .unwrap_or(EasyMotionPhase::Collecting);
+
+        match phase {
+            EasyMotionPhase::Collecting => match key.code {
+                KeyCode::Esc => {
+                    self.easymotion = None;
+                    self.clear_status_msg();
+                }
+                KeyCode::Backspace => {
+                    // Copy out the prefix before mutating self further
+                    let should_cancel = {
+                        let em = self.easymotion.as_mut().unwrap();
+                        em.prefix.pop();
+                        em.prefix.is_empty()
+                    };
+                    if should_cancel {
+                        self.easymotion = None;
+                        self.clear_status_msg();
+                    } else {
+                        let prefix_display = self.easymotion.as_ref().unwrap().prefix.clone();
+                        self.set_status_msg(
+                            &format!("EasyMotion: {}_", prefix_display),
+                            MessageKind::Info,
+                        );
+                    }
+                }
+                KeyCode::Char(c) => {
+                    let should_scan = {
+                        let em = self.easymotion.as_mut().unwrap();
+                        em.prefix.push(c);
+                        em.prefix.len() >= 2
+                    };
+                    if should_scan {
+                        self.easymotion_scan();
+                    } else {
+                        let prefix_display = self.easymotion.as_ref().unwrap().prefix.clone();
+                        self.set_status_msg(
+                            &format!("EasyMotion: {}_", prefix_display),
+                            MessageKind::Info,
+                        );
+                    }
+                }
+                _ => {}
+            },
+
+            EasyMotionPhase::Selecting => match key.code {
+                KeyCode::Esc => {
+                    self.easymotion = None;
+                    self.clear_status_msg();
+                }
+                KeyCode::Backspace => {
+                    let em = self.easymotion.as_mut().unwrap();
+                    em.partial_label.pop();
+                    // Stay in selecting; the next render will show the wider set.
+                }
+                KeyCode::Char(c) => {
+                    let action = {
+                        let em = self.easymotion.as_mut().unwrap();
+                        em.partial_label.push(c);
+
+                        if em.partial_label.len() >= em.label_len {
+                            let label = em.partial_label.clone();
+                            match em.targets.iter().find(|t| t.label == label) {
+                                Some(target) => Some((target.row, target.col)),
+                                None => None, // no match → cancel below
+                            }
+                        } else {
+                            None // not yet complete, keep waiting
+                        }
+                    }; // em borrow ends here
+
+                    // Now decide outside the borrow
+                    let em_ref = self.easymotion.as_ref();
+                    let label_len = em_ref.as_ref().map(|e| e.label_len).unwrap_or(1);
+                    let partial_len = em_ref.as_ref().map(|e| e.partial_label.len()).unwrap_or(0);
+                    let done = partial_len >= label_len;
+
+                    if done {
+                        if let Some((target_row, target_col)) = action {
+                            self.easymotion = None;
+                            self.clear_status_msg();
+                            self.active_window_mut().save_jump_position();
+                            let win = self.active_window_mut();
+                            win.row = target_row;
+                            win.col = target_col;
+                            win.desired_col = target_col;
+                            self.snap_cursor_to_viewport();
+                        } else {
+                            self.easymotion = None;
+                            self.set_status_msg("No such EasyMotion target", MessageKind::Error);
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    /// Scan the visible viewport for the 2-char prefix and assign labels.
+    fn easymotion_scan(&mut self) {
+        let prefix = self.easymotion.as_ref().unwrap().prefix.clone();
+        let (scroll, viewport_h) = {
+            let win = self.active_window();
+            (win.scroll_line, win.position.height)
+        };
+        let buf = self.buf();
+
+        let start_line = scroll;
+        let end_line = (scroll + viewport_h).min(buf.len_lines());
+
+        let mut targets = Vec::new();
+
+        for row in start_line..end_line {
+            let line = buf.line_text(row);
+            let line_trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+            let mut search_start = 0;
+
+            while let Some(byte_pos) = line_trimmed[search_start..].find(&prefix) {
+                let abs_byte = search_start + byte_pos;
+                // Convert byte offset → char offset (win.col is char-based)
+                let char_col = line_trimmed[..abs_byte].chars().count();
+                targets.push(EasyMotionTarget {
+                    row,
+                    col: char_col,
+                    label: String::new(),
+                });
+                search_start = abs_byte + prefix.len();
+            }
+        }
+
+        if targets.is_empty() {
+            self.set_status_msg(&format!("No matches for '{}'", prefix), MessageKind::Error);
+            self.easymotion = None;
+            return;
+        }
+
+        // ── Assign labels ──────────────────────────────────────────
+        let count = targets.len();
+        let label_len = if count <= 26 { 1 } else { 2 };
+
+        for (i, target) in targets.iter_mut().enumerate() {
+            target.label = if label_len == 1 {
+                let c = (b'a' + i as u8) as char;
+                c.to_string()
+            } else {
+                let first = (b'a' + (i / 26) as u8) as char;
+                let second = (b'a' + (i % 26) as u8) as char;
+                format!("{}{}", first, second)
+            };
+        }
+
+        // ── Single target → auto-jump ──────────────────────────────
+        if targets.len() == 1 {
+            let target = targets.into_iter().next().unwrap();
+            self.easymotion = None;
+            self.clear_status_msg();
+            self.active_window_mut().save_jump_position();
+            let win = self.active_window_mut();
+            win.row = target.row;
+            win.col = target.col;
+            win.desired_col = target.col;
+            self.snap_cursor_to_viewport();
+            return;
+        }
+
+        let em = self.easymotion.as_mut().unwrap();
+        em.targets = targets;
+        em.phase = EasyMotionPhase::Selecting;
+        em.label_len = label_len;
+        em.partial_label = String::new();
+
+        self.set_status_msg(
+            &format!("EasyMotion: {} — type label to jump", prefix),
+            MessageKind::Info,
+        );
     }
 }

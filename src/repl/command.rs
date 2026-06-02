@@ -617,17 +617,43 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             let comment = s.strip_prefix("stash ").unwrap().trim();
             editor.handle_stash_command(comment);
         }
-        // In the match block, replace the current "llm" arm:
+        // ---- LLM Commands ----
         "llm" => {
+            let selection_text = if had_visual_range {
+                sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+            } else {
+                None
+            };
+            if let Some(text) = selection_text {
+                editor.llm.active_context = Some(text);
+            }
             editor.open_llm_chat_session();
         }
         s if s.starts_with("llm ") => {
-            // :llm <message> — send without opening the split UI
             let msg = s.strip_prefix("llm ").unwrap().trim().to_string();
             if msg.is_empty() {
+                let selection_text = if had_visual_range {
+                    sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                } else {
+                    None
+                };
+                if let Some(text) = selection_text {
+                    editor.llm.active_context = Some(text);
+                }
                 editor.open_llm_chat_session();
             } else {
-                editor.llm_send_from_prompt(msg);
+                // One-shot: inline the selection into the message directly
+                let selection_text = if had_visual_range {
+                    sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                } else {
+                    None
+                };
+                if let Some(sel) = selection_text {
+                    let full_msg = format!("Selected code:\n```\n{}\n```\n\n{}", sel, msg);
+                    editor.llm_send_from_prompt(full_msg);
+                } else {
+                    editor.llm_send_from_prompt(msg);
+                }
             }
         }
         // Restore prompt aliases — these were lost in the refactor
@@ -639,7 +665,17 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             }
             .trim();
             if !prompt_text.is_empty() {
-                editor.llm_send_from_prompt(prompt_text.to_string());
+                let selection_text = if had_visual_range {
+                    sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                } else {
+                    None
+                };
+                if let Some(sel) = selection_text {
+                    let full_msg = format!("Selected code:\n```\n{}\n```\n\n{}", sel, prompt_text);
+                    editor.llm_send_from_prompt(full_msg);
+                } else {
+                    editor.llm_send_from_prompt(prompt_text.to_string());
+                }
             } else {
                 editor.set_status_msg("Usage: :prompt <message>", MessageKind::Error);
             }

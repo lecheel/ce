@@ -340,14 +340,32 @@ impl Editor {
         let prev_idx = self.active_window_idx;
         self.clamp_window_row_to_buf(prev_idx);
 
-        // Back to input pane — this is the one the user types in
+        // Back to input pane
         self.focus_next_window();
 
-        // Sanity check: active window must be showing the input buffer
         debug_assert_eq!(self.active_window().buffer_id(), input_id);
 
-        // Set cursor to end of input buffer (it's empty, so row=0 col=0)
-        {
+        // ── Pre-populate input buffer with selection context ──────
+        // The user sees what will be sent, can edit/trim it, then sends.
+        // active_context is also kept so follow-up messages include it.
+        if let Some(context) = self.llm.active_context.clone() {
+            let template = format!("\n{}\n\n", context);
+            if let Some(buf) = self.buf_mut_by_id(input_id) {
+                buf.rope = ropey::Rope::from_str(&template);
+                buf.mark_modified();
+                buf.parse_syntax();
+            }
+            // Read line count first, then take the mutable borrow
+            let line_count = self.buf_by_id(input_id).map(|b| b.len_lines()).unwrap_or(1);
+            {
+                let win = self.active_window_mut();
+                win.row = line_count.saturating_sub(1);
+                win.col = 0;
+                win.scroll_line = 0;
+                win.scroll_col = 0;
+                win.desired_col = 0;
+            }
+        } else {
             let win = self.active_window_mut();
             win.row = 0;
             win.col = 0;
@@ -359,10 +377,15 @@ impl Editor {
         self.enter_insert();
 
         let backend = self.config.llm_backend;
+        let context_info = if self.llm.active_context.is_some() {
+            " (with selection context)"
+        } else {
+            ""
+        };
         self.set_status_msg(
             &format!(
-                "LLM input [{}] — Enter: newline  Ctrl-Enter: send  q(normal): close",
-                backend
+                "LLM input [{}]{} — Enter: newline  Ctrl-Enter: send  q(normal): close",
+                backend, context_info
             ),
             MessageKind::Info,
         );
@@ -416,21 +439,19 @@ impl Editor {
     }
 
     pub fn llm_close_split_session(&mut self) -> CommandResult {
+        self.llm.active_context = None;
         self.close_window(true);
         CommandResult::Handled
     }
 
     /// Close the LLM buffer view by switching to a normal buffer.
-    /// Used when 'q' is pressed in an LLM buffer but there's no split to close.
-    /// Unlike `llm_close_split_session`, this will NOT quit the app if it's
-    /// the only window.
     pub fn llm_close_buffer(&mut self) {
         if !matches!(self.buf().kind, BufferKind::Llm | BufferKind::LlmInput) {
             return;
         }
 
-        // Prefer a real file buffer; fall back to any Normal buffer;
-        // as a last resort create a fresh unnamed buffer rather than quitting.
+        self.llm.active_context = None;
+
         let target_id = self
             .buffers
             .iter()
@@ -441,8 +462,6 @@ impl Editor {
         match target_id {
             Some(id) => self.switch_window_to_buffer(id),
             None => {
-                // No normal buffer at all — open a fresh unnamed one
-                // rather than leaving the user stuck in an LLM buffer.
                 self.open_buffer(None);
             }
         }
@@ -486,12 +505,21 @@ impl Editor {
             .clone()
             .unwrap_or_else(|| self.config.llm_system_prompt.clone());
 
+        // ── Include active_context (visual selection) if set ──────
+        let user_msg = if let Some(context) = &self.llm.active_context {
+            format!(
+                "Selected code for reference:\n```\n{}\n```\n\n{}",
+                context, input
+            )
+        } else {
+            input
+        };
+
         let messages = vec![
             ("system".to_string(), system_prompt),
-            ("user".to_string(), input),
+            ("user".to_string(), user_msg),
         ];
 
-        // Use the general llm_backend for chat
         self.spawn_llm_request_with_backend(messages, backend);
         CommandResult::Handled
     }
