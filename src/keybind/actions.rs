@@ -248,7 +248,6 @@ impl Action {
         let s = s.trim();
 
         // ── Conditional chain: "toggle_comment && move_down" ──────
-        // MUST check before "|" since "&&" could coexist
         if s.contains("&&") {
             let parts: Vec<&str> = s.split("&&").map(|p| p.trim()).collect();
             if parts.len() > 1 {
@@ -274,25 +273,17 @@ impl Action {
 
         let lower = s.to_lowercase().replace('_', "");
 
-        // dynamic variants...
-        if lower.starts_with("switchbuffer") || lower.starts_with("buf") {
-            // ... existing switchbuffer handling
-            let idx = if lower.starts_with("buf") {
-                lower
-                    .trim_start_matches("buf")
-                    .parse::<usize>()
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-            } else {
-                lower
-                    .trim_start_matches("switchbuffer")
-                    .parse::<usize>()
-                    .unwrap_or(1)
-                    .saturating_sub(1)
-            };
+        // ── FIX: Only match "switchbuffer:N" or "bufN" (digit immediately after) ──
+        if lower.starts_with("switchbuffer:") {
+            let idx_str = lower.trim_start_matches("switchbuffer:");
+            let idx: usize = idx_str
+                .parse::<usize>() // Specified the type here
+                .map_err(|_| anyhow::anyhow!("Invalid switch_buffer index: {}", idx_str))?
+                .saturating_sub(1); // 1-based to 0-based
             return Ok(Action::SwitchBuffer(idx));
         }
 
+        // ── Standard strum-based parsing for all other actions ──────
         if let Ok(action) = s.parse::<Self>() {
             return Ok(action);
         }
