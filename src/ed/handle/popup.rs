@@ -5,26 +5,118 @@ use crate::popup::PopupContent;
 use crate::Editor;
 
 impl Editor {
-    pub fn handle_popup_key(&mut self, key: KeyEvent) {
-        // ── Scankey mode ──────────────────────────────────────────────
-        if matches!(self.popup.content, Some(PopupContent::Scankey { .. })) {
-            self.handle_scankey(key);
+    fn handle_config_popup(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(PopupContent::Config { selected, .. }) = &mut self.popup.content {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(PopupContent::Config {
+                    selected, items, ..
+                }) = &mut self.popup.content
+                {
+                    if *selected + 1 < items.len() {
+                        *selected += 1;
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.toggle_config_item();
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.popup.close();
+            }
+            _ => {}
+        }
+    }
+
+    // ── Completion popup key handler ─────────────────────────────────────────
+    //
+    // The popup is for LSP / buffer / vocab word selection.
+    // When an AI ghost is active the popup must NOT be shown; Tab/→ should
+    // accept the ghost instead (handled in handle_key's ghost intercept block).
+
+    pub fn handle_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        // ── Guard: AI ghost takes priority over LSP popup ───────────────
+        // If a multi-line ghost is displayed, swallow popup-navigation keys
+        // silently so they don't interfere.  Single-key ghost dismissal is
+        // already handled in the ghost-intercept block in handle_key().
+        if self.comp.has_ghost() {
+            // Let the ghost-intercept block in handle_key() deal with it.
+            return;
+        }
+        if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
 
-        // ── Config / generic popup ────────────────────────────────────
+        let popup_kind = self.popup.kind.clone();
+        match popup_kind {
+            Some(crate::popup::PopupKind::Completion) => {
+                self.handle_completion_popup_key(key);
+            }
+            Some(crate::popup::PopupKind::Config) => {
+                self.handle_config_popup(key);
+            }
+            Some(crate::popup::PopupKind::Scankey) => {
+                self.handle_scankey(key);
+            }
+            _ => {
+                // Default: Esc closes any unrecognised popup.
+                if key.code == KeyCode::Esc {
+                    self.popup.close();
+                }
+            }
+        }
+    }
+
+    /// Internal handler for the word-completion popup (LSP / buffer / vocab).
+    fn handle_completion_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
         match key.code {
+            // ── Navigation ──────────────────────────────────────────────
+            KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cycle_completion(1);
+            }
+            KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cycle_completion(-1);
+            }
+
+            // ── Accept ───────────────────────────────────────────────────
+            // Tab and → accept the ghost / selected item.
+            // This mirrors the ghost-text intercept in handle_key() but
+            // is reached when the popup is visually open.
+            KeyCode::Tab | KeyCode::Right if key.modifiers.is_empty() => {
+                crate::keybind::bindings::execute_action(
+                    self,
+                    crate::keybind::bindings::Action::AcceptCompletion,
+                );
+            }
+            KeyCode::Enter => {
+                crate::keybind::bindings::execute_action(
+                    self,
+                    crate::keybind::bindings::Action::AcceptCompletion,
+                );
+            }
+
+            // ── Dismiss ──────────────────────────────────────────────────
             KeyCode::Esc => {
+                self.comp.reset_to_idle();
                 self.popup.close();
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.popup.config_next();
+
+            // ── Any other key: close popup and fall through ──────────────
+            _ => {
+                self.popup.close();
+                // Re-dispatch so the character is actually inserted.
+                self.handle_key(key);
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.popup.config_prev();
-            }
-            KeyCode::Char(' ') => self.toggle_config_item(),
-            _ => {}
         }
     }
 

@@ -7,7 +7,7 @@ use strum::{AsRefStr, EnumIter, EnumString};
 // ---------------------------------------------------------------------------
 // Action — representation of all editor commands
 // ---------------------------------------------------------------------------
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,  AsRefStr, EnumString, EnumIter)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize,  AsRefStr, EnumString, EnumIter)]
 #[strum(serialize_all = "snake_case")] // MoveLeft -> "move_left" automatically
 #[strum(ascii_case_insensitive)]
 #[rustfmt::skip]
@@ -57,6 +57,8 @@ pub enum Action {
     CycleCompletionNext,
     CycleCompletionPrev,
     ManualComplete,
+    ToggleTrueFalse,
+    SwissKnife,
 
     // Command Line
     ExecuteCommand,
@@ -231,16 +233,50 @@ pub enum Action {
     CommandChar(char),
     #[strum(disabled)]
     SwitchBuffer(usize),
+    // Chained actions from config "action1 | action2"
+    #[strum(disabled)]
+    Chain(Vec<Action>),
+    // Conditional chain "action1 && action2" — stops on first failure
+    #[strum(disabled)]
+    Then(Vec<Action>),    
 }
 
 impl Action {
     /// Parses an action string, handling strum aliases and dynamic variants.
     /// Replaces the standard `FromStr` to support custom logic.
     pub fn parse(s: &str) -> Result<Self, anyhow::Error> {
+        let s = s.trim();
+
+        // ── Conditional chain: "toggle_comment && move_down" ──────
+        // MUST check before "|" since "&&" could coexist
+        if s.contains("&&") {
+            let parts: Vec<&str> = s.split("&&").map(|p| p.trim()).collect();
+            if parts.len() > 1 {
+                let actions: Vec<Action> = parts
+                    .iter()
+                    .map(|p| Action::parse(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Action::Then(actions));
+            }
+        }
+
+        // ── Chain: "search_next | move_down" ──────────────────────
+        if s.contains('|') {
+            let parts: Vec<&str> = s.split('|').map(|p| p.trim()).collect();
+            if parts.len() > 1 {
+                let actions: Vec<Action> = parts
+                    .iter()
+                    .map(|p| Action::parse(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Action::Chain(actions));
+            }
+        }
+
         let lower = s.to_lowercase().replace('_', "");
 
-        // 1. Handle dynamic tuple variants manually
+        // dynamic variants...
         if lower.starts_with("switchbuffer") || lower.starts_with("buf") {
+            // ... existing switchbuffer handling
             let idx = if lower.starts_with("buf") {
                 lower
                     .trim_start_matches("buf")
@@ -257,15 +293,10 @@ impl Action {
             return Ok(Action::SwitchBuffer(idx));
         }
 
-        // 2. Let Strum handle the heavy lifting!
-        // This automatically covers all the snake_case names, CamelCase names,
-        // and all the #[strum(serialize = "...")] aliases like "dd", "yy", "daf", etc.
         if let Ok(action) = s.parse::<Self>() {
             return Ok(action);
         }
 
-        // 3. Fallback for squished no-underscore strings that strum doesn't natively generate
-        // (e.g. "deletecurrentline" instead of "delete_current_line")
         if let Ok(action) = lower.parse::<Self>() {
             return Ok(action);
         }
@@ -286,7 +317,8 @@ impl Action {
             Action::SwitchBuffer(n) => format!("switch_buffer_{}", n + 1),
             Action::InsertChar(_) => "insert_char".to_string(),
             Action::CommandChar(_) => "command_char".to_string(),
-
+            Action::Chain(_) => "chain".to_string(),
+            Action::Then(_) => "then".to_string(),
             // Every other variant is fully automatic!
             // e.g., Action::MoveLeft.as_ref() -> "move_left"
             _ => self.as_ref().to_string(),
@@ -296,26 +328,34 @@ impl Action {
     /// Returns true if this action is a "jump" motion that should update
     /// the jump-back register for `` (backtick) ping-pong.
     pub fn is_jump(&self) -> bool {
-        matches!(
-            self,
-            Action::MoveToFirstLine
-                | Action::MoveToLastLine
-                | Action::PageUp
-                | Action::PageDown
-                | Action::SearchNext
-                | Action::SearchPrev
-                | Action::SearchCurrentWord
-                | Action::MatchBracket
-                | Action::TagJump
-                | Action::HunkNext
-                | Action::HunkPrev // Note: BookmarkGoto and JumpLastPosition handle their own
-                                   // jump-back saving internally, so they are excluded here.
-        )
+        match self {
+            Action::Chain(ref actions) | Action::Then(ref actions) => {
+                actions.iter().any(|a| a.is_jump())
+            }
+            _ => matches!(
+                self,
+                Action::MoveToFirstLine
+                    | Action::MoveToLastLine
+                    | Action::PageUp
+                    | Action::PageDown
+                    | Action::SearchNext
+                    | Action::SearchPrev
+                    | Action::SearchCurrentWord
+                    | Action::MatchBracket
+                    | Action::TagJump
+                    | Action::HunkNext
+                    | Action::HunkPrev // Note: BookmarkGoto and JumpLastPosition handle their own
+                                       // jump-back saving internally, so they are excluded here.
+            ),
+        }
     }
 
     /// Returns true if this action modifies the buffer text.
     /// Used to gate expensive operations like syntax parsing.
     pub fn modifies_buffer(&self) -> bool {
+        if let Action::Chain(ref actions) | Action::Then(ref actions) = self {
+            return actions.iter().any(|a| a.modifies_buffer());
+        }
         matches!(
             self,
             Action::Backspace
@@ -356,6 +396,8 @@ impl Action {
                 | Action::ToggleComment
                 | Action::BriefCopySelection
                 | Action::BriefCutSelection
+                | Action::ToggleTrueFalse
+                | Action::SwissKnife
         )
     }
 }

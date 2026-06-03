@@ -123,10 +123,10 @@ pub fn find_custom_action(config: &Config, key_seq: &str, mode: Mode) -> Option<
         let normalized_bind = normalize_config_key(bind);
         let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
         if resolved_bind == key_seq {
-            return match action_str.parse::<Action>() {
-                Ok(a) => Some(a),
-                Err(_) => None,
-            };
+            // ✅ FIX: Use Action::parse to handle "|" chains
+            if let Ok(a) = Action::parse(action_str) {
+                return Some(a);
+            }
         }
     }
 
@@ -136,7 +136,10 @@ pub fn find_custom_action(config: &Config, key_seq: &str, mode: Mode) -> Option<
             let normalized_bind = normalize_config_key(bind);
             let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
             if resolved_bind == key_seq {
-                return action_str.parse::<Action>().ok();
+                // ✅ FIX: Use Action::parse to handle "|" chains
+                if let Ok(a) = Action::parse(action_str) {
+                    return Some(a);
+                }
             }
         }
     }
@@ -146,7 +149,10 @@ pub fn find_custom_action(config: &Config, key_seq: &str, mode: Mode) -> Option<
         let normalized_bind = normalize_config_key(bind);
         let resolved_bind = normalized_bind.replace("<leader>", &config.leader);
         if resolved_bind == key_seq {
-            return action_str.parse::<Action>().ok();
+            // ✅ FIX: Use Action::parse to handle "|" chains
+            if let Ok(a) = Action::parse(action_str) {
+                return Some(a);
+            }
         }
     }
 
@@ -165,7 +171,8 @@ pub fn find_custom_prefix_actions(config: &Config, key_seq: &str, mode: Mode) ->
             let norm = resolved_bind.to_lowercase();
 
             if norm.starts_with(&key_lower) && norm.len() > key_lower.len() {
-                if let Ok(action) = action_str.parse::<Action>() {
+                // ✅ FIX: Use Action::parse to handle "|" chains
+                if let Ok(action) = Action::parse(action_str) {
                     if !actions.contains(&action) {
                         actions.push(action);
                     }

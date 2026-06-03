@@ -191,6 +191,21 @@ pub struct Editor {
     pub easymotion: Option<EasyMotionState>,
     pub pending_lsp_goto: Option<PendingLspGoto>,
 
+    pub copilot_auth_rx:
+        Option<std::sync::mpsc::Receiver<crate::ai::copilot::auth::CopilotAuthMsg>>,
+
+    /// Handle to submit completion requests to the Copilot background task.
+    pub copilot_handle: Option<crate::ai::copilot::server::CopilotHandle>,
+
+    /// Channel to receive Copilot completion responses.
+    pub copilot_response_rx:
+        Option<std::sync::mpsc::Receiver<crate::ai::copilot::server::CopilotResponse>>,
+
+    /// Set to `true` inside `execute_action` when an action fails
+    /// (e.g. buffer is read-only, no text object found).
+    /// Reset to `false` at the start of each `execute_action` call.
+    pub action_failed: bool,
+
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
 }
@@ -306,6 +321,10 @@ impl Editor {
             lsp_full_active: false,
             easymotion: None,
             pending_lsp_goto: None,
+            copilot_auth_rx: None,
+            copilot_handle: None,
+            copilot_response_rx: None,
+            action_failed: false,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -978,32 +997,42 @@ impl Editor {
             return;
         }
 
-        // ── Normal / Insert / Command / Search / Visual handling ───
         let ghost_active = self.comp.has_ghost();
 
         //-- 1. Intercept typing and command modes (Insert/Brief/Command) and return early --//
+        // ── Ghost-text navigation (Insert / Brief modes) ─────────────────────
+        if matches!(self.mode, Mode::Insert | Mode::Brief) && ghost_active {
+            match key.code {
+                KeyCode::Down => {
+                    self.cycle_completion(1);
+                    return;
+                }
+                KeyCode::Up => {
+                    self.cycle_completion(-1);
+                    return;
+                }
+                KeyCode::Right | KeyCode::Char('\t') if key.modifiers.is_empty() => {
+                    crate::keybind::bindings::execute_action(self, Action::AcceptCompletion);
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.comp.reset_to_idle();
+                    return;
+                }
+                _ => {
+                    self.comp.reset_to_idle();
+                    // fall through
+                }
+            }
+        }
+
         if self.mode == Mode::Insert || self.mode == Mode::Command || self.mode == Mode::Search {
             let key_str = crate::keybind::binding_ex::format_key(key);
-            let action = crate::keybind::bindings::resolve_single_key(
-                &self.config,
-                &key_str,
-                self.mode,
-                ghost_active,
-                key,
-            );
-            log::debug!(
-                "[key] mode={:?} key_str={:?} raw={:?} mod={:?} → {:?}",
-                self.mode,
-                key_str,
-                key.code,
-                key.modifiers,
-                action
-            );
             if let Some(action) = crate::keybind::bindings::resolve_single_key(
                 &self.config,
                 &key_str,
                 self.mode,
-                ghost_active,
+                false, // ghost already handled above
                 key,
             ) {
                 crate::keybind::execute_action(self, action);
@@ -1345,7 +1374,7 @@ impl Editor {
                     .command_palette
                     .as_ref()
                     .and_then(|p| p.selected_entry())
-                    .map(|e| e.action);
+                    .map(|e| e.action.clone());
                 if let Some(action) = action {
                     self.popup.close();
                     crate::keybind::bindings::execute_action(self, action);
@@ -1647,20 +1676,16 @@ impl Editor {
 
 impl Editor {
     /// Called by the main loop on every edit while in Insert/Brief mode.
-    /// Called by the main loop on every edit while in Insert/Brief mode.
+    ///
+    /// Fires fast (synchronous / low-latency) sources immediately.
+    /// AI sources (Codeium, Copilot) are intentionally NOT fired here —
+    /// they are triggered from `poll_completion()` after `ai_idle_ms` of
+    /// silence so that rapid typing never spawns redundant AI requests.
     pub fn on_completion_edit(&mut self) {
         self.comp.on_edit();
 
         let prefix = self.get_current_word_prefix();
-
         let is_path_prefix = prefix.starts_with("./");
-
-        if is_path_prefix && prefix.len() < 2 {
-            return;
-        }
-        if !is_path_prefix && prefix.len() < 4 {
-            return;
-        }
 
         self.comp.set_prefix(prefix.clone());
 
@@ -1669,8 +1694,10 @@ impl Editor {
             (win.row, win.col)
         };
 
-        // ── Source 1: FilePaths (Inline Ghost Text) ────────────────
-        if is_path_prefix {
+        let min_word_prefix: usize = 4;
+
+        // ── Source 1: FilePaths (ghost text, triggered by "./" prefix) ──
+        if is_path_prefix && prefix.len() >= 2 {
             let (_req_id, version) = self.comp.start_source_request(CompletionSource::FilePaths);
             let matches = crate::comp::path_complete::complete_path(&prefix);
             self.comp
@@ -1681,8 +1708,11 @@ impl Editor {
                 .merge_source(CompletionSource::FilePaths, Vec::new(), version);
         }
 
-        // ── Source 2: Buffer words (fast, sync) ────────────────────
-        if self.config.buffer_word_scan && !self.buffer_words.is_empty() {
+        // ── Source 2: Buffer words (prefix ≥ 4) ─────────────────────────
+        if self.config.buffer_word_scan
+            && !self.buffer_words.is_empty()
+            && prefix.len() >= min_word_prefix
+        {
             let (_req_id, version) = self
                 .comp
                 .start_source_request(CompletionSource::BufferWords);
@@ -1697,8 +1727,8 @@ impl Editor {
                 .merge_source(CompletionSource::BufferWords, matches, version);
         }
 
-        // ── Source 3: Vocab words (fast, sync) ─────────────────────
-        if !self.vocab_words.is_empty() {
+        // ── Source 3: Vocab words (prefix ≥ 4) ──────────────────────────
+        if !self.vocab_words.is_empty() && prefix.len() >= min_word_prefix {
             let (_req_id, version) = self.comp.start_source_request(CompletionSource::VocabWords);
             let matches: Vec<String> = self
                 .vocab_words
@@ -1711,7 +1741,8 @@ impl Editor {
                 .merge_source(CompletionSource::VocabWords, matches, version);
         }
 
-        // ── Source 4: LSP (async — response arrives in poll_lsp_responses) ──
+        // ── Source 4: LSP — fires on every keystroke, no min-prefix ─────
+        //   (RA and other servers filter by prefix on their end.)
         if self.lsp_full_active && self.config.lsp_completion_enabled {
             let (_req_id, version) = self.comp.start_source_request(CompletionSource::Lsp);
             if let Some(filename) = self.active_filename() {
@@ -1724,9 +1755,18 @@ impl Editor {
                     .merge_source(CompletionSource::Lsp, Vec::new(), version);
             }
         }
+
+        // ── Sources 5 & 6: Codeium / Copilot — NOT fired here. ──────────
+        //   They are idle-debounced inside poll_completion() (500 ms).
+        //   We intentionally do NOT call start_source_request() for them here
+        //   so that the pending-source map doesn't hold them open on every
+        //   keystroke.
     }
 
-    /// Handle LSP completion response — called from handle_lsp_message.
+    // -----------------------------------------------------------------------
+    // LSP completion helpers (unchanged)
+    // -----------------------------------------------------------------------
+
     pub fn apply_lsp_completion(&mut self, items: Option<Vec<CompletionItem>>, version: u64) {
         let prefix = self.comp.prefix().to_string();
         let prefix_lower = prefix.to_lowercase();
@@ -1734,7 +1774,6 @@ impl Editor {
             Some(items) => items
                 .into_iter()
                 .filter_map(|item| {
-                    // Use filter_text if the server provides it, else label
                     let filter_key = item.filter_text.as_deref().unwrap_or(&item.label);
                     if !prefix.is_empty() && !filter_key.to_lowercase().starts_with(&prefix_lower) {
                         return None;
@@ -1748,10 +1787,8 @@ impl Editor {
             .merge_source(CompletionSource::Lsp, labels, version);
     }
 
-    /// LSP response handler — called when the LSP server replies.
     pub fn ingest_lsp_completion(&mut self, request_id: usize, version: u64, items: Vec<String>) {
         let expected = self.comp.get_pending_request_id(CompletionSource::Lsp);
-
         match expected {
             Some(id) if id == request_id => {
                 self.comp
@@ -2646,5 +2683,246 @@ impl Editor {
             &format!("EasyMotion: {} — type label to jump", prefix),
             MessageKind::Info,
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Copilot Auth
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl Editor {
+    /// Kick off the Copilot authentication flow in a background thread.
+    /// Only starts when `copilot_enabled` is true in config.
+    pub fn copilot_auth(&mut self) {
+        if !self.config.copilot_enabled {
+            self.set_status_msg(
+                "Copilot is disabled. Set copilot_enabled: true in config.",
+                MessageKind::Error,
+            );
+            return;
+        }
+
+        if self.copilot_auth_rx.is_some() {
+            self.set_status_msg("Copilot auth already in progress...", MessageKind::Info);
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<crate::ai::copilot::auth::CopilotAuthMsg>();
+        self.copilot_auth_rx = Some(rx);
+
+        self.set_status_msg("Requesting Copilot device code...", MessageKind::Info);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let client = reqwest::Client::new();
+
+                // 1. Request device code
+                let res = client
+                    .post("https://github.com/login/device/code")
+                    .header("User-Agent", "copilot-cli/0.1.0")
+                    .header("Accept", "application/json")
+                    .form(&[
+                        ("client_id", "Iv1.b507a08c87ecfe98"),
+                        ("scope", "read:user"),
+                    ])
+                    .send()
+                    .await;
+
+                let resp = match res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(format!(
+                            "Auth request failed: {}",
+                            e
+                        )));
+                        return;
+                    }
+                };
+
+                let device: crate::ai::copilot::types::DeviceCodeResponse =
+                    match resp.json().await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(
+                                format!("Parse device code failed: {}", e),
+                            ));
+                            return;
+                        }
+                    };
+
+                let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::DeviceCode(
+                    device.verification_uri.clone(),
+                    device.user_code.clone(),
+                ));
+
+                // Try to open browser
+                if let Err(e) = crate::ai::copilot::auth::open_browser(&device.verification_uri) {
+                    log::debug!("Could not open browser automatically: {}", e);
+                }
+
+                // 2. Poll for access token
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(device.expires_in as u64);
+                let mut interval = device.interval.max(5) as u64;
+
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(interval));
+
+                    if std::time::Instant::now() > deadline {
+                        let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(
+                            "Copilot auth timed out".into(),
+                        ));
+                        return;
+                    }
+
+                    let poll_res = client
+                        .post("https://github.com/login/oauth/access_token")
+                        .header("User-Agent", "copilot-cli/0.1.0")
+                        .header("Accept", "application/json")
+                        .form(&[
+                            ("client_id", "Iv1.b507a08c87ecfe98"),
+                            ("device_code", &device.device_code),
+                            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                        ])
+                        .send()
+                        .await;
+
+                    match poll_res {
+                        Ok(poll_resp) => {
+                            if let Ok(result) = poll_resp
+                                .json::<crate::ai::copilot::types::DeviceAccessTokenResponse>()
+                                .await
+                            {
+                                if let Some(error) = &result.error {
+                                    match error.as_str() {
+                                        "authorization_pending" => continue,
+                                        "slow_down" => {
+                                            interval += 5;
+                                            continue;
+                                        }
+                                        _ => {
+                                            let _ = tx.send(
+                                                crate::ai::copilot::auth::CopilotAuthMsg::Error(
+                                                    format!("Auth error: {}", error),
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                    }
+                                } else if let Some(access_token) = result.access_token {
+                                    let _ =
+                                        tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Success(
+                                            access_token,
+                                        ));
+                                    return;
+                                } else {
+                                    let _ =
+                                        tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(
+                                            "No token received".into(),
+                                        ));
+                                    return;
+                                }
+                            }
+                        }
+                        Err(_) => continue, // Network error, retry
+                    }
+                }
+            });
+        });
+    }
+
+    /// Poll for Copilot completion responses and merge them into the
+    /// completion machine.  Call this from the main tick handler.
+    pub fn poll_copilot_completions(&mut self) {
+        if !self.config.copilot_enabled {
+            if let Some(rx) = &mut self.copilot_response_rx {
+                while rx.try_recv().is_ok() {}
+            }
+            return;
+        }
+
+        let messages: Vec<_> = {
+            let Some(rx) = &mut self.copilot_response_rx else {
+                return;
+            };
+            std::iter::from_fn(|| rx.try_recv().ok()).collect()
+        };
+
+        for msg in messages {
+            match msg {
+                crate::ai::copilot::server::CopilotResponse::Items { version, items } => {
+                    self.comp
+                        .merge_source(CompletionSource::Copilot, items, version);
+                }
+                crate::ai::copilot::server::CopilotResponse::Error { version, error } => {
+                    log::debug!("Copilot completion error: {}", error);
+                    self.comp
+                        .merge_source(CompletionSource::Copilot, Vec::new(), version);
+                }
+                crate::ai::copilot::server::CopilotResponse::ReauthResult { ok } => {
+                    if ok {
+                        log::info!("Copilot re-authenticated successfully.");
+                    } else {
+                        log::warn!("Copilot re-auth failed — token may still be invalid.");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Poll for Copilot auth messages (call this from the main loop).
+    pub fn poll_copilot_auth(&mut self) {
+        if !self.config.copilot_enabled {
+            // Drain and discard any stale messages
+            if let Some(rx) = &mut self.copilot_auth_rx {
+                while rx.try_recv().is_ok() {}
+                self.copilot_auth_rx = None;
+            }
+            return;
+        }
+        let messages: Vec<_> = {
+            let Some(rx) = &mut self.copilot_auth_rx else {
+                return;
+            };
+            std::iter::from_fn(|| rx.try_recv().ok()).collect()
+        };
+
+        for msg in messages {
+            match msg {
+                // In ed/editor.rs -> poll_copilot_auth()
+                crate::ai::copilot::auth::CopilotAuthMsg::DeviceCode(uri, code) => {
+                    // Put the CODE first so it never gets truncated on narrow screens!
+                    let msg = format!("Copilot Code: {} | Visit: {}", code, uri);
+                    self.set_status_msg(&msg, crate::ed::mode::MessageKind::Info);
+                }
+                crate::ai::copilot::auth::CopilotAuthMsg::Success(access_token) => {
+                    self.copilot_auth_rx = None; // Done
+                    match crate::ai::copilot::auth::AuthManager::save_token_to_hosts(&access_token)
+                    {
+                        Ok(path) => {
+                            self.config.api_key = Some(access_token);
+                            self.set_status_msg(
+                                &format!("Copilot authenticated! Token saved to {:?}", path),
+                                crate::ed::mode::MessageKind::Success,
+                            );
+                        }
+                        Err(e) => {
+                            self.set_status_msg(
+                                &format!("Auth succeeded but failed to save token: {}", e),
+                                crate::ed::mode::MessageKind::Error,
+                            );
+                        }
+                    }
+                }
+                crate::ai::copilot::auth::CopilotAuthMsg::Error(e) => {
+                    self.copilot_auth_rx = None; // Done
+                    self.set_status_msg(
+                        &format!("Copilot auth failed: {}", e),
+                        crate::ed::mode::MessageKind::Error,
+                    );
+                }
+            }
+        }
     }
 }

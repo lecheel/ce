@@ -1,3 +1,4 @@
+//--+ render/buffer_view.rs
 //! Main buffer area rendering (text, line numbers, ghost text, cursor).
 //!
 //! Supports multiple split windows rendered from the Editor's layout tree.
@@ -83,7 +84,7 @@ fn styled_spans_from_highlights(
     highlights: &[Option<Style>],
     selected_mask: &[bool],
     search_mask: &[bool],
-    line_bg: Option<Color>, // <-- NEW parameter
+    line_bg: Option<Color>,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if chars.is_empty() {
@@ -158,11 +159,18 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
     let active_idx = editor.active_window_index();
     let mode = editor.mode();
 
-    // ── Extract data from editor BEFORE the split borrow ──────────
+    // ── Extract ghost state BEFORE the split borrow ─────────────────────────
     let ghost_text = if mode == Mode::Insert || mode == Mode::Brief {
-        editor.ghost_text().map(|s| s.to_string())
+        editor.ghost_text_display()
     } else {
         None
+    };
+
+    // Continuation lines for multi-line AI ghost (lines 2..N).
+    let ghost_lines_below: Vec<String> = if mode == Mode::Insert || mode == Mode::Brief {
+        editor.comp.ghost_lines_below()
+    } else {
+        Vec::new()
     };
 
     let is_block_inserting = editor.visual_block_insert_state.is_some();
@@ -178,7 +186,6 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
             }
         });
 
-    // Split disjoint borrows: windows (read), buffers (mut), config (read)
     let windows = &editor.windows;
     let buffers = &mut editor.buffers;
     let config = &editor.config;
@@ -202,6 +209,7 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
         } else {
             None
         };
+        let ghost_below: &[String] = if is_active { &ghost_lines_below } else { &[] };
 
         let em_targets = if is_active {
             easymotion_targets.as_deref()
@@ -219,6 +227,7 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
                 mode,
                 is_active,
                 ghost,
+                ghost_below,
                 is_block_inserting,
                 block_insert_col,
                 search_query.as_deref(),
@@ -243,6 +252,7 @@ fn draw_pane(
     mode: Mode,
     is_active: bool,
     ghost_text: Option<&str>,
+    ghost_lines_below: &[String],
     is_block_inserting: bool,
     block_insert_col: Option<usize>,
     search_query: Option<&str>,
@@ -594,6 +604,20 @@ fn draw_pane(
         }
     }
 
+    // ── Multi-line AI ghost: render continuation rows ─────────────────────
+    // Overlay ghost continuation lines (lines 2..N of an AI suggestion) on
+    // top of the corresponding buffer rows that follow the cursor.
+    if !ghost_lines_below.is_empty() && is_active && matches!(mode, Mode::Insert | Mode::Brief) {
+        apply_ghost_continuation_rows(
+            &mut rendered,
+            ghost_lines_below,
+            cursor_row,
+            scroll,
+            area.width as usize,
+            gutter_width,
+        );
+    }
+
     while rendered.len() < viewport_height {
         let pad_str = " ".repeat(gutter_width);
         rendered.push(Line::from(vec![
@@ -614,6 +638,56 @@ fn draw_pane(
             }
             _ => {}
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Multi-line ghost continuation rows
+// ═══════════════════════════════════════════════════════════════════
+
+/// Render multi-line AI ghost continuation rows.
+///
+/// Must be called after the main per-row render loop has populated `rendered`,
+/// and before the trailing padding loop. For each continuation line, the
+/// already-rendered buffer row is replaced with a dimmed italic ghost overlay
+/// so the user sees the proposed text instead of the real buffer content —
+/// matching VS Code / Copilot behaviour.
+fn apply_ghost_continuation_rows(
+    rendered: &mut Vec<Line<'static>>,
+    ghost_lines_below: &[String],
+    cursor_row: usize,
+    scroll: usize,
+    area_width: usize,
+    gutter_width: usize,
+) {
+    if ghost_lines_below.is_empty() {
+        return;
+    }
+
+    let ghost_style = Style::default()
+        .fg(Color::Rgb(95, 95, 130))
+        .add_modifier(Modifier::ITALIC);
+
+    // cursor_row relative to the top of the viewport.
+    let cursor_vp_row = cursor_row.saturating_sub(scroll);
+
+    for (i, ghost_line_text) in ghost_lines_below.iter().enumerate() {
+        let vp_row = cursor_vp_row + 1 + i;
+        if vp_row >= rendered.len() {
+            break; // ran off the bottom of the visible area
+        }
+
+        let avail = area_width.saturating_sub(gutter_width);
+        let display: String = ghost_line_text.chars().take(avail).collect();
+        let pad_len = avail.saturating_sub(display.chars().count());
+
+        rendered[vp_row] = Line::from(vec![
+            // Gutter placeholder — keep same width so text aligns.
+            Span::raw(" ".repeat(gutter_width)),
+            Span::styled(display, ghost_style),
+            // Fill remainder so the row background is consistent.
+            Span::raw(" ".repeat(pad_len)),
+        ]);
     }
 }
 
@@ -809,7 +883,6 @@ fn compute_guide_depths(levels: &[(usize, bool)]) -> Vec<usize> {
 /// Inspects a line of text and determines what occupies `visual_col`.
 fn visual_col_content(line_text: &str, visual_col: usize, tab_size: usize) -> VisualColContent {
     let mut current_col = 0;
-    // Use chars().enumerate() instead of char_indices() to get character offsets rather than byte offsets
     for (char_idx, ch) in line_text.chars().enumerate() {
         let width = if ch == '\t' {
             tab_size - (current_col % tab_size)
@@ -818,12 +891,6 @@ fn visual_col_content(line_text: &str, visual_col: usize, tab_size: usize) -> Vi
         };
 
         if current_col == visual_col {
-            log::debug!(
-                "VIS_COL: visual_col={} exactly matched char_idx={} ch='{}'",
-                visual_col,
-                char_idx,
-                ch
-            );
             return if ch == ' ' {
                 VisualColContent::Space(char_idx)
             } else if ch == '\t' {
@@ -833,43 +900,18 @@ fn visual_col_content(line_text: &str, visual_col: usize, tab_size: usize) -> Vi
             };
         }
 
-        // The visual column falls in the middle of a wide char or tab
         if current_col < visual_col && current_col + width > visual_col {
-            log::debug!(
-                "VIS_COL: visual_col={} falls inside char_idx={} ch='{}' (cols {}..{})",
-                visual_col,
-                char_idx,
-                ch,
-                current_col,
-                current_col + width
-            );
             return if ch == '\t' {
                 VisualColContent::Tab
             } else {
-                VisualColContent::NonSpace // Wide CJK char
+                VisualColContent::NonSpace
             };
         }
         current_col += width;
     }
-    log::debug!(
-        "VIS_COL: visual_col={} is PastEnd (line visual width={})",
-        visual_col,
-        current_col
-    );
     VisualColContent::PastEnd
 }
 
-/// Apply indent guide characters to a line's character and style arrays.
-///
-/// For each indent level 1..=guide_depth the space at the visual column
-/// `level * tab_size - 1` is replaced with `│` and styled.
-///
-/// When the line is shorter than a guide position (truly empty line),
-/// the arrays are extended with blank padding so the guide can still
-/// be rendered — this makes guides continuous through blank lines.
-///
-/// If a guide position falls inside a tab or on a non-space character,
-/// the guide hides itself to avoid distorting alignment.
 /// Apply indent guide characters to a line's character and style arrays.
 ///
 /// For each indent level 1..=guide_depth the space at the visual column
@@ -898,8 +940,6 @@ fn apply_indent_guides(
     }
 
     for level in 1..=guide_depth {
-        // FIX: Draw the guide at the START of the indent level.
-        // Level 1 -> column 0, Level 2 -> column 4, Level 3 -> column 8, etc.
         let abs_pos = (level - 1) * tab_size;
 
         if abs_pos < hscroll {

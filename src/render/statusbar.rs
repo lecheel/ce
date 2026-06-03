@@ -1,3 +1,4 @@
+//--+ render/statusbar.rs
 //! Status bar rendering — Powerline arrow segments.
 
 use ratatui::{
@@ -204,28 +205,51 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, editor: &mut Editor) {
         None
     };
 
-    // ── LSP / Codeium indicator ────────────────────────────────────────────
-    // Muted, cool-toned slate colors instead of harsh red/brown
-    let lsp_bg = if !editor.config.codeium_enabled {
-        Color::Rgb(65, 50, 60) // Muted dark mauve/rose for OFF
-    } else if editor.lsp_loading() {
-        Color::Rgb(60, 60, 45) // Muted dark olive/amber for LOADING
-    } else {
-        Color::Rgb(30, 60, 50) // Muted dark teal for OK
-    };
-    let lsp_text = if !editor.config.codeium_enabled {
-        " Codeium OFF ".to_string()
-    } else if editor.lsp_loading() {
-        let frames = [
-            '\u{2807}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
-            '\u{2827}', '\u{2807}', '\u{280F}',
-        ];
-        format!(
-            " {} Codeium… ",
-            frames[editor.spinner_frame() % frames.len()]
+    // ── AI / Codeium / Copilot indicator ────────────────────────────────────
+    let codeium_enabled = editor.config.codeium_enabled;
+    let copilot_enabled = editor.config.copilot_enabled;
+
+    let codeium_loading = codeium_enabled && editor.lsp_loading();
+    let codeium_ready = codeium_enabled && !editor.lsp_loading();
+
+    let copilot_ready = copilot_enabled
+        && editor.copilot_handle.as_ref().map_or(false, |h| {
+            h.ready.load(std::sync::atomic::Ordering::Relaxed)
+        });
+    let copilot_loading = copilot_enabled && !copilot_ready;
+
+    let frames = [
+        '\u{2807}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+        '\u{2827}', '\u{2807}', '\u{280F}',
+    ];
+    let spinner = frames[editor.spinner_frame() % frames.len()];
+
+    let (lsp_text, lsp_bg) = if !codeium_enabled && !copilot_enabled {
+        (" AI OFF ".to_string(), Color::Rgb(65, 50, 60)) // Muted dark mauve
+    } else if codeium_loading && copilot_loading {
+        (
+            format!(" {} AI… ", spinner),
+            Color::Rgb(60, 60, 45), // Muted dark olive
         )
+    } else if codeium_ready && copilot_ready {
+        (
+            " AI ON ".to_string(),
+            Color::Rgb(30, 60, 50), // Muted dark teal
+        )
+    } else if codeium_loading {
+        (format!(" {} Codeium… ", spinner), Color::Rgb(60, 60, 45))
+    } else if codeium_ready {
+        (" Codeium ON ".to_string(), Color::Rgb(30, 60, 50))
+    } else if copilot_loading {
+        (format!(" {} Copilot… ", spinner), Color::Rgb(60, 60, 45))
+    } else if copilot_ready {
+        (" Copilot ON ".to_string(), Color::Rgb(30, 60, 50))
     } else {
-        " Codeium OK ".to_string()
+        // Fallback: enabled but not ready or loading (e.g. awaiting auth)
+        (
+            " Co WAIT ".to_string(),
+            Color::Rgb(85, 75, 45), // Muted amber
+        )
     };
 
     // ── right side segments (rightmost first, then reversed) ───────────────
@@ -257,7 +281,7 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, editor: &mut Editor) {
             format!(" {} ", trimmed),
             Color::Rgb(180, 180, 195),
             R_SCOPE,
-        ));
+        ))
     }
 
     // Buffer counter (optional)
@@ -266,7 +290,7 @@ pub fn draw_status_bar(f: &mut Frame, area: Rect, editor: &mut Editor) {
             format!(" {}/{} ", editor.active_idx() + 1, editor.buffer_count()),
             Color::Rgb(210, 205, 230),
             R_BUF,
-        ));
+        ))
     }
 
     // Reverse to obtain visual left‑to‑right order

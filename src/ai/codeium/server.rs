@@ -337,6 +337,8 @@ impl CodeiumServer {
             req_id
         );
 
+        log::warn!("[TRACE-HTTP] Sending Codeium request to {}", url);
+
         let response = self
             .client
             .post(&url)

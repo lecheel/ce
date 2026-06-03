@@ -414,8 +414,10 @@ fn resolve_brief_alt_key(key: KeyEvent) -> Option<Action> {
 // ---------------------------------------------------------------------------
 // Recording Engine Helper Methods
 // ---------------------------------------------------------------------------
-
-fn enters_insert_mode(action: Action) -> bool {
+fn enters_insert_mode(action: &Action) -> bool {
+    if let Action::Chain(ref actions) = action {
+        return actions.iter().any(|a| enters_insert_mode(a));
+    }
     matches!(
         action,
         Action::EnterInsert
@@ -434,7 +436,10 @@ fn enters_insert_mode(action: Action) -> bool {
     )
 }
 
-fn exits_insert_mode(action: Action) -> bool {
+fn exits_insert_mode(action: &Action) -> bool {
+    if let Action::Chain(ref actions) = action {
+        return actions.iter().any(|a| exits_insert_mode(a));
+    }
     matches!(action, Action::EnterNormal | Action::ExitMode)
 }
 
@@ -444,6 +449,10 @@ fn exits_insert_mode(action: Action) -> bool {
 
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
+
+    // Reset failure flag for this action
+    editor.action_failed = false;
+
     let register = editor.normal_register_prefix.take();
 
     // ── Consume count prefix ─────────────────────────────────────────
@@ -492,25 +501,29 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
     // Brief mode) must take a snapshot to anchor the undo block.
     let is_brief_typing_continuation = is_brief_typing_action && editor.insert_buffer.is_some();
 
-    let is_entering_insert = matches!(
-        action,
-        Action::EnterInsert
-            | Action::EnterAppend
-            | Action::EnterInsertLineStart
-            | Action::EnterInsertLineEnd
-            | Action::InsertNewlineBelow
-            | Action::InsertNewlineAbove
-            | Action::VisualBlockInsert
-            | Action::VisualBlockAppend
-            | Action::ChangeSelection
-            | Action::ChangeInsideWord
-            | Action::ChangeInsideQuotes
-            | Action::ChangeInsideParens
-            | Action::ChangeInsideFunction
-            | Action::ChangeInsideBraces
-            | Action::ChangeInsideBrackets
-            | Action::EnterBrief
-    );
+    let is_entering_insert = if let Action::Chain(ref actions) = action {
+        actions.iter().any(|a| enters_insert_mode(a))
+    } else {
+        matches!(
+            action,
+            Action::EnterInsert
+                | Action::EnterAppend
+                | Action::EnterInsertLineStart
+                | Action::EnterInsertLineEnd
+                | Action::InsertNewlineBelow
+                | Action::InsertNewlineAbove
+                | Action::VisualBlockInsert
+                | Action::VisualBlockAppend
+                | Action::ChangeSelection
+                | Action::ChangeInsideWord
+                | Action::ChangeInsideQuotes
+                | Action::ChangeInsideParens
+                | Action::ChangeInsideFunction
+                | Action::ChangeInsideBraces
+                | Action::ChangeInsideBrackets
+                | Action::EnterBrief
+        )
+    };
 
     let is_block_finalize = matches!(action, Action::ExitMode | Action::EnterNormal);
     let is_undo_or_repeat = matches!(action, Action::Undo | Action::RepeatLastChange);
@@ -539,45 +552,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         && editor.active_window().visual_anchor.is_some()
         && editor.visual_block_insert_state.is_none()
     {
-        let keeps_selection = matches!(
-            action,
-            Action::MoveLeft
-                | Action::MoveRight
-                | Action::MoveUp
-                | Action::MoveDown
-                | Action::MoveWordForward
-                | Action::MoveWordBackward
-                | Action::MoveLineStart
-                | Action::MoveLineEnd
-                | Action::MoveToFirstLine
-                | Action::MoveToLastLine
-                | Action::PageUp
-                | Action::PageDown
-                | Action::BriefSelectionToggle
-                | Action::MatchBracket
-                | Action::YankCurrentLine
-                | Action::YankCurrentWord
-                | Action::CycleCompletionNext
-                | Action::CycleCompletionPrev
-                | Action::ExtendSelectionLeft
-                | Action::ExtendSelectionRight
-                | Action::ExtendSelectionUp
-                | Action::ExtendSelectionDown
-                | Action::ExtendSelectionWordForward
-                | Action::ExtendSelectionWordBackward
-                | Action::ExtendSelectionLineStart
-                | Action::ExtendSelectionLineEnd
-                | Action::ExtendSelectionToFirstLine
-                | Action::ExtendSelectionToLastLine
-                | Action::ExtendSelectionPageUp
-                | Action::ExtendSelectionPageDown
-                | Action::BriefCopySelection
-                | Action::BriefCutSelection
-                | Action::DeleteCharForward
-                | Action::IndentSelection
-                | Action::OutdentSelection
-        );
-        if !keeps_selection {
+        if !action_keeps_brief_selection(&action) {
             editor.active_window_mut().visual_anchor = None;
         }
     }
@@ -585,6 +560,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
     // ── SAFETY: Prevent mutating actions on read-only special buffers ──────
     if action.modifies_buffer() && editor.buf().is_readonly() {
         editor.set_status_msg("Buffer is read-only", MessageKind::Error);
+        editor.action_failed = true;
         return;
     }
 
@@ -611,7 +587,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                         | Action::Backspace
                         | Action::DeleteCharForward
                 );
-            if enters_insert_mode(action) || is_brief_typing_action {
+            if enters_insert_mode(&action) || is_brief_typing_action {
                 editor.insert_buffer = Some(String::new());
             }
         }
@@ -636,7 +612,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     }
                     editor.insert_buffer = None;
                 }
-                _ if enters_insert_mode(action) => {
+                _ if enters_insert_mode(&action) => {
                     let final_text = text.clone();
                     if !final_text.is_empty() {
                         editor.record_action(RepeatableAction::Insert(final_text), 1);
@@ -657,7 +633,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // Actions that *enter* insert mode (e.g., 'i', 'a', 'ciw') are handled
         // separately by the insert_buffer tracking logic above. This block only
         // captures atomic editing commands that are executed directly in Normal mode.
-        if editor.insert_buffer.is_none() && !enters_insert_mode(action) && modifies_buffer {
+        if editor.insert_buffer.is_none() && !enters_insert_mode(&action) && modifies_buffer {
             match action {
                 Action::Backspace => {
                     editor.record_action(
@@ -708,6 +684,25 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
     // snapshots. A single snapshot is taken during ExitMode replication.
     let in_block_insert = editor.visual_block_insert_state.is_some();
     match action {
+        // ── Chain: execute each sub-action unconditionally ────────
+        Action::Chain(ref actions) => {
+            for sub_action in actions.clone() {
+                execute_action(editor, sub_action);
+            }
+        }
+
+        // ── Then: execute each sub-action, stop on first failure ──
+        Action::Then(ref actions) => {
+            for sub_action in actions.clone() {
+                editor.action_failed = false;
+                let prev_kind = editor.status_kind;
+                execute_action(editor, sub_action.clone());
+                if editor.action_failed || editor.status_kind == MessageKind::Error {
+                    break;
+                }
+            }
+        }
+
         Action::EnterBrief => {
             editor.enter_brief();
         }
@@ -1553,6 +1548,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
             } else {
                 editor.set_status_msg("No function found around cursor", MessageKind::Error);
+                editor.action_failed = true;
             }
         }
         // ---------------------------------------------------------------
@@ -2277,6 +2273,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 // you can optionally call a traditional scanner here.
                 // editor.find_matching_bracket_fallback();
                 editor.set_status_msg("No matching bracket found", MessageKind::Info);
+                editor.action_failed = true;
             }
 
             editor.snap_cursor_to_viewport();
@@ -2453,7 +2450,229 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::EasyMotion => {
             editor.enter_easymotion();
         }
+        Action::ToggleTrueFalse => {
+            let (row, col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
 
+            if let Some(word) = editor.get_word_under_cursor() {
+                let replacement = match word.as_str() {
+                    "true" => Some("false"),
+                    "false" => Some("true"),
+                    "True" => Some("False"),
+                    "False" => Some("True"),
+                    "TRUE" => Some("FALSE"),
+                    "FALSE" => Some("TRUE"),
+                    _ => None,
+                };
+
+                if let Some(new_word) = replacement {
+                    let buf = editor.buf();
+                    let line = buf.line_text(row);
+                    let chars: Vec<char> = line.chars().collect();
+
+                    // Find word boundaries
+                    let word_start = {
+                        let mut s = col;
+                        while s > 0
+                            && (chars
+                                .get(s - 1)
+                                .map_or(false, |c| c.is_alphanumeric() || *c == '_'))
+                        {
+                            s -= 1;
+                        }
+                        s
+                    };
+                    let word_end = {
+                        let mut e = col;
+                        while e < chars.len()
+                            && (chars
+                                .get(e)
+                                .map_or(false, |c| c.is_alphanumeric() || *c == '_'))
+                        {
+                            e += 1;
+                        }
+                        e
+                    };
+
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    let line_start = buf.rope.line_to_char(row);
+                    let start_offset = line_start + word_start;
+                    let end_offset = line_start + word_end;
+
+                    if end_offset <= buf.rope.len_chars() {
+                        buf.rope.remove(start_offset..end_offset);
+                        buf.rope.insert(start_offset, new_word);
+                        buf.mark_modified();
+                        buf.parse_syntax();
+                        // Position cursor at last char of the new word
+                        win.col = word_start + new_word.chars().count().saturating_sub(1);
+                        win.desired_col = win.col;
+                    }
+
+                    editor.comp.on_edit();
+                } else {
+                    editor.set_status_msg(
+                        &format!("'{}' is not a boolean", word),
+                        MessageKind::Error,
+                    );
+                }
+            } else {
+                editor.set_status_msg("No word under cursor", MessageKind::Error);
+            }
+        }
+        Action::SwissKnife => {
+            let (row, col) = {
+                let win = editor.active_window();
+                (win.row, win.col)
+            };
+
+            // ── Job 1: Toggle boolean under cursor ────────────────
+            if let Some(word) = editor.get_word_under_cursor() {
+                let replacement = match word.as_str() {
+                    "true" => Some("false"),
+                    "false" => Some("true"),
+                    "True" => Some("False"),
+                    "False" => Some("True"),
+                    "TRUE" => Some("FALSE"),
+                    "FALSE" => Some("TRUE"),
+                    _ => None,
+                };
+
+                if let Some(new_word) = replacement {
+                    let buf = editor.buf();
+                    let line = buf.line_text(row);
+                    let chars: Vec<char> = line.chars().collect();
+
+                    let word_start = {
+                        let mut s = col;
+                        while s > 0
+                            && chars
+                                .get(s - 1)
+                                .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                        {
+                            s -= 1;
+                        }
+                        s
+                    };
+                    let word_end = {
+                        let mut e = col;
+                        while e < chars.len()
+                            && chars
+                                .get(e)
+                                .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                        {
+                            e += 1;
+                        }
+                        e
+                    };
+
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    let line_start = buf.rope.line_to_char(row);
+                    let start_offset = line_start + word_start;
+                    let end_offset = line_start + word_end;
+
+                    if end_offset <= buf.rope.len_chars() {
+                        buf.rope.remove(start_offset..end_offset);
+                        buf.rope.insert(start_offset, new_word);
+                        buf.mark_modified();
+                        buf.parse_syntax();
+                        win.col = word_start + new_word.chars().count().saturating_sub(1);
+                        win.desired_col = win.col;
+                    }
+                    editor.comp.on_edit();
+                    return; // Handled
+                }
+            }
+
+            // ── Job 2: Insert placeholder on empty line ────────────
+            {
+                let buf = editor.buf();
+                let line = buf.line_text(row);
+                let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+
+                if trimmed.trim_start().is_empty() {
+                    // Scan upward for the last non-empty line
+                    let mut up_indent = String::new();
+                    let mut up_ends_with_close = false;
+                    for scan_row in (0..row).rev() {
+                        let scan_line = buf.line_text(scan_row);
+                        let scan_trimmed = scan_line.trim_end_matches('\n').trim_end_matches('\r');
+                        if !scan_trimmed.is_empty() {
+                            up_indent = scan_trimmed
+                                .chars()
+                                .take_while(|c| c.is_whitespace())
+                                .collect();
+                            let last_char = scan_trimmed.chars().last().unwrap_or(' ');
+                            up_ends_with_close =
+                                last_char == '}' || last_char == ')' || last_char == ']';
+                            break;
+                        }
+                    }
+
+                    // Scan downward for the next non-empty line
+                    let mut down_indent: Option<String> = None;
+                    for scan_row in (row + 1)..buf.len_lines() {
+                        let scan_line = buf.line_text(scan_row);
+                        let scan_trimmed = scan_line.trim_end_matches('\n').trim_end_matches('\r');
+                        if !scan_trimmed.is_empty() {
+                            down_indent = Some(
+                                scan_trimmed
+                                    .chars()
+                                    .take_while(|c| c.is_whitespace())
+                                    .collect(),
+                            );
+                            break;
+                        }
+                    }
+
+                    // Pick the correct indent:
+                    // - If line above ends with } ) ] → use the indent from below
+                    //   (we exited a block, align with the enclosing level)
+                    // - Otherwise → use the indent from above
+                    //   (we're inside a block, align with siblings)
+                    let indent = if up_ends_with_close {
+                        down_indent.unwrap_or(up_indent)
+                    } else {
+                        // If current line has MORE whitespace than the parent,
+                        // prefer the current line's indent (deeper nesting).
+                        let current_ws: String =
+                            trimmed.chars().take_while(|c| c.is_whitespace()).collect();
+                        if current_ws.len() > up_indent.len() {
+                            current_ws
+                        } else {
+                            up_indent
+                        }
+                    };
+
+                    let placeholder = format!("{}//--  (anchor dont removed) --//", indent);
+
+                    let (win, buf) = editor.active_window_and_buf_mut();
+
+                    let line_start = buf.rope.line_to_char(row);
+                    let line_end = if row + 1 < buf.len_lines() {
+                        buf.rope.line_to_char(row + 1)
+                    } else {
+                        buf.rope.len_chars()
+                    };
+
+                    buf.rope.remove(line_start..line_end);
+                    let insert_text = format!("{}\n", placeholder);
+                    buf.rope.insert(line_start, &insert_text);
+                    buf.mark_modified();
+                    buf.parse_syntax();
+
+                    // Position cursor right after '[ '
+                    win.col = indent.chars().count() + 5;
+                    win.desired_col = win.col;
+
+                    editor.comp.on_edit();
+                    return;
+                }
+            }
+            // ── Future Job 3: Add more context actions here ────────
+        }
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();
@@ -2740,6 +2959,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
             } else {
                 editor.set_status_msg("Register is empty", MessageKind::Error);
+                editor.action_failed = true;
             }
         }
 
@@ -2955,6 +3175,50 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
     }
 }
 
+fn action_keeps_brief_selection(action: &Action) -> bool {
+    if let Action::Chain(ref actions) = action {
+        return actions.iter().all(|a| action_keeps_brief_selection(a));
+    }
+    matches!(
+        action,
+        Action::MoveLeft
+            | Action::MoveRight
+            | Action::MoveUp
+            | Action::MoveDown
+            | Action::MoveWordForward
+            | Action::MoveWordBackward
+            | Action::MoveLineStart
+            | Action::MoveLineEnd
+            | Action::MoveToFirstLine
+            | Action::MoveToLastLine
+            | Action::PageUp
+            | Action::PageDown
+            | Action::BriefSelectionToggle
+            | Action::MatchBracket
+            | Action::YankCurrentLine
+            | Action::YankCurrentWord
+            | Action::CycleCompletionNext
+            | Action::CycleCompletionPrev
+            | Action::ExtendSelectionLeft
+            | Action::ExtendSelectionRight
+            | Action::ExtendSelectionUp
+            | Action::ExtendSelectionDown
+            | Action::ExtendSelectionWordForward
+            | Action::ExtendSelectionWordBackward
+            | Action::ExtendSelectionLineStart
+            | Action::ExtendSelectionLineEnd
+            | Action::ExtendSelectionToFirstLine
+            | Action::ExtendSelectionToLastLine
+            | Action::ExtendSelectionPageUp
+            | Action::ExtendSelectionPageDown
+            | Action::BriefCopySelection
+            | Action::BriefCutSelection
+            | Action::DeleteCharForward
+            | Action::IndentSelection
+            | Action::OutdentSelection
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Shared Custom Binding Helpers (clean, deduplicated)
 // ---------------------------------------------------------------------------
@@ -2997,4 +3261,10 @@ fn clamp_cursor_after_paste(editor: &mut Editor) {
         win.col.min(max_col)
     };
     win.desired_col = win.col;
+}
+
+/// Helper: check if the last status message was an error.
+/// Used by `Then` chains to detect failure.
+fn last_action_was_error(editor: &Editor) -> bool {
+    editor.action_failed || editor.status_kind == MessageKind::Error
 }

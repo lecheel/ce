@@ -631,6 +631,9 @@ impl Editor {
     pub fn command(&self) -> &str {
         &self.command
     }
+    pub fn ghost_text_display(&self) -> Option<String> {
+        self.comp.ghost_text_display()
+    }
     pub fn ghost_text(&self) -> Option<&str> {
         self.comp.ghost_text()
     }
@@ -1712,117 +1715,8 @@ impl Editor {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl Editor {
-    pub fn ingest_completion_response(&mut self, id: usize, items: Vec<String>) {
-        let (row, col) = {
-            let win = self.active_window();
-            (win.row, win.col)
-        };
-        let mode = self.mode();
-        let rope_len = self.buf().rope.len_chars();
-        let line_chars: Vec<char> = self.buf().line_text(row).chars().collect();
-
-        log::debug!(
-            "[comp:response] id={} items={} request_id={} row={} col={}",
-            id,
-            items.len(),
-            self.comp.request_id,
-            row,
-            col
-        );
-
-        if id != self.comp.request_id {
-            log::debug!(
-                "[comp:response] DROPPED: stale id={} != current={}",
-                id,
-                self.comp.request_id
-            );
-            return;
-        }
-
-        let context_ok = {
-            if rope_len <= 1 {
-                log::debug!("[comp:response] REJECT: rope too short");
-                false
-            } else {
-                let c = col.min(line_chars.len());
-                if c < line_chars.len() {
-                    let next = line_chars[c];
-                    if next.is_alphanumeric() || next == '_' || next == ')' {
-                        log::debug!("[comp:response] REJECT: next char '{}' blocks", next);
-                        false
-                    } else if c > 0 && line_chars[c - 1] == ')' {
-                        log::debug!("[comp:response] REJECT: char before cursor is ')'");
-                        false
-                    } else {
-                        let min_prefix = 4;
-                        let mut prefix_len = 0;
-                        let mut i = c;
-                        while i > 0 {
-                            let ch = line_chars[i - 1];
-                            if ch.is_alphanumeric() || ch == '_' {
-                                prefix_len += 1;
-                                i -= 1;
-                            } else {
-                                break;
-                            }
-                        }
-                        if prefix_len < min_prefix {
-                            log::debug!(
-                                "[comp:response] REJECT: prefix_len={} < {}",
-                                prefix_len,
-                                min_prefix
-                            );
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                } else if c > 0 && line_chars[c - 1] == ')' {
-                    log::debug!("[comp:response] REJECT: char before cursor is ')'");
-                    false
-                } else {
-                    let min_prefix = 4;
-                    let mut prefix_len = 0;
-                    let mut i = c;
-                    while i > 0 {
-                        let ch = line_chars[i - 1];
-                        if ch.is_alphanumeric() || ch == '_' {
-                            prefix_len += 1;
-                            i -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    if prefix_len < min_prefix {
-                        log::debug!(
-                            "[comp:response] REJECT: prefix_len={} < {} (at EOL)",
-                            prefix_len,
-                            min_prefix
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                }
-            }
-        };
-
-        if !context_ok {
-            log::debug!("[comp:response] → reset_to_idle (context failed)");
-            self.comp.reset_to_idle();
-            return;
-        }
-        if items.is_empty() {
-            log::debug!("[comp:response] → reset_to_idle (empty items)");
-            self.comp.reset_to_idle();
-            return;
-        }
-        log::debug!(
-            "[comp:response] → SET ACTIVE: {} items, first={:?}",
-            items.len(),
-            &items[0][..items[0].chars().take(30).collect::<String>().len()]
-        );
-        self.comp.set_active(items);
+    pub fn ingest_completion_response(&mut self, _id: usize, items: Vec<String>, version: u64) {
+        self.comp.on_response(items, version);
     }
 
     pub fn on_edit(&mut self) {
@@ -1851,133 +1745,102 @@ impl Editor {
     }
 
     /// Poll the completion machine on every tick.
-    pub fn poll_completion(&mut self) -> Option<(usize, String, usize, String)> {
-        let prefix = self.get_current_word_prefix();
-        let (row, col, rope_str, offset, filename) = {
-            let win = self.active_window();
-            let buf = self.buf();
+    ///
+    /// Returns `Some((id, text, offset, lang, version))` when a Codeium
+    /// request should be sent by the caller.
+    ///
+    /// Also fires Copilot inline when the AI idle timer has elapsed, so both
+    /// AI backends share the same 500 ms debounce.
+    pub fn poll_completion(&mut self) -> Option<(usize, String, usize, String, u64)> {
+        let mode = self.mode;
+        if mode != Mode::Insert && mode != Mode::Brief {
+            return None;
+        }
 
-            if win.row >= buf.len_lines() {
-                log::debug!("[comp:poll] SKIP: row >= len_lines");
+        let (row, col) = {
+            let win = self.active_window();
+            (win.row, win.col)
+        };
+
+        // ── Guard: buffer must have content ─────────────────────────────
+        {
+            let buf = self.buf();
+            if buf.rope.len_chars() <= 1 || row >= buf.len_lines() {
                 return None;
             }
+        }
 
+        // ── Copilot idle-debounce fire ───────────────────────────────────
+        // When the machine says it's time for an AI request AND Copilot is
+        // configured, register it as a pending source and dispatch.
+        if self.config.copilot_enabled && self.comp.should_fire_ai_request(mode) {
+            if let Some(ref handle) = self.copilot_handle {
+                if handle.ready.load(std::sync::atomic::Ordering::Relaxed) {
+                    let (_, version) = self.comp.start_source_request(CompletionSource::Copilot);
+
+                    let text = self.buf().rope.to_string();
+                    let offset = self.buf().rope.line_to_char(row) + col;
+                    let lang =
+                        crate::ed::buffer::detect_language(self.active_filename().as_deref());
+
+                    let req = crate::ai::copilot::server::CopilotRequest::Completion {
+                        text,
+                        offset,
+                        language: lang,
+                        version,
+                    };
+
+                    if handle.request_tx.send(req).is_err() {
+                        log::debug!("Copilot request channel closed");
+                        self.comp
+                            .merge_source(CompletionSource::Copilot, Vec::new(), version);
+                    } else {
+                        // Mark fired so we don't double-send for this version.
+                        self.comp.mark_ai_request_fired();
+                    }
+                }
+            }
+        }
+
+        // ── Codeium idle-debounce fire (via maybe_take_request) ──────────
+        // Register Codeium as pending only when the AI timer is ready.
+        if self.config.codeium_enabled && self.comp.should_fire_ai_request(mode) {
+            // start_source_request idempotently sets the pending slot.
+            let _ = self.comp.start_source_request(CompletionSource::Codeium);
+        }
+
+        // ── Codeium tick-poll (may return a request to caller) ───────────
+        let (rope_text, rope_len_chars, line_text, cursor_char_offset, filename) = {
+            let buf = self.buf();
             (
-                win.row,
-                win.col,
                 buf.rope.to_string(),
-                win.cursor_char_offset(buf),
+                buf.rope.len_chars(),
+                buf.line_text(row),
+                buf.rope.line_to_char(row) + col,
                 buf.filename.clone(),
             )
         };
-        let mode = self.mode;
 
-        let comp = &mut self.comp;
-        use crate::ed::buffer::detect_language;
-
-        if mode != Mode::Insert && mode != Mode::Brief {
-            log::debug!("[comp:poll] SKIP: mode={:?} not Insert/Brief", mode);
-            return None;
-        }
-        if !comp.is_throttling() {
-            log::debug!("[comp:poll] SKIP: phase=xxx (not Throttling)");
-            return None;
-        }
-        if comp.last_edit_time.elapsed() < std::time::Duration::from_millis(comp.throttle_ms) {
-            log::debug!(
-                "[comp:poll] SKIP: throttle {}ms < {}ms",
-                comp.last_edit_time.elapsed().as_millis(),
-                comp.throttle_ms
-            );
-            return None;
-        }
-
-        if rope_str.chars().count() <= 1 {
-            log::debug!("[comp:poll] SKIP: rope too short");
-            return None;
-        }
-
-        let line: Vec<char> = rope_str.lines().nth(row).unwrap_or("").chars().collect();
-        let c = col.min(line.len());
-
-        if c < line.len() {
-            let next = line[c];
-            if next.is_alphanumeric() || next == '_' || next == ')' {
-                log::debug!("[comp:poll] SKIP: next char '{}' blocks", next);
-                return None;
-            }
-        }
-        if c > 0 && line[c - 1] == ')' {
-            log::debug!("[comp:poll] SKIP: char before cursor is ')'");
-            return None;
-        }
-
-        let min_prefix = match mode {
-            Mode::Brief | Mode::Insert => 4,
-            _ => return None,
-        };
-
-        let mut prefix_len = 0;
-        let mut is_path = false;
-        let mut i = c;
-        while i > 0 {
-            let ch = line[i - 1];
-            if ch.is_alphanumeric() || ch == '_' {
-                prefix_len += 1;
-                i -= 1;
-            } else if ch == '.' || ch == '/' || ch == '-' {
-                is_path = true;
-                prefix_len += 1;
-                i -= 1;
-            } else {
-                break;
-            }
-        }
-
-        if prefix_len < min_prefix && !is_path {
-            log::debug!(
-                "[comp:poll] SKIP: prefix_len={} < min_prefix={}",
-                prefix_len,
-                min_prefix
-            );
-            return None;
-        }
-
-        log::debug!(
-            "[comp:poll] FIRE: id={} row={} col={} prefix_len={}",
-            comp.request_id + 1,
+        self.comp.maybe_take_request(
+            rope_text,
+            rope_len_chars,
+            line_text,
+            cursor_char_offset,
+            filename.as_deref(),
+            mode,
             row,
             col,
-            prefix_len
-        );
-        comp.set_prefix(prefix);
-        comp.start_pending(row, col);
-
-        Some((
-            comp.request_id,
-            rope_str,
-            offset,
-            detect_language(filename.as_deref()),
-        ))
+        )
     }
 
     /// Accept the current completion (ghost text or popup selection).
     pub fn accept_completion(&mut self) {
-        let (row, col, line_text, line_start_char) = {
+        let (row, col) = {
             let win = self.active_window();
-            let buf = self.buf();
-            if win.row >= buf.len_lines() {
-                self.comp.reset_to_idle();
-                return;
-            }
-            (
-                win.row,
-                win.col,
-                buf.line_text(win.row),
-                buf.rope.line_to_char(win.row),
-            )
+            (win.row, win.col)
         };
 
+        // 1. Extract replacement text BEFORE borrowing the buffer
         let replacement = match self.comp.ghost_text.take() {
             Some(t) => t,
             None => match self.comp.candidates().get(self.comp.completion_idx()) {
@@ -1986,42 +1849,57 @@ impl Editor {
             },
         };
 
-        let chars: Vec<char> = line_text.chars().collect();
-        let mut word_start = col;
-        while word_start > 0 {
-            let c = chars[word_start - 1];
-            if c.is_alphanumeric() || c == '_' || c == '.' || c == '/' || c == '-' {
-                word_start -= 1;
-            } else {
-                break;
+        // 2. Extract buffer data, then drop the borrow
+        let (line_text, line_start_char) = {
+            let buf = self.buf();
+            if row >= buf.len_lines() {
+                self.comp.reset_to_idle();
+                return;
             }
-        }
+            (buf.line_text(row), buf.rope.line_to_char(row))
+        };
 
-        let replace_start = line_start_char + word_start;
-        let replace_end = line_start_char + col;
+        // 3. Compute overlaps from the cloned strings (no borrow conflict)
+        let before: String = line_text.chars().take(col).collect();
+        let after: String = line_text.chars().skip(col).collect();
+
+        let prefix_overlap = crate::comp::state::find_prefix_overlap(&before, &replacement);
+        let ghost_suffix: String = replacement.chars().skip(prefix_overlap).collect();
+
+        let suffix_overlap = Self::common_prefix_len(&after, &ghost_suffix);
+        let to_insert: String = ghost_suffix.chars().skip(suffix_overlap).collect();
 
         self.comp.reset_to_idle();
 
+        // 4. Now mutably borrow window + buffer for the actual edit
         {
             let (win, buf) = self.active_window_and_buf_mut();
             buf.push_undo(row, col);
 
-            if replace_start < replace_end {
-                buf.rope.remove(replace_start..replace_end);
+            if suffix_overlap > 0 {
+                let remove_start = line_start_char + col;
+                let remove_end = remove_start + suffix_overlap;
+                if remove_end <= buf.rope.len_chars() {
+                    buf.rope.remove(remove_start..remove_end);
+                }
             }
 
-            if !replacement.is_empty() {
-                buf.rope.insert(replace_start, &replacement);
+            if !to_insert.is_empty() {
+                buf.rope.insert(line_start_char + col, &to_insert);
             }
 
             buf.mark_modified();
             buf.parse_syntax();
 
-            win.col = word_start + replacement.chars().count();
+            win.col = col + to_insert.chars().count();
             win.desired_col = win.col;
         }
 
         self.maybe_refresh_buffer_words();
+    }
+
+    fn common_prefix_len(a: &str, b: &str) -> usize {
+        a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
     }
 
     /// Locates the word under (or immediately after) the active window's cursor position on the line.

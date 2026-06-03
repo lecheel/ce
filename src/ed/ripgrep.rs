@@ -283,9 +283,9 @@ impl Editor {
 
                 self.populate_ripgrep_buffer(pattern, output);
                 // Also open the quickfix popup for easy navigation
-                if count > 0 {
-                    self.open_quickfix_popup();
-                };
+                // if count > 0 {
+                // self.open_quickfix_popup();
+                // };
             }
             Err(e) => {
                 self.set_status_msg(&format!("Ripgrep failed: {}", e), MessageKind::Error);

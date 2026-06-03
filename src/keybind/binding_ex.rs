@@ -155,7 +155,7 @@ pub fn get_sequence_suggestions(config: &Config, pending: &str, mode: Mode) -> V
             if norm.starts_with(&prefix) {
                 let suffix = resolved_bind[prefix.len()..].to_string();
                 if seen.insert(suffix.clone()) {
-                    if let Ok(action) = action_str.parse::<Action>() {
+                    if let Ok(action) = Action::parse(action_str) {
                         out.push(KeySuggestion {
                             suffix,
                             full_bind: resolved_bind.clone(),

@@ -502,6 +502,10 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "ctagd scan" => {
             editor.daemon_scan();
         }
+        // ---- Copilot Commands ----
+        "copilot" | "copilot auth" => {
+            editor.copilot_auth();
+        }
 
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
@@ -758,7 +762,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tig", "glog", "rg", "lastrg", "cn", "cp","noh", "nohlsearch", "marks", "bookmarks", 
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
-        "tag", "ta", "retag", "tags", "sort", "fd",
+        "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
     ];
     //-- complete command (anchor dont removed) --//

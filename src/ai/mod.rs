@@ -5,4 +5,5 @@
 //! [`crate::comp::provider::CompletionProvider`].
 
 pub mod codeium;
+pub mod copilot;
 pub mod llama;

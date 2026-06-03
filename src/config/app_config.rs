@@ -199,6 +199,9 @@ pub struct Config {
     #[serde(default)]
     pub codeium_enabled: bool,
 
+    #[serde(default)]
+    pub copilot_enabled: bool,
+
     // ---- LLM Subsystem Endpoint Configurations ----
     #[serde(default = "default_llm_url")]
     pub llm_url: String,
@@ -317,6 +320,7 @@ impl Default for Config {
             max_tokens: 256,
             editor_language: "plaintext".to_string(),
             codeium_enabled: false,
+            copilot_enabled: false,
             popup_enabled: true,
             buffer_word_scan: true,
             vocab_wordlist: true,
@@ -408,6 +412,7 @@ impl Config {
                 max_tokens: 256,
                 editor_language: "plaintext".to_string(),
                 codeium_enabled: false,
+                copilot_enabled: false,
                 popup_enabled: true,
                 init_mode: "vim".to_string(),
                 buffer_word_scan: true,

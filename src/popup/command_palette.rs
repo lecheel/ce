@@ -86,12 +86,12 @@ pub fn build_command_entries() -> Vec<CommandEntry> {
 
     palette_defaults::palette_defaults()
         .iter()
-        .map(|&(action, default_desc, default_hint)| {
+        .map(|&(ref action, default_desc, default_hint)| {
             let snake = action.snake_name();
             let ov = overrides.overrides.get(&snake);
 
             CommandEntry {
-                action,
+                action: action.clone(),
                 // name defaults to the auto-generated snake_name
                 name: ov.and_then(|o| o.name.clone()).unwrap_or(snake),
                 description: ov
@@ -111,7 +111,7 @@ pub fn generate_default_desc_file() -> anyhow::Result<()> {
     let defaults = palette_defaults::palette_defaults();
     let mut overrides_map = std::collections::HashMap::new();
 
-    for &(action, default_desc, default_hint) in defaults {
+    for &(ref action, default_desc, default_hint) in defaults {
         let snake = action.snake_name();
         overrides_map.insert(
             snake,

@@ -32,10 +32,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-use std::io;
-
+use crate::ai::copilot::start_copilot_server_task;
+use crate::ai::copilot::CopilotServerCell;
 use config::Config;
 use ed::Editor;
+use std::io;
 
 // ---------------------------------------------------------------------------
 // Shared server handle type alias (reduces repetition in signatures)
@@ -57,7 +58,7 @@ pub enum AppMessage {
     Paste(String),
     /// `(request_id, items)` — items are already prefix-trimmed.
     /// Always sent, even on error (empty vec so the machine can reset).
-    CompletionResponse(usize, Vec<String>),
+    CompletionResponse(usize, Vec<String>, u64),
     Tick,
 }
 
@@ -208,6 +209,10 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
     // Shared Codeium server cell — populated by a background task.
     let server_cell: ServerCell = std::sync::Arc::new(std::sync::RwLock::new(None));
 
+    // ── Shared Copilot server cell ────────────────────────────────
+    let copilot_server_cell: CopilotServerCell = std::sync::Arc::new(std::sync::RwLock::new(None));
+
+    // ── Start Codeium server (if enabled) ─────────────────────────
     if let Some(key) = api_key {
         let cell = server_cell.clone();
         tokio::spawn(async move {
@@ -224,6 +229,32 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
         });
     } else {
         log::debug!("Codeium disabled — skipping server start.");
+    }
+
+    // ── Start Copilot server (if enabled and token available) ─────
+    if config.copilot_enabled {
+        // Discover an existing GitHub OAuth token from the local
+        // filesystem (hosts.json, env var, etc.).
+        let copilot_token = crate::ai::copilot::auth::AuthManager::discover_local_token()
+            .map(|(token, _path)| token);
+
+        match copilot_token {
+            Some(token) => {
+                let (handle, resp_rx) = start_copilot_server_task(token);
+                editor.copilot_handle = Some(handle);
+                editor.copilot_response_rx = Some(resp_rx);
+                log::debug!("Copilot server task spawned.");
+            }
+            None => {
+                log::warn!(
+                    "Copilot enabled but no OAuth token found. \
+                     Run :copilot-auth inside the editor to sign in, \
+                     then restart."
+                );
+            }
+        }
+    } else {
+        log::debug!("Copilot disabled — skipping server start.");
     }
 
     let result = run_loop(&mut term, &mut editor, server_cell).await;
@@ -283,7 +314,14 @@ fn spawn_completion(
     editor: &Editor,
     server_cell: &ServerCell,
     tx: tokio::sync::mpsc::Sender<AppMessage>,
+    version: u64, // Added version
 ) {
+    log::warn!(
+        "[TRACE-SPAWN] Requesting completion id={}, lang={}, server_available={}",
+        id,
+        lang,
+        server_cell.read().map(|g| g.is_some()).unwrap_or(false)
+    );
     let server_opt = if editor.config.codeium_enabled {
         server_cell.read().ok().and_then(|g| g.clone())
     } else {
@@ -299,9 +337,12 @@ fn spawn_completion(
                     log::debug!("Codeium error: {:?}", e);
                     Vec::new()
                 });
-            let _ = tx.send(AppMessage::CompletionResponse(id, items)).await;
+            let _ = tx
+                .send(AppMessage::CompletionResponse(id, items, version))
+                .await;
         });
     } else {
+        // ... local complete fallback ...
         let vocab = editor.vocab_words.iter().cloned().collect::<Vec<_>>();
         let cached = editor.buffer_words.clone();
         let line = editor.get_current_line_text();
@@ -309,7 +350,9 @@ fn spawn_completion(
 
         tokio::spawn(async move {
             let items = local_complete(vocab, cached, line, prefix).await;
-            let _ = tx.send(AppMessage::CompletionResponse(id, items)).await;
+            let _ = tx
+                .send(AppMessage::CompletionResponse(id, items, version))
+                .await;
         });
     }
 }
@@ -389,8 +432,8 @@ async fn run_loop(
                 needs_redraw = true;
             }
 
-            AppMessage::CompletionResponse(id, items) => {
-                editor.ingest_completion_response(id, items);
+            AppMessage::CompletionResponse(id, items, version) => {
+                editor.ingest_completion_response(id, items, version);
                 needs_redraw = true;
             }
 
@@ -402,13 +445,24 @@ async fn run_loop(
                 editor.tick_spinner();
 
                 // 2. Ask the completion machine if a request should fire.
-                if let Some((id, text, offset, lang)) = editor.poll_completion() {
-                    spawn_completion(id, text, offset, lang, editor, &server_cell, tx.clone());
+                if let Some((id, text, offset, lang, version)) = editor.poll_completion() {
+                    spawn_completion(
+                        id,
+                        text,
+                        offset,
+                        lang,
+                        editor,
+                        &server_cell,
+                        tx.clone(),
+                        version,
+                    );
                 }
 
                 // 3. Poll LSP responses from the background LspManager task
                 //    (diagnostics, inlay hints, signature help, completions, formatting)
                 editor.poll_lsp_responses();
+                editor.poll_copilot_auth();
+                editor.poll_copilot_completions();
 
                 // 4. Poll git debounce timer and background diff results
                 editor.run_git_tasks();
