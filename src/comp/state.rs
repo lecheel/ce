@@ -105,7 +105,10 @@ pub(crate) enum Phase {
     /// Fast-sources (LSP/buffer/vocab) are being awaited.
     Throttling,
     /// A request has been dispatched but no result yet.
-    Pending { row: usize, col: usize },
+    Pending {
+        row: usize,
+        col: usize,
+    },
     /// At least one result is available and being displayed.
     Active,
 }
@@ -164,7 +167,7 @@ impl CompletionMachine {
         Self {
             phase: Phase::Idle,
             last_edit_time: now,
-            throttle_ms: 80,   // LSP / buffer sources fire fast
+            throttle_ms: 80, // LSP / buffer sources fire fast
             request_id: 0,
             ghost_text: None,
             completion_idx: 0,
@@ -198,13 +201,11 @@ impl CompletionMachine {
         self.last_ai_trigger_time = self.last_edit_time;
 
         // Clear fast-source results immediately.
-        self.source_results
-            .retain(|src, _| src.is_ai());
+        self.source_results.retain(|src, _| src.is_ai());
 
         // Keep AI pending entries alive — their in-flight requests
         // are still valid; merge_source version-gates them on arrival.
-        self.source_pending
-            .retain(|src, _| src.is_ai());
+        self.source_pending.retain(|src, _| src.is_ai());
 
         self.merged.clear();
         self.current_prefix.clear();
@@ -253,9 +254,7 @@ impl CompletionMachine {
         if mode != Mode::Insert && mode != Mode::Brief {
             return false;
         }
-        if self.last_ai_trigger_time.elapsed()
-            < std::time::Duration::from_millis(self.ai_idle_ms)
-        {
+        if self.last_ai_trigger_time.elapsed() < std::time::Duration::from_millis(self.ai_idle_ms) {
             return false;
         }
         // Don't re-fire for the same version.
@@ -407,9 +406,7 @@ impl CompletionMachine {
             b_multiline
                 .cmp(&a_multiline)
                 .then_with(|| a.score.cmp(&b.score))
-                .then_with(|| {
-                    Self::source_priority(a.source).cmp(&Self::source_priority(b.source))
-                })
+                .then_with(|| Self::source_priority(a.source).cmp(&Self::source_priority(b.source)))
                 .then_with(|| a.text.cmp(&b.text))
         });
 
@@ -474,7 +471,11 @@ impl CompletionMachine {
     pub fn ghost_text_display(&self) -> Option<String> {
         let full = self.ghost_full.as_deref()?;
         let first = full.split('\n').next().unwrap_or(full);
-        if first.is_empty() { None } else { Some(first.to_string()) }
+        if first.is_empty() {
+            None
+        } else {
+            Some(first.to_string())
+        }
     }
 
     /// Lines 2..N of a multi-line AI ghost suggestion.
@@ -489,7 +490,7 @@ impl CompletionMachine {
             return Vec::new();
         }
         lines.remove(0); // drop first line — already in ghost_text_display()
-        // Strip trailing empty line produced by a trailing '\n'.
+                         // Strip trailing empty line produced by a trailing '\n'.
         if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
         }
@@ -523,10 +524,7 @@ impl CompletionMachine {
 
         if let Some(c) = self.merged.get(self.completion_idx) {
             let prefix = &self.current_prefix;
-            if prefix.is_empty()
-                || c.text.starts_with(prefix)
-                || c.source.is_ai()
-            {
+            if prefix.is_empty() || c.text.starts_with(prefix) || c.source.is_ai() {
                 self.ghost_full = Some(c.text.clone());
                 let first = c.text.split('\n').next().unwrap_or(&c.text);
                 self.ghost_text = Some(first.to_string());
@@ -633,9 +631,7 @@ impl CompletionMachine {
             return None;
         }
         // Enforce the AI idle debounce.
-        if self.last_ai_trigger_time.elapsed()
-            < std::time::Duration::from_millis(self.ai_idle_ms)
-        {
+        if self.last_ai_trigger_time.elapsed() < std::time::Duration::from_millis(self.ai_idle_ms) {
             return None;
         }
         if !self.context_allows(&line_text, rope_len_chars, mode, row, col) {

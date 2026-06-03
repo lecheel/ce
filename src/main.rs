@@ -77,6 +77,14 @@ struct Cli {
     /// File path(s) to open (each becomes a separate buffer).
     path: Vec<String>,
 
+    /// Open fuzzy file finder with initial filter (e.g., `--fd pop` or `--fd "src/util"`)
+    #[arg(long, value_name = "FILTER")]
+    fd: Option<String>,
+
+    /// Run ripgrep search and open quickfix popup (e.g., `--rg fn main` or `--rg "fn.*async"`)
+    #[arg(long, num_args = 1.., value_name = "PATTERN")]
+    rg: Option<Vec<String>>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -92,7 +100,6 @@ enum Commands {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -102,7 +109,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Status) => cmd_status(),
         Some(Commands::Auth) => cmd_auth().await,
-        None => cmd_edit(cli.path).await,
+        None => {
+            let fd_filter = cli.fd;
+            let rg_pattern = cli.rg.map(|parts| parts.join(" "));
+            cmd_edit(cli.path, fd_filter, rg_pattern).await
+        }
     }
 }
 
@@ -143,9 +154,11 @@ fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
-    log::debug!("Edit flow — args: {:?}", all_args);
-
+async fn cmd_edit(
+    all_args: Vec<String>,
+    initial_fd_filter: Option<String>,
+    initial_rg_pattern: Option<String>,
+) -> Result<()> {
     let config = Config::load().context("Failed to load config")?;
 
     let api_key = if config.codeium_enabled {
@@ -216,10 +229,8 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
     if let Some(key) = api_key {
         let cell = server_cell.clone();
         tokio::spawn(async move {
-            log::debug!("Starting Codeium server in background…");
             match ai::codeium::CodeiumServer::new(key).await {
                 Ok(srv) => {
-                    log::debug!("Codeium server ready on port {}", srv.port());
                     if let Ok(mut g) = cell.write() {
                         *g = Some(std::sync::Arc::new(srv));
                     }
@@ -227,14 +238,10 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
                 Err(e) => log::error!("Failed to start Codeium server: {:?}", e),
             }
         });
-    } else {
-        log::debug!("Codeium disabled — skipping server start.");
     }
 
     // ── Start Copilot server (if enabled and token available) ─────
     if config.copilot_enabled {
-        // Discover an existing GitHub OAuth token from the local
-        // filesystem (hosts.json, env var, etc.).
         let copilot_token = crate::ai::copilot::auth::AuthManager::discover_local_token()
             .map(|(token, _path)| token);
 
@@ -243,18 +250,46 @@ async fn cmd_edit(all_args: Vec<String>) -> Result<()> {
                 let (handle, resp_rx) = start_copilot_server_task(token);
                 editor.copilot_handle = Some(handle);
                 editor.copilot_response_rx = Some(resp_rx);
-                log::debug!("Copilot server task spawned.");
             }
-            None => {
-                log::warn!(
-                    "Copilot enabled but no OAuth token found. \
-                     Run :copilot-auth inside the editor to sign in, \
-                     then restart."
-                );
-            }
+            None => {}
         }
-    } else {
-        log::debug!("Copilot disabled — skipping server start.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Open fd popup with initial filter if requested via --fd
+    // ═══════════════════════════════════════════════════════════════════
+    if let Some(filter) = initial_fd_filter {
+        let root = crate::git::gutter::find_git_root(&std::path::PathBuf::from(
+            editor.active_filename().unwrap_or("."),
+        ))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        if root.is_dir() {
+            editor.popup.open_fd(&root, &filter);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Run ripgrep search and open quickfix popup if requested via --rg
+    // ═══════════════════════════════════════════════════════════════════
+    if let Some(pattern) = initial_rg_pattern {
+        if pattern.is_empty() {
+            editor.ripgrep_last();
+        } else {
+            editor.ripgrep_search(&pattern);
+        }
+
+        // Open quickfix popup to display results
+        /*
+        if !editor.quickfix_results.is_empty() {
+            editor.open_quickfix_popup();
+        } else {
+            editor.set_status_msg(
+                &format!("No results found for: {}", pattern),
+                crate::ed::mode::MessageKind::Info,
+            );
+        }
+        */
     }
 
     let result = run_loop(&mut term, &mut editor, server_cell).await;
