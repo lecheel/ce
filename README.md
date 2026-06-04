@@ -190,11 +190,11 @@ Mini vim-buffer TUI editor with AI completions, split layouts, Brief mode, and d
 - [x] Interactive dirty‑buffer quit prompt  
 - [x] Viewport‑aware PageUp/PageDown  
 - [x] Dot repeat (`.`)  
-- [ ] Redo (`Ctrl+R`) – **high priority**  
+- [x] Redo (`Ctrl+R`) – **high priority**  
 - [x] Visual mode (`v`, `V`)  
 - [x] Search (`/ n N *`)  
-- [ ] Replace (`:%s/old/new/g`) – medium priority  
-- [ ] Count prefix (`3j`, `5dd`) – low priority  
+- [x] Replace (`:%s/old/new/g`) – medium priority  
+- [x] Count prefix (`3j`, `5dd`) – low priority  
 
 ### Syntax & Rendering
 - [x] Tree‑sitter highlighting (Rust, Python, JS/TS)  
@@ -207,7 +207,7 @@ Mini vim-buffer TUI editor with AI completions, split layouts, Brief mode, and d
 - [x] Dynamic Gutter (bookmarks, relative numbers, Git signs)  
 - [x] Custom `gitstatus` buffer coloring  
 - [ ] Theme / Color scheme support – medium priority  
-- [ ] Indentation guides – low priority  
+- [x] Indentation guides – low priority  
 
 ### Completion System
 - [x] Ghost‑text inline display  
@@ -239,7 +239,7 @@ Mini vim-buffer TUI editor with AI completions, split layouts, Brief mode, and d
 - [x] Floating centered overlay  
 - [x] Config reflection dashboard (Space toggle)  
 - [x] Which‑Key popup (bottom‑right, compact mods)  
-- [ ] Command palette (`Ctrl+Shift+P`) – medium priority  
+- [x] Command palette (`Ctrl+Alt+P`) – medium priority  
 - [ ] Hover documentation (`K`) – medium priority  
 
 ### AI / Codeium & Llama.cpp Backends
