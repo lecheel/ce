@@ -393,6 +393,7 @@ impl Editor {
                 ripgrep_line_map: Vec::new(),
                 search_pattern: None,
                 diff_alignment: None,
+                llm_lock_line: 0,
             };
 
             self.buffers.push(buf);

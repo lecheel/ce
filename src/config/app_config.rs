@@ -86,6 +86,23 @@ fn default_commit_backend() -> LlmBackend {
     LlmBackend::Llamacpp
 }
 
+/// A user-defined LLM action (triggered via `:llm <action_name>`).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LlmActionConfig {
+    /// Optional system prompt override for this specific action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    /// The prompt template sent to the LLM.
+    /// Supports placeholders: `{selection}`, `{file}`
+    pub prompt: String,
+
+    /// Whether to automatically send the request immediately.
+    /// If false, the prompt is injected into the buffer for the user to edit.
+    #[serde(default = "default_true")]
+    pub auto_send: bool,
+}
+
 /// Which local LLM server to route requests to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -307,6 +324,9 @@ pub struct Config {
     #[serde(default = "default_false")]
     pub lsp_enabled: bool,
 
+    #[serde(default)]
+    pub llm_actions: HashMap<String, LlmActionConfig>,
+
     #[serde(default = "default_true")]
     pub show_startup_hints: bool,
 }
@@ -346,6 +366,7 @@ impl Default for Config {
             // Prompts
             llm_system_prompt: default_llm_system_prompt(),
             commit_system_prompt: None,
+            llm_actions: HashMap::new(),
 
             cursor_highlight_color: "Cyan".to_string(),
             cursor_text_color: "Black".to_string(),
@@ -430,6 +451,7 @@ impl Config {
                 commit_backend: LlmBackend::Llamacpp,
                 llm_system_prompt: default_llm_system_prompt(),
                 commit_system_prompt: None,
+                llm_actions: HashMap::new(),
 
                 cursor_line_highlight: false,
                 cursor_line_highlight_color: "Rgb(40, 40, 55)".to_string(),

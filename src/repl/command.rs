@@ -1,6 +1,7 @@
 //! Command-line (REPL) execution.
 //!
 //! The `execute` function parses and runs `:` commands entered by the user.
+use crate::ed::buffer::BufferKind;
 use crate::ed::mode::MessageKind;
 use crate::ed::repeat::{RepeatExt, RepeatableAction};
 use crate::Config;
@@ -506,6 +507,53 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "copilot" | "copilot auth" => {
             editor.copilot_auth();
         }
+        // ---- CodeLlm (single-buffer chat) ----
+        "codellm" | "cllm" => {
+            let selection_text = if had_visual_range {
+                sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+            } else {
+                None
+            };
+            if let Some(text) = selection_text {
+                editor.llm.active_context = Some(text);
+            }
+            editor.open_codellm_chat_session();
+        }
+        s if s.starts_with("codellm ") || s.starts_with("cllm ") => {
+            let msg = if let Some(m) = s.strip_prefix("codellm ") {
+                m
+            } else {
+                s.strip_prefix("cllm ").unwrap()
+            }
+            .trim()
+            .to_string();
+
+            let selection_text = if had_visual_range {
+                sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+            } else {
+                None
+            };
+
+            if let Some(sel) = selection_text.clone() {
+                editor.llm.active_context = Some(sel);
+            }
+
+            editor.open_codellm_chat_session();
+
+            // If a message was provided alongside the selection (or alone),
+            // inject it at the cursor and auto-send.
+            if !msg.is_empty() {
+                let buf = editor.buf_mut();
+                if buf.kind == BufferKind::CodeLlm {
+                    let current_len = buf.rope.len_chars();
+                    buf.rope.insert(current_len, &format!("{}\n", msg));
+                    buf.parse_syntax();
+                }
+
+                // Auto-send
+                editor.codellm_send();
+            }
+        }
 
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
@@ -648,17 +696,23 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 }
                 editor.open_llm_chat_session();
             } else {
-                // One-shot: inline the selection into the message directly
-                let selection_text = if had_visual_range {
-                    sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                // ── Check for custom action first ──
+                // Add .cloned() here to satisfy the borrow checker!
+                if let Some(action) = editor.config.llm_actions.get(&msg).cloned() {
+                    editor.execute_llm_action(&action);
                 } else {
-                    None
-                };
-                if let Some(sel) = selection_text {
-                    let full_msg = format!("Selected code:\n```\n{}\n```\n\n{}", sel, msg);
-                    editor.llm_send_from_prompt(full_msg);
-                } else {
-                    editor.llm_send_from_prompt(msg);
+                    // ── Fallback: treat as inline one-shot prompt ──
+                    let selection_text = if had_visual_range {
+                        sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                    } else {
+                        None
+                    };
+                    if let Some(sel) = selection_text {
+                        let full_msg = format!("Selected code:\n```\n{}\n```\n\n{}", sel, msg);
+                        editor.llm_send_from_prompt(full_msg);
+                    } else {
+                        editor.llm_send_from_prompt(msg);
+                    }
                 }
             }
         }
@@ -705,6 +759,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         },
         "marks" => {
             editor.open_marks_popup();
+        }
+        "reg" => {
+            editor.open_registers_popup();
         }
         "gc" | "gitcommit" => {
             editor.git_commit_generate();
@@ -764,6 +821,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
+        "codellm", "cllm", "reg",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

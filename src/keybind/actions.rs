@@ -187,6 +187,16 @@ pub enum Action {
     ExtendSelectionPageDown,
     EnterLlmPrompt,
     EnterCommandPalette,
+    /// Open a single-buffer codecompanion-style LLM chat
+    CodeLlmChat,
+    /// Send the prompt in a CodeLlm buffer
+    CodeLlmSend,
+    LlmExplainFunction,
+    LlmReview,    
+    // LlmFix,       
+    // LlmGenerate,  
+    LlmAddToChat,
+    TransZhLine,
     
     FunctionList,
     Guide,
@@ -200,6 +210,11 @@ pub enum Action {
     HunkPopup,
     GitLog,
     GitStatus,
+
+    /// Entered `r` prefix — waiting for the replacement character.
+    EnterReplace,
+    /// Replace character(s) under cursor with `ch`.
+    ReplaceChar(char),    
 
     // Vim Search Actions
     EnterSearch,
@@ -388,6 +403,7 @@ impl Action {
                 | Action::BriefCopySelection
                 | Action::BriefCutSelection
                 | Action::ToggleTrueFalse
+                | Action::ReplaceChar(_)
                 | Action::SwissKnife
         )
     }

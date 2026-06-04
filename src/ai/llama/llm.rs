@@ -1,4 +1,3 @@
-// File: src/ai/llama/llm.rs
 //! Llama subsystem — built from scratch for llama.cpp local server integration.
 //! Uses native TCP streams to avoid external HTTP library dependency conflicts.
 
@@ -119,6 +118,11 @@ pub struct LlmState {
     pub single_shot: bool,
     pub prompt: MiniInputPrompt,
     pub system_prompt: Option<String>,
+
+    /// True when the current request is for a CodeLlm single-buffer chat.
+    /// The response handler checks this flag to decide whether to call
+    /// codellm_finalize_response() or update the 2-panel Llm buffers.
+    pub is_codellm: bool,
 }
 
 impl LlmState {
@@ -140,6 +144,7 @@ impl LlmState {
             single_shot: false,
             prompt: MiniInputPrompt::new(),
             system_prompt: None,
+            is_codellm: false,
         }
     }
 }
@@ -248,9 +253,61 @@ impl Editor {
 
             match res {
                 Ok(response_text) => {
-                    if self.git_commit_buffer_id.is_some() {
+                    // Take and drop the task handle to terminate the spinner animation
+                    let _ = self.llm.task_handle.take();
+
+                    // ── Infobar response (translation, etc.) ──────────────
+                    if self.llm.infobar_response {
+                        self.llm.infobar_response = false;
+
+                        let trimmed = response_text.trim().to_string();
+                        if trimmed.is_empty() {
+                            self.set_status_msg("Translation returned empty", MessageKind::Error);
+                        } else {
+                            // Store in register "z"
+                            self.yank_to_register(trimmed.clone(), Some('z'));
+
+                            // Display in infobar (truncate for narrow terminals)
+                            const MAX_INFOBAR: usize = 200;
+                            let display = if trimmed.chars().count() > MAX_INFOBAR {
+                                let end = trimmed
+                                    .char_indices()
+                                    .nth(MAX_INFOBAR)
+                                    .map(|(i, _)| i)
+                                    .unwrap_or(trimmed.len());
+                                format!("{}…  [reg z]", &trimmed[..end])
+                            } else {
+                                format!("{}  [reg z]", trimmed)
+                            };
+                            self.set_status_msg(&display, MessageKind::Success);
+                        }
+                    } else if self.git_commit_buffer_id.is_some() {
                         self.git_commit_on_llm_response(&response_text);
+                    } else if self.llm.is_codellm {
+                        // ── CodeLlm (single-buffer) response handling ──
+                        self.llm.is_codellm = false;
+
+                        let codellm_id = self
+                            .buffers
+                            .iter()
+                            .find(|b| b.kind == BufferKind::CodeLlm)
+                            .map(|b| b.id);
+
+                        if let Some(id) = codellm_id {
+                            if let Some(buf) = self.buf_mut_by_id(id) {
+                                let current_len = buf.rope.len_chars();
+                                buf.rope.insert(current_len, &response_text);
+                                buf.parse_syntax();
+                            }
+                            self.codellm_finalize_response();
+                        } else {
+                            self.set_status_msg(
+                                "CodeLlm buffer closed before response arrived",
+                                MessageKind::Error,
+                            );
+                        }
                     } else {
+                        // ── Legacy 2-panel Llm response handling ──
                         self.llm.buffer.text = response_text.clone();
 
                         // Insert first, then read the line count for scrolling
@@ -282,16 +339,44 @@ impl Editor {
                             win.scroll_line = target_row.saturating_sub(h.saturating_sub(1));
                             win.scroll_col = 0;
                             win.desired_col = 0;
-                            // Don't call scroll_to_cursor here — we already computed scroll_line
                         }
 
                         self.set_status_msg("Response is ready", MessageKind::Success);
                     }
                 }
                 Err(err) => {
-                    if self.git_commit_buffer_id.is_some() {
+                    let _ = self.llm.task_handle.take();
+
+                    if self.llm.infobar_response {
+                        self.llm.infobar_response = false;
+                        self.set_status_msg(
+                            &format!("Translation failed: {}", err),
+                            MessageKind::Error,
+                        );
+                    } else if self.git_commit_buffer_id.is_some() {
                         self.git_commit_on_llm_error(&err);
+                    } else if self.llm.is_codellm {
+                        // ── CodeLlm error handling ──
+                        self.llm.is_codellm = false;
+
+                        let codellm_id = self
+                            .buffers
+                            .iter()
+                            .find(|b| b.kind == BufferKind::CodeLlm)
+                            .map(|b| b.id);
+
+                        if let Some(id) = codellm_id {
+                            if let Some(buf) = self.buf_mut_by_id(id) {
+                                let current_len = buf.rope.len_chars();
+                                buf.rope
+                                    .insert(current_len, &format!("\n**Error:** {}\n", err));
+                                buf.parse_syntax();
+                            }
+                            // Still finalize so the user can type a new prompt
+                            self.codellm_finalize_response();
+                        }
                     } else {
+                        // ── Legacy 2-panel error handling ──
                         let history_id = self.ensure_llm_buffer_exists();
                         if let Some(buf) = self.buf_mut_by_id(history_id) {
                             let current_len = buf.rope.len_chars();
@@ -346,8 +431,6 @@ impl Editor {
         debug_assert_eq!(self.active_window().buffer_id(), input_id);
 
         // ── Pre-populate input buffer with selection context ──────
-        // The user sees what will be sent, can edit/trim it, then sends.
-        // active_context is also kept so follow-up messages include it.
         if let Some(context) = self.llm.active_context.clone() {
             let template = format!("\n{}\n\n", context);
             if let Some(buf) = self.buf_mut_by_id(input_id) {
@@ -355,7 +438,6 @@ impl Editor {
                 buf.mark_modified();
                 buf.parse_syntax();
             }
-            // Read line count first, then take the mutable borrow
             let line_count = self.buf_by_id(input_id).map(|b| b.len_lines()).unwrap_or(1);
             {
                 let win = self.active_window_mut();
@@ -391,13 +473,7 @@ impl Editor {
         );
     }
 
-    // handke_llm_input_buffer_key move to ed/handle_key.rs
     /// Send the current content of the LlmInput buffer as a chat message.
-    /// Clears the input buffer and resets cursor on success.
-    /// Send the current content of the LlmInput buffer as a chat message.
-    /// Clears the input buffer and resets cursor on success.
-    /// Send the current content of the LlmInput buffer as a chat message.
-    /// Clears the input buffer and resets cursor on success.
     pub fn llm_send_input_buffer(&mut self) -> CommandResult {
         let input_bid = self.active_window().buffer_id();
         let input = self.buf().rope.to_string();
@@ -414,7 +490,7 @@ impl Editor {
             buf.parse_syntax();
         }
 
-        // Reset cursor — buffer is now one empty line
+        // Reset cursor
         {
             let win = self.active_window_mut();
             win.row = 0;
@@ -424,14 +500,7 @@ impl Editor {
             win.desired_col = 0;
         }
 
-        // Stay in whatever mode the user was in. If they were in Normal and
-        // pressed Enter to send, they stay in Normal. If Insert, they stay
-        // in Insert so they can immediately type the next message.
-        // Only explicitly switch to Insert if the buffer was just cleared
-        // and the mode is not already one of the input modes.
         if !matches!(self.mode, Mode::Insert | Mode::Brief) {
-            // Caller came from Normal — switch to Insert so the buffer is
-            // ready for the next message. This is opt-in rather than forced.
             self.enter_insert();
         }
 
@@ -546,7 +615,6 @@ impl Editor {
 
             if let Some(text) = insert_text {
                 if !text.is_empty() {
-                    // Safe Unicode-friendly character insertion to prevent index errors
                     let mut chars: Vec<char> = self.llm.prompt.buffer.chars().collect();
                     let insert_chars: Vec<char> = text.chars().collect();
 
@@ -600,6 +668,197 @@ impl Editor {
             .iter()
             .any(|b| b.id == bid && b.kind == BufferKind::Llm)
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CodeLlm (single-buffer chat) methods
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Send the current prompt in a CodeLlm buffer.
+    pub fn codellm_send(&mut self) {
+        if self.buf().kind != BufferKind::CodeLlm {
+            return;
+        }
+
+        // Don't allow sending while a response is streaming
+        if self.llm.task_handle.is_some() {
+            self.set_status_msg("LLM is still responding…", MessageKind::Info);
+            return;
+        }
+
+        let lock_line = self.buf().llm_lock_line;
+
+        // ── Extract prompt text ───────────────────────────────
+        let mut prompt = String::new();
+        let total = self.buf().len_lines();
+        for i in lock_line..total {
+            let line = self.buf().line_text(i);
+            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+            prompt.push_str(trimmed);
+            prompt.push('\n');
+        }
+        let prompt = prompt.trim().to_string();
+
+        if prompt.is_empty() {
+            self.set_status_msg("Empty prompt", MessageKind::Error);
+            return;
+        }
+
+        // ── Lock the prompt area (it's now history) ──────────
+        {
+            let buf = self.buf_mut();
+            buf.llm_lock_line = buf.len_lines();
+            buf.rope.insert(buf.rope.len_chars(), "\n## Assistant\n\n");
+            buf.parse_syntax();
+        }
+
+        // ── Move cursor to the end (watching the response) ──
+        {
+            let total = self.buf().len_lines().saturating_sub(1);
+            let win = self.active_window_mut();
+            win.row = total;
+            win.col = 0;
+            win.desired_col = 0;
+        }
+
+        // ── Switch to Normal mode while waiting ──────────────
+        self.enter_normal();
+
+        // ── Send to LLM ──────────────────────────────────────
+        let full_prompt = if let Some(ctx) = &self.llm.active_context {
+            format!("Selected code:\n```\n{}\n```\n\n{}", ctx, prompt)
+        } else {
+            prompt.clone()
+        };
+
+        self.llm_send_codellm(full_prompt);
+    }
+
+    /// Wrapper that wires into the existing LLM backend for CodeLlm buffers.
+    fn llm_send_codellm(&mut self, prompt: String) {
+        self.llm.is_codellm = true;
+
+        let backend = self.config.llm_backend;
+        self.set_status_msg(
+            &format!("Querying {}…", backend),
+            crate::ed::mode::MessageKind::Info,
+        );
+
+        let system_prompt = self
+            .llm
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| self.config.llm_system_prompt.clone());
+
+        let messages = vec![
+            ("system".to_string(), system_prompt),
+            ("user".to_string(), prompt),
+        ];
+
+        self.spawn_llm_request_with_backend(messages, backend);
+    }
+
+    /// Finalize a CodeLlm response: lock it and prepare the next prompt area.
+    pub fn codellm_finalize_response(&mut self) {
+        let codellm_id = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::CodeLlm)
+            .map(|b| b.id);
+
+        if let Some(id) = codellm_id {
+            // Ensure we are viewing this buffer
+            if self.active_window().buffer_id() != id {
+                self.switch_window_to_buffer(id);
+            }
+
+            let (last_line, total_lines) = {
+                let buf = self.buf_mut_by_id(id).unwrap();
+                let len = buf.rope.len_chars();
+                if len == 0 || buf.rope.char(len - 1) != '\n' {
+                    buf.rope.insert(len, "\n");
+                }
+                buf.llm_lock_line = buf.len_lines();
+                buf.rope.insert(buf.rope.len_chars(), "\n## You\n");
+                buf.parse_syntax();
+                let last = buf.len_lines().saturating_sub(1);
+                (last, buf.len_lines())
+            };
+
+            let win = self.active_window_mut();
+            win.row = last_line;
+            win.col = 0;
+            win.desired_col = 0;
+
+            // Auto-scroll to follow the response if needed
+            let h = win.position.height;
+            win.scroll_line = last_line.saturating_sub(h.saturating_sub(1));
+
+            self.enter_insert();
+            self.set_status_msg(
+                "LLM response complete — type next prompt",
+                MessageKind::Info,
+            );
+        } else {
+            self.set_status_msg(
+                "CodeLlm buffer closed before response arrived",
+                MessageKind::Error,
+            );
+        }
+    }
+
+    /// Extracts the function around the cursor and opens a CodeLlm
+    /// session to explain it, including the function signature/head.
+    pub fn llm_explain_function(&mut self) {
+        // 1. Find the function span using Tree-sitter
+        let span_info = self.function_around_span_info();
+
+        let Some(info) = span_info else {
+            self.set_status_msg("No function found around cursor", MessageKind::Error);
+            return;
+        };
+
+        // 2. Extract the text from start_row to end_row (inclusive)
+        let func_text = self.extract_line_range_text(info.start_row, info.end_row);
+
+        let Some(func_text) = func_text else {
+            self.set_status_msg("Failed to extract function text", MessageKind::Error);
+            return;
+        };
+
+        if func_text.trim().is_empty() {
+            self.set_status_msg("Function is empty", MessageKind::Error);
+            return;
+        }
+
+        // 3. Open the CodeLlm session
+        self.open_codellm_chat_session();
+
+        // 4. Inject the function text and a prompt directly into the buffer
+        let prompt = format!(
+            "Explain this function:\n```\n{}\n```\n\nPlease explain what this function does, its parameters, and its return value.",
+            func_text.trim_end()
+        );
+
+        let buf = self.buf_mut();
+        if buf.kind == BufferKind::CodeLlm {
+            // Append to the "## You" section
+            let current_len = buf.rope.len_chars();
+            buf.rope.insert(current_len, &prompt);
+            buf.parse_syntax();
+
+            // Move cursor to the very end of the injected prompt
+            let last_line = buf.len_lines().saturating_sub(1);
+            let last_col = buf.line_char_len(last_line);
+
+            let win = self.active_window_mut();
+            win.row = last_line;
+            win.col = last_col;
+            win.desired_col = last_col;
+        }
+
+        // 5. Auto-send the prompt
+        self.codellm_send();
+    }
 }
 
 /// Communicates with llama.cpp local server using raw TCP sockets, targeting
@@ -615,7 +874,6 @@ async fn query_llamacpp_local(
 
     let path = "/v1/chat/completions";
 
-    // Format the simple tuple array into standard API message objects
     let json_messages: Vec<serde_json::Value> = messages
         .iter()
         .map(|(role, content)| {
@@ -702,7 +960,6 @@ async fn query_llamacpp_local(
 
     let http_body = parts[1];
 
-    // Deserialize Chat Completion response format
     #[derive(serde::Deserialize)]
     struct ChatMessage {
         content: String,
@@ -733,9 +990,6 @@ async fn query_llamacpp_local(
 }
 
 /// Communicates with a local Ollama server via its native `/api/chat` endpoint.
-///
-/// Ollama defaults to port 11434. The response envelope is simpler than
-/// the OpenAI format: `{"message":{"content":"..."}}`
 async fn query_ollama_local(
     messages: Vec<(String, String)>,
     url: &str,
@@ -803,8 +1057,6 @@ async fn query_ollama_local(
 
     let http_body = parts[1];
 
-    // Ollama /api/chat response:
-    //   {"model":"llama3","message":{"role":"assistant","content":"..."},"done":true}
     #[derive(serde::Deserialize)]
     struct OllamaMessage {
         content: String,
@@ -823,4 +1075,142 @@ async fn query_ollama_local(
     })?;
 
     Ok(parsed.message.content)
+}
+
+impl Editor {
+    /// Action: Review the function or visual selection.
+    pub fn llm_review(&mut self) {
+        let (code, instruction) = self.get_code_context(
+            "Review this code for bugs, performance issues, and style improvements.",
+        );
+        self.llm_action_helper(
+            "You are an expert senior software engineer performing a code review. Be concise and constructive.",
+            &code,
+            &instruction,
+            true // Auto-send
+        );
+    }
+
+    /// Action: Fix the function or visual selection (optionally including LSP diagnostics).
+    pub fn llm_fix(&mut self) {
+        let (code, base_instruction) = self.get_code_context("Fix the issues in this code.");
+
+        // Enrich with LSP diagnostics if available!
+        let mut instruction = base_instruction;
+        let row = self.active_window().row;
+        let diagnostics: Vec<String> = self
+            .buf()
+            .diagnostics
+            .iter()
+            .filter(|d| d.line == row)
+            .map(|d| format!("- {}", d.message))
+            .collect();
+
+        if !diagnostics.is_empty() {
+            instruction.push_str("\n\nCompiler/LSP Errors:\n");
+            instruction.push_str(&diagnostics.join("\n"));
+        }
+
+        self.llm_action_helper(
+            "You are an expert debugger. Provide ONLY the corrected code inside a markdown block, with no extra explanation unless necessary.",
+            &code,
+            &instruction,
+            true // Auto-send
+        );
+    }
+
+    /// Action: Add current selection/context to the existing chat (no auto-send).
+    pub fn llm_add_to_chat(&mut self) {
+        let (code, _) = self.get_code_context("");
+        self.llm_action_helper(
+            "You are a helpful coding assistant.", // Reset to default system prompt
+            &code,
+            "I am adding this code to the context. My question is: ", // Leave open for user to type
+            false, // DO NOT auto-send, let the user type their question first!
+        );
+    }
+
+    /// Action: Generate code based on a prompt (leaves prompt empty for user to type).
+    pub fn llm_generate(&mut self) {
+        self.llm_action_helper(
+            "You are an expert coder. Output ONLY the requested code inside a markdown block.",
+            "",                         // No code provided
+            "Generate the following: ", // User types the rest
+            false,                      // DO NOT auto-send
+        );
+    }
+
+    /// Helper to get either the visual selection or the current function under cursor
+    pub fn get_code_context(&self, default_instruction: &str) -> (String, String) {
+        // 1. Try visual selection first
+        if let Some((r1, r2)) = self.get_visual_line_range() {
+            if let Some(text) = self.extract_line_range_text(r1, r2) {
+                return (text, default_instruction.to_string());
+            }
+        }
+
+        // 2. Fallback to function under cursor
+        if let Some(info) = self.function_around_span_info() {
+            if let Some(text) = self.extract_line_range_text(info.start_row, info.end_row) {
+                return (text, default_instruction.to_string());
+            }
+        }
+
+        // 3. Fallback to empty (user must type/paste code)
+        (String::new(), default_instruction.to_string())
+    }
+}
+
+impl Editor {
+    /// Core helper for CodeLlm actions. Opens a chat (or uses an existing one),
+    /// injects the code with a specific instruction, and optionally auto-sends.
+    fn llm_action_helper(
+        &mut self,
+        system_prompt: &str,
+        code: &str,
+        instruction: &str,
+        auto_send: bool,
+    ) {
+        // Check if a CodeLlm buffer already exists
+        let existing_id = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::CodeLlm)
+            .map(|b| b.id);
+
+        let chat_id = if let Some(id) = existing_id {
+            // Switch to the existing chat buffer
+            self.switch_window_to_buffer(id);
+            id
+        } else {
+            // Open a new session
+            self.open_codellm_chat_session();
+            self.buf().id // get the newly created ID
+        };
+
+        // Format the payload
+        let payload = format!("Code:\n```\n{}\n```\n\n{}", code.trim_end(), instruction);
+
+        // Inject into the prompt area
+        let buf = self.buf_mut();
+        if buf.kind == BufferKind::CodeLlm {
+            let current_len = buf.rope.len_chars();
+            buf.rope.insert(current_len, &payload);
+            buf.parse_syntax();
+
+            let last_line = buf.len_lines().saturating_sub(1);
+            let last_col = buf.line_char_len(last_line);
+            let win = self.active_window_mut();
+            win.row = last_line;
+            win.col = last_col;
+            win.desired_col = last_col;
+        }
+
+        // Override the system prompt for this specific request
+        self.llm.system_prompt = Some(system_prompt.to_string());
+
+        if auto_send {
+            self.codellm_send();
+        }
+    }
 }

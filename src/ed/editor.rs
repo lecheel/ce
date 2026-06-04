@@ -6,6 +6,7 @@ use crate::ed::buffer::{Buffer, BufferKind};
 use crate::ed::handle::tag::LSP_GOTO_TIMEOUT_MS;
 use crate::ed::misc_helper::{count_nested_fns, is_fn_kind, is_valid_register_char};
 use crate::ed::mode::{MessageKind, Mode};
+use crate::ed::syntax::SyntaxState;
 use crate::ed::syntax::TextObject;
 use crate::ed::window::{LayoutNode, Window};
 use crate::keybind::bindings::Action;
@@ -21,6 +22,7 @@ use crate::popup::{PopupItem, PopupKind, PopupState};
 use crate::render::statusbar_state::StatusBarState;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ropey::Rope;
 use std::collections::HashSet;
 
 /// In-flight LSP go-to-definition request.
@@ -87,6 +89,7 @@ pub enum PendingInput {
     /// `` ` `` pressed — waiting for the bookmark letter or a second
     /// backtick for ping-pong.
     GotoBookmark,
+    ReplaceChar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +208,7 @@ pub struct Editor {
     /// (e.g. buffer is read-only, no text object found).
     /// Reset to `false` at the start of each `execute_action` call.
     pub action_failed: bool,
+    pub replace_count: usize,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -325,6 +329,7 @@ impl Editor {
             copilot_handle: None,
             copilot_response_rx: None,
             action_failed: false,
+            replace_count: 0,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -946,37 +951,65 @@ impl Editor {
             return;
         }
 
-        // ── Pending bookmark / quickmark input ─────────────────────
+        // ── Pending bookmark / quickmark / replace-char input ────────
         if self.pending_input != PendingInput::None
             && matches!(self.mode, Mode::Normal | Mode::Visual | Mode::VisualLine)
         {
-            match key.code {
-                KeyCode::Esc => {
-                    self.pending_input = PendingInput::None;
-                    self.clear_status_msg();
-                }
-
-                KeyCode::Char(c) if c.is_ascii_lowercase() || c == '`' => {
-                    match self.pending_input {
-                        PendingInput::SetBookmark => {
-                            self.set_named_bookmark(c);
-                        }
-                        PendingInput::GotoBookmark => {
-                            if c == '`' {
-                                self.jump_last_position();
-                            } else {
-                                self.goto_named_bookmark(c);
-                            }
-                        }
-                        PendingInput::None => unreachable!(),
+            match self.pending_input {
+                // ── Replace-char: accept ANY character (not just a-z) ──
+                PendingInput::ReplaceChar => match key.code {
+                    KeyCode::Esc => {
+                        self.pending_input = PendingInput::None;
+                        self.replace_count = 0;
+                        self.clear_status_msg();
                     }
-                    self.pending_input = PendingInput::None;
-                }
+                    KeyCode::Enter => {
+                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar('\n'));
+                        self.pending_input = PendingInput::None;
+                    }
+                    KeyCode::Char(c) => {
+                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar(c));
+                        self.pending_input = PendingInput::None;
+                    }
+                    KeyCode::Tab => {
+                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar('\t'));
+                        self.pending_input = PendingInput::None;
+                    }
+                    _ => {
+                        self.pending_input = PendingInput::None;
+                        self.replace_count = 0;
+                        self.clear_status_msg();
+                    }
+                },
 
-                _ => {
-                    self.pending_input = PendingInput::None;
-                    self.clear_status_msg();
-                }
+                // ── Bookmark handlers (unchanged logic, just re-indented) ──
+                PendingInput::SetBookmark | PendingInput::GotoBookmark => match key.code {
+                    KeyCode::Esc => {
+                        self.pending_input = PendingInput::None;
+                        self.clear_status_msg();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_lowercase() || c == '`' => {
+                        match self.pending_input {
+                            PendingInput::SetBookmark => {
+                                self.set_named_bookmark(c);
+                            }
+                            PendingInput::GotoBookmark => {
+                                if c == '`' {
+                                    self.jump_last_position();
+                                } else {
+                                    self.goto_named_bookmark(c);
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                        self.pending_input = PendingInput::None;
+                    }
+                    _ => {
+                        self.pending_input = PendingInput::None;
+                        self.clear_status_msg();
+                    }
+                },
+                PendingInput::None => unreachable!(),
             }
             return;
         }
@@ -1026,6 +1059,18 @@ impl Editor {
             }
         }
 
+        // ── CodeLlm Insert/Brief guard ──────────────────────────
+        // Must run before the generic Insert-mode dispatch so we
+        // can block edits above the lock line and intercept send.
+        if self.buf().kind == BufferKind::CodeLlm && matches!(self.mode, Mode::Insert | Mode::Brief)
+        {
+            if self.handle_codellm_insert_key(key) {
+                return;
+            }
+            // Key not consumed (cursor in editable zone, normal typing)
+            // → fall through to the standard Insert-mode handler below
+        }
+
         if self.mode == Mode::Insert || self.mode == Mode::Command || self.mode == Mode::Search {
             let key_str = crate::keybind::binding_ex::format_key(key);
             if let Some(action) = crate::keybind::bindings::resolve_single_key(
@@ -1052,6 +1097,7 @@ impl Editor {
                 BufferKind::GitStatus => self.handle_git_status_key(key),
                 BufferKind::CheckHealth => self.handle_checkhealth_key(key),
                 BufferKind::Llm | BufferKind::LlmInput => self.handle_llm_buffer_key(key),
+                BufferKind::CodeLlm => self.handle_codellm_key(key),
                 _ => false,
             };
             if handled {
@@ -2923,6 +2969,159 @@ impl Editor {
                     );
                 }
             }
+        }
+    }
+}
+
+// ── Add these methods to impl Editor ──────────────────────
+
+impl Editor {
+    /// Open a single-buffer codecompanion-style LLM chat.
+    pub fn open_codellm_chat_session(&mut self) {
+        // Reset to default system prompt for generic chats
+        self.llm.system_prompt = None;
+
+        let buf_id = self.next_buf_id;
+        self.next_buf_id += 1;
+
+        let mut buf = Buffer::new(buf_id, None).unwrap_or_else(|_| {
+            let mut b = Buffer {
+                id: buf_id,
+                rope: Rope::from_str("\n"),
+                filename: None,
+                modified: false,
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+                syntax: SyntaxState::new(),
+                bookmarks: std::collections::HashSet::new(),
+                git_diffs: std::collections::HashMap::new(),
+                kind: BufferKind::CodeLlm,
+                diagnostics: Vec::new(),
+                git_log_state: None,
+                git_status_state: None,
+                diff_alignment: None,
+                ripgrep_results: Vec::new(),
+                ripgrep_line_map: Vec::new(),
+                search_pattern: None,
+                named_bookmarks: std::collections::HashMap::new(),
+                llm_lock_line: 0,
+            };
+            b.rope = Rope::from_str("\n");
+            b
+        });
+
+        buf.kind = BufferKind::CodeLlm;
+        buf.rope = ropey::Rope::from_str("# Code LLM Chat\n\n## You\n");
+        buf.llm_lock_line = 3; // Lines 0, 1, 2 are locked
+        buf.parse_syntax();
+
+        let buf_id_val = buf.id;
+        self.buffers.push(buf);
+
+        // Switch the active window to show this buffer
+        self.windows[self.active_window_idx].set_buffer_id(buf_id_val);
+
+        // ── Pre-populate the prompt area with selection context ──────
+        if let Some(context) = self.llm.active_context.clone() {
+            let template = format!("Selected code:\n```\n{}\n```\n\n", context);
+            if let Some(buf) = self.buf_mut_by_id(buf_id_val) {
+                let insert_pos = buf.rope.line_to_char(buf.llm_lock_line);
+                buf.rope.insert(insert_pos, &template);
+                buf.parse_syntax();
+            }
+        }
+
+        // Move cursor to the end of the prompt area
+        let (total, last_len) = {
+            let b = self.buf_by_id(buf_id_val).unwrap();
+            let total = b.len_lines().saturating_sub(1);
+            let len = b.line_char_len(total);
+            (total, len)
+        };
+
+        let win = self.active_window_mut();
+        win.row = total;
+        win.col = last_len;
+        win.desired_col = last_len;
+        win.scroll_line = 0;
+
+        self.enter_insert();
+        self.set_status_msg(
+            "Code LLM — type your prompt, Ctrl+Enter to send, q to close",
+            MessageKind::Info,
+        );
+    }
+
+    /// Called by the LLM streaming layer to append a token
+    /// to the active CodeLlm buffer.
+    pub fn codellm_append_token(&mut self, token: &str) {
+        let buf = self.buf_mut();
+        if buf.kind != BufferKind::CodeLlm {
+            return;
+        }
+
+        // Insert before the trailing newline
+        let len = buf.rope.len_chars();
+        if len > 0 && buf.rope.char(len - 1) == '\n' {
+            buf.rope.insert(len - 1, token);
+        } else {
+            buf.rope.insert(len, token);
+        }
+
+        // Auto-scroll the window to follow the response
+        let last_line = buf.len_lines().saturating_sub(1);
+        let win = self.active_window_mut();
+        win.row = last_line;
+        win.col = 0;
+    }
+}
+
+impl Editor {
+    /// Executes a user-defined LLM action from config.
+    pub fn execute_llm_action(&mut self, action: &crate::config::app_config::LlmActionConfig) {
+        // 1. Get context (Visual selection > Function under cursor > Empty)
+        let (code, _) = self.get_code_context("");
+        let file_name = self.active_filename().unwrap_or("untitled").to_string();
+
+        // 2. Resolve placeholders in the user's prompt template
+        let mut prompt = action.prompt.clone();
+        prompt = prompt.replace("{selection}", &code);
+        prompt = prompt.replace("{file}", &file_name);
+
+        // 3. Open CodeLlm session (or switch to existing)
+        let existing_id = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::CodeLlm)
+            .map(|b| b.id);
+
+        if let Some(id) = existing_id {
+            self.switch_window_to_buffer(id);
+        } else {
+            self.open_codellm_chat_session();
+        }
+
+        // 4. Inject the processed prompt
+        let buf = self.buf_mut();
+        if buf.kind == BufferKind::CodeLlm {
+            let current_len = buf.rope.len_chars();
+            buf.rope.insert(current_len, &prompt);
+            buf.parse_syntax();
+
+            let last_line = buf.len_lines().saturating_sub(1);
+            let last_col = buf.line_char_len(last_line);
+            let win = self.active_window_mut();
+            win.row = last_line;
+            win.col = last_col;
+            win.desired_col = last_col;
+        }
+
+        // 5. Override system prompt if the action specifies one
+        self.llm.system_prompt = action.system_prompt.clone();
+
+        // 6. Auto-send if configured
+        if action.auto_send {
+            self.codellm_send();
         }
     }
 }

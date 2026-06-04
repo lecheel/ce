@@ -33,6 +33,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("z z", Action::ScrollCenter),
         // searching
         ("s", Action::EasyMotion),
+        ("r", Action::EnterReplace),
         ("%", Action::MatchBracket),
         ("/", Action::EnterSearch),
         ("n", Action::SearchNext),
@@ -53,6 +54,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("ctrl+r", Action::Redo),
         ("p", Action::Paste),
         ("g c c", Action::ToggleComment),
+        ("g t", Action::TransZhLine),
         // bookmarks
         ("m", Action::BookmarkSet),
         ("`", Action::BookmarkGoto),

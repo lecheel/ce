@@ -504,6 +504,7 @@ async fn run_loop(
 
                 // 5. Poll background LLM task responses
                 editor.poll_llm_responses();
+                // editor.poll_llm_translate();
 
                 // 6. Animate the git commit generation buffer
                 editor.tick_git_commit();

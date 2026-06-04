@@ -450,6 +450,38 @@ fn exits_insert_mode(action: &Action) -> bool {
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
 
+    /*
+    // ── CodeLlm Dynamic Readonly Guard ──────────────────────────
+    // Prevent destructive Normal-mode edits (x, dd, cw, etc.) if
+    // the cursor is sitting in the locked history above the prompt.
+    if editor.buf().kind == BufferKind::CodeLlm {
+        let lock_line = editor.buf().llm_lock_line;
+        let cursor_row = editor.active_window().row;
+
+        if cursor_row < lock_line {
+            match action {
+                // Block all mutating actions
+                Action::DeleteChar
+                | Action::DeleteLine
+                | Action::DeleteWord
+                | Action::ChangeWord
+                | Action::ChangeLine
+                | Action::ReplaceChar(_)
+                | Action::SubstituteLine
+                | Action::JoinLines
+                | Action::Indent
+                | Action::Outdent
+                | Action::Paste => {
+                    editor.set_status_msg("Cannot edit history above prompt", MessageKind::Error);
+                    return; // Abort the action!
+                }
+                // Allow everything else (movements, yanks, searches)
+                _ => {}
+            }
+        }
+    }
+    */
+
     // Reset failure flag for this action
     editor.action_failed = false;
 
@@ -684,6 +716,8 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
     // snapshots. A single snapshot is taken during ExitMode replication.
     let in_block_insert = editor.visual_block_insert_state.is_some();
     match action {
+        Action::CodeLlmChat => editor.open_codellm_chat_session(),
+        Action::CodeLlmSend => editor.codellm_send(),
         // ── Chain: execute each sub-action unconditionally ────────
         Action::Chain(ref actions) => {
             for sub_action in actions.clone() {
@@ -2673,6 +2707,71 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
             // ── Future Job 3: Add more context actions here ────────
         }
+        Action::LlmExplainFunction => editor.llm_explain_function(),
+        Action::LlmReview => editor.llm_review(),
+        Action::LlmAddToChat => editor.llm_add_to_chat(),
+        Action::EnterReplace => {
+            editor.replace_count = count;
+            editor.pending_input = PendingInput::ReplaceChar;
+            editor.set_status_msg("r", MessageKind::Info);
+        }
+
+        Action::ReplaceChar(ch) => {
+            let replace_count = editor.replace_count.max(1);
+            editor.replace_count = 0;
+
+            if ch == '\n' {
+                // r<Enter>: replace char with newline (splits the line)
+                let (win, buf) = editor.active_window_and_buf_mut();
+                let row = win.row;
+                let col = win.col;
+                let line_len = buf.line_char_len(row);
+
+                if col < line_len {
+                    let line_start = buf.rope.line_to_char(row);
+                    let offset = line_start + col;
+                    buf.rope.remove(offset..offset + 1);
+                    buf.rope.insert(offset, "\n");
+                    buf.mark_modified();
+                    buf.parse_syntax();
+                    win.row = row + 1;
+                    win.col = 0;
+                    win.desired_col = 0;
+                }
+            } else {
+                let (win, buf) = editor.active_window_and_buf_mut();
+                let row = win.row;
+                let col = win.col;
+                let line_len = buf.line_char_len(row);
+
+                // Can only replace if cursor is on an actual character
+                if col < line_len {
+                    let line_start = buf.rope.line_to_char(row);
+                    let offset = line_start + col;
+                    let available = line_len - col;
+                    let n = replace_count.min(available);
+
+                    if n > 0 {
+                        let end_offset = offset + n;
+                        buf.rope.remove(offset..end_offset);
+                        let replacement: String = std::iter::repeat(ch).take(n).collect();
+                        buf.rope.insert(offset, &replacement);
+                        buf.mark_modified();
+                        buf.parse_syntax();
+
+                        // Cursor lands on the last replaced character (Vim behavior)
+                        win.col = col + n - 1;
+                        win.desired_col = win.col;
+                    }
+                }
+            }
+            editor.comp.on_edit();
+            editor.clear_status_msg();
+        }
+        Action::TransZhLine => {
+            editor.trans_zh_line();
+        }
+
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();
@@ -3086,6 +3185,10 @@ pub fn get_all_mode_bindings(mode: Mode) -> Vec<(String, String)> {
             bindings.push(("y a f".into(), "Yank around function".into()));
             bindings.push(("y i f".into(), "Yank inside function".into()));
             bindings.push(("g d".into(), "Go to definition (ctagd → ctags)".into()));
+            bindings.push((
+                "g t".into(),
+                "Translate Chinese line → infobar + reg z".into(),
+            ));
             bindings
         }
 

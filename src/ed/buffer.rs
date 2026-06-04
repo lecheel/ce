@@ -46,6 +46,7 @@ pub enum BufferKind {
     GitStatus,
     GitCommit,
     LlmInput,
+    CodeLlm,
     Llm,
     CheckHealth,
 }
@@ -103,6 +104,11 @@ pub struct Buffer {
     pub ripgrep_line_map: Vec<Option<usize>>,
     pub search_pattern: Option<String>,
     pub named_bookmarks: std::collections::HashMap<char, (usize, usize)>,
+
+    /// For CodeLlm buffers: the first line that is editable.
+    /// Lines 0..llm_lock_line are locked history.
+    /// Lines llm_lock_line.. are the active prompt area.
+    pub llm_lock_line: usize,
 }
 
 impl Buffer {
@@ -116,6 +122,7 @@ impl Buffer {
         {
             self.modified = true;
         }
+        // CodeLlm never marks the buffer dirty
     }
     // ---- Constructor ----
     /// Way 1: Fallback/Full parse trigger
@@ -126,6 +133,7 @@ impl Buffer {
             BufferKind::GitLog => "gitlog".to_string(),
             BufferKind::Ripgrep => "rg".to_string(),
             BufferKind::CheckHealth => "checkhealth".to_string(),
+            BufferKind::CodeLlm => "markdown".to_string(),
             BufferKind::GitDiffHead => detect_language(self.filename.as_deref()),
             _ => detect_language(self.filename.as_deref()),
         };
@@ -139,6 +147,7 @@ impl Buffer {
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
             BufferKind::Ripgrep => "rg".to_string(),
+            BufferKind::CodeLlm => "markdown".to_string(),
             BufferKind::CheckHealth => "checkhealth".to_string(),
             _ => detect_language(self.filename.as_deref()),
         };
@@ -168,6 +177,7 @@ impl Buffer {
             search_pattern: None,
             named_bookmarks: std::collections::HashMap::new(),
             diff_alignment: None,
+            llm_lock_line: 0,
         };
 
         if let Some(ref path) = filename {
@@ -183,6 +193,17 @@ impl Buffer {
         // buf.update_mock_git_diffs();
 
         Ok(buf)
+    }
+
+    /// Returns true if the cursor is in the editable zone
+    /// (at or below `llm_lock_line`).  Always true for
+    /// non-CodeLlm buffers.
+    #[inline]
+    pub fn is_editable_line(&self, line: usize) -> bool {
+        if self.kind != BufferKind::CodeLlm {
+            return true;
+        }
+        line >= self.llm_lock_line
     }
 
     /// Rebuild `bookmarks` (row-only set used by the gutter) from
@@ -241,8 +262,18 @@ impl Buffer {
     }
 
     pub fn save_file(&mut self, format_on_save: bool) -> Result<Option<String>> {
-        // ── Reject saves for special buffers ────────────────────────
-        if self.kind != BufferKind::Normal {
+        // ── Reject saves for strictly read-only special buffers ─────
+        // CodeLlm and LlmInput are intentionally editable, so they can be saved.
+        if matches!(
+            self.kind,
+            BufferKind::GitLog
+                | BufferKind::GitDiff
+                | BufferKind::GitDiffHead
+                | BufferKind::Ripgrep
+                | BufferKind::GitStatus
+                | BufferKind::Llm
+                | BufferKind::CheckHealth
+        ) {
             anyhow::bail!("Cannot save a special buffer");
         }
 
@@ -464,6 +495,7 @@ impl Buffer {
             BufferKind::GitCommit => "[Git Commit]".to_string(),
             BufferKind::GitStatus => "[Git Status]".to_string(),
             BufferKind::CheckHealth => "[Check Health]".to_string(),
+            BufferKind::CodeLlm => "[Code LLM]".to_string(),
             BufferKind::GitDiffHead => self
                 .filename
                 .as_deref()
