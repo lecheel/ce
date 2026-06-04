@@ -77,7 +77,9 @@ fn is_head_pane(buf: &Buffer) -> bool {
     buf.kind == crate::ed::buffer::BufferKind::GitDiffHead
 }
 
-// Helper to convert per-char highlights into grouped Spans
+/// Helper to convert per-char highlights into grouped Spans.
+/// Now expands tabs into spaces so the terminal's tab stops don't
+/// conflict with our visual column calculations.
 fn styled_spans_from_highlights(
     chars: &[char],
     default_style: Style,
@@ -85,6 +87,8 @@ fn styled_spans_from_highlights(
     selected_mask: &[bool],
     search_mask: &[bool],
     line_bg: Option<Color>,
+    tab_size: usize,
+    start_visual_col: usize,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if chars.is_empty() {
@@ -109,23 +113,45 @@ fn styled_spans_from_highlights(
         base
     };
 
-    let mut current_style = get_style(0);
+    // 1. Expand tabs into spaces and build a flat array of (char, style)
+    let mut expanded: Vec<(char, Style)> = Vec::new();
+    let mut visual_col = start_visual_col;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        let style = get_style(i);
+        if ch == '\t' {
+            let width = tab_size - (visual_col % tab_size);
+            for _ in 0..width {
+                expanded.push((' ', style));
+            }
+            visual_col += width;
+        } else {
+            expanded.push((ch, style));
+            visual_col += crate::render::helpers::display_width(&ch.to_string()).max(1);
+        }
+    }
+
+    // 2. Group consecutive expanded chars by style into Spans
+    if expanded.is_empty() {
+        return spans;
+    }
+
+    let mut current_style = expanded[0].1;
     let mut chunk_start = 0;
 
-    for (i, _) in chars.iter().enumerate() {
-        let target_style = get_style(i);
-        if target_style != current_style {
+    for (i, &(_, style)) in expanded.iter().enumerate() {
+        if style != current_style {
             if chunk_start < i {
-                let text: String = chars[chunk_start..i].iter().collect();
+                let text: String = expanded[chunk_start..i].iter().map(|(c, _)| *c).collect();
                 spans.push(Span::styled(text, current_style));
             }
-            current_style = target_style;
+            current_style = style;
             chunk_start = i;
         }
     }
 
-    if chunk_start < chars.len() {
-        let text: String = chars[chunk_start..].iter().collect();
+    if chunk_start < expanded.len() {
+        let text: String = expanded[chunk_start..].iter().map(|(c, _)| *c).collect();
         spans.push(Span::styled(text, current_style));
     }
 
@@ -343,13 +369,21 @@ fn draw_pane(
         let hscroll = win.scroll_col;
         let line_text = buf.line_text(i);
 
+        // Visual column at the start of the visible portion of this line
+        let line_start_vcol =
+            crate::ed::editing::visual_col_from_char_idx(&line_text, hscroll, tab_size);
+        // Helper: visual column at a given char offset within the `chars` array
+        let vcol_at = |offset: usize| -> usize {
+            crate::ed::editing::visual_col_from_char_idx(&line_text, hscroll + offset, tab_size)
+        };
+
         let max_visible_chars = (area.width as usize).saturating_mul(2).max(100);
         let mut chars: Vec<char> = line_text
             .chars()
             .skip(hscroll)
             .take(max_visible_chars)
             .collect();
-        let col = cursor_col.saturating_sub(hscroll);
+        let col = cursor_col; // char index
 
         let is_selecting = mode == Mode::Visual
             || mode == Mode::VisualLine
@@ -441,24 +475,28 @@ fn draw_pane(
             let mut cursor_width = 1;
 
             for g in raw_line.graphemes(true) {
-                let width = display_width(g);
-                if vis_col == col {
+                if char_offset == col {
                     cursor_grapheme = Some(g);
-                    cursor_width = width;
+                    let g_w = if g == "\t" {
+                        tab_size - (vis_col % tab_size)
+                    } else {
+                        crate::render::helpers::display_width(g)
+                    };
+                    cursor_width = g_w.max(1);
                     break;
                 }
-                if vis_col < col && vis_col + width > col {
-                    cursor_grapheme = Some(g);
-                    cursor_width = width;
-                    break;
-                }
-                vis_col += width;
+                let g_w = if g == "\t" {
+                    tab_size - (vis_col % tab_size)
+                } else {
+                    crate::render::helpers::display_width(g)
+                };
+                vis_col += g_w;
                 char_offset += g.chars().count();
             }
 
             let safe_offset = char_offset.min(chars.len());
-            let visual_before_len =
-                display_width(&chars[..safe_offset].iter().collect::<String>()) as u16;
+            let visual_cursor_x = vis_col.saturating_sub(win.scroll_col) as u16;
+
             let mut spans = gutter_spans;
 
             let before_len = safe_offset.min(highlights.len());
@@ -469,6 +507,8 @@ fn draw_pane(
                 &selected_mask[..before_len],
                 &search_mask[..before_len],
                 line_bg,
+                tab_size,
+                line_start_vcol,
             ));
 
             let before_str: String = chars[..safe_offset].iter().collect();
@@ -501,7 +541,13 @@ fn draw_pane(
                 let cursor_style = Style::default().fg(fg_color).bg(bg_color);
 
                 if let Some(g) = cursor_grapheme {
-                    spans.push(Span::styled(g.to_string(), cursor_style));
+                    if g == "\t" {
+                        // Expand tab into spaces for block cursor
+                        let width = tab_size - (vis_col % tab_size);
+                        spans.push(Span::styled(" ".repeat(width), cursor_style));
+                    } else {
+                        spans.push(Span::styled(g.to_string(), cursor_style));
+                    }
                     let after_offset = safe_offset + g.chars().count();
                     spans.extend(styled_spans_from_highlights(
                         chars.get(after_offset..).unwrap_or(&[]),
@@ -510,6 +556,8 @@ fn draw_pane(
                         selected_mask.get(after_offset..).unwrap_or(&[]),
                         search_mask.get(after_offset..).unwrap_or(&[]),
                         line_bg,
+                        tab_size,
+                        vcol_at(after_offset),
                     ));
                 } else {
                     spans.push(Span::styled(" ".to_string(), cursor_style));
@@ -530,6 +578,8 @@ fn draw_pane(
                     selected_mask.get(safe_offset..).unwrap_or(&[]),
                     search_mask.get(safe_offset..).unwrap_or(&[]),
                     line_bg,
+                    tab_size,
+                    vcol_at(safe_offset),
                 ));
             }
 
@@ -551,7 +601,7 @@ fn draw_pane(
                     .y
                     .saturating_add((virtual_row.saturating_sub(scroll)) as u16);
                 let offset_x = gutter_width
-                    .saturating_add(visual_before_len as usize)
+                    .saturating_add(visual_cursor_x as usize)
                     .min(u16::MAX as usize) as u16;
                 rendered_cursor_x = area.x.saturating_add(offset_x);
             }
@@ -599,6 +649,8 @@ fn draw_pane(
                 &selected_mask,
                 &search_mask,
                 line_bg,
+                tab_size,
+                line_start_vcol,
             ));
             rendered.push(Line::from(spans));
         }

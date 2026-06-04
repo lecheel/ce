@@ -554,6 +554,63 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 editor.codellm_send();
             }
         }
+        "build" | "make" => {
+            editor.run_build();
+        }
+        "retab" => {
+            let (win, buf) = editor.active_window_and_buf_mut();
+            buf.push_undo(win.row, win.col);
+
+            let tab_size = buf.tab_size;
+            let mut new_lines = Vec::new();
+            let mut changed = false;
+
+            for line_idx in 0..buf.len_lines() {
+                let line_text = buf.line_text(line_idx);
+                let mut new_line = String::new();
+                let mut visual_col = 0;
+
+                for ch in line_text.chars() {
+                    if ch == '\t' {
+                        let width = tab_size - (visual_col % tab_size);
+                        new_line.push_str(&" ".repeat(width));
+                        visual_col += width;
+                        changed = true;
+                    } else {
+                        new_line.push(ch);
+                        let w = crate::render::helpers::display_width(&ch.to_string()).max(1);
+                        visual_col += w;
+                    }
+                }
+                new_lines.push(new_line);
+            }
+
+            if changed {
+                let full_text = format!("{}\n", new_lines.join("\n"));
+                buf.rope = ropey::Rope::from_str(&full_text);
+
+                buf.mark_modified();
+                buf.parse_syntax();
+
+                let max_row = buf.len_lines().saturating_sub(1);
+                win.row = win.row.min(max_row);
+                win.col = win.col.min(buf.line_char_len(win.row));
+                win.desired_col = crate::ed::editing::visual_col_from_char_idx(
+                    &buf.line_text(win.row),
+                    win.col,
+                    buf.tab_size,
+                );
+
+                // Notify git gutter of the change
+                let buf_id = editor.buf().id;
+                editor.git_debounce.notify_edit(buf_id);
+                editor.invalidate_hunk_cache();
+
+                editor.set_status_msg("Retabbed: expanded tabs to spaces", MessageKind::Success);
+            } else {
+                editor.set_status_msg("No tabs found to retab", MessageKind::Info);
+            }
+        }
 
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
@@ -821,7 +878,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
-        "codellm", "cllm", "reg",
+        "codellm", "cllm", "reg", "build","retab",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

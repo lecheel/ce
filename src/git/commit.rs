@@ -252,6 +252,7 @@ impl Editor {
                 search_pattern: None,
                 diff_alignment: None,
                 llm_lock_line: 0,
+                tab_size: 4,
             };
 
             self.buffers.push(buf);

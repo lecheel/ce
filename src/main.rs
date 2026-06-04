@@ -512,7 +512,10 @@ async fn run_loop(
                 // 7. Animate general LLM prompt spinner
                 editor.tick_llm_prompt();
 
-                // 8. Trigger redraw if which-key debounce just elapsed
+                // 8. Build
+                editor.tick_build();
+
+                // 9. Trigger redraw if which-key debounce just elapsed
                 if editor.is_whichkey_visible() {
                     needs_redraw = true;
                 }

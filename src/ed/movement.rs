@@ -1,14 +1,13 @@
-//! Cursor movement operations — grapheme-safe implementation.
+//! Cursor movement operations — grapheme-safe, char-offset implementation.
 //!
-//! Every function takes `(&mut Window, &Buffer)` so that cursor state
-//! lives on the Window while the Buffer provides text data.
-//! All movements respect unicode display widths and grapheme clusters.
+//! win.col is strictly a char index. desired_col is a visual column
+//! used to remember the horizontal position during vertical movements.
 
 use crate::ed::buffer::Buffer;
+use crate::ed::editing::{char_idx_from_visual_col, visual_col_from_char_idx};
 use crate::ed::mode::Mode;
 use crate::ed::window::Window;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -18,111 +17,110 @@ fn valid_row(win: &Window, buf: &Buffer) -> bool {
     win.row < buf.len_lines()
 }
 
-fn display_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
-}
-
 fn graphemes(text: &str) -> Vec<&str> {
     UnicodeSegmentation::graphemes(text, true).collect()
-}
-
-fn line_display_width(buf: &Buffer, row: usize) -> usize {
-    if row >= buf.len_lines() {
-        return 0;
-    }
-    display_width(&buf.line_text(row))
 }
 
 // ---------------------------------------------------------------------------
 // Horizontal movement
 // ---------------------------------------------------------------------------
-
 pub fn move_left(win: &mut Window, buf: &Buffer) {
     if !valid_row(win, buf) {
         return;
     }
+
     if win.col > 0 {
         let text = buf.line_text(win.row);
-        let mut current_col = 0;
-        let mut prev_col = 0;
-
+        let mut char_idx = 0;
+        let mut prev_char_idx = 0;
         for grapheme in graphemes(&text) {
-            let width = display_width(grapheme);
-
-            // If win.col is exactly at the start of this grapheme
-            if current_col >= win.col {
+            if char_idx == win.col {
                 break;
             }
-
-            // If win.col is inside this wide grapheme (e.g. right half of 🔴)
-            // Snap to the START of this wide grapheme
-            if current_col + width > win.col {
-                prev_col = current_col;
-                break;
-            }
-
-            prev_col = current_col;
-            current_col += width;
+            prev_char_idx = char_idx;
+            char_idx += grapheme.chars().count();
         }
-
-        win.col = prev_col;
+        if char_idx < win.col {
+            prev_char_idx = char_idx;
+        }
+        win.col = prev_char_idx;
     } else if win.row > 0 {
         win.row -= 1;
-        win.col = line_display_width(buf, win.row);
+        win.col = buf.line_char_len(win.row);
     }
-    win.desired_col = win.col;
+    win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
 }
 
 pub fn move_right(win: &mut Window, buf: &Buffer) {
     if !valid_row(win, buf) {
         return;
     }
-    let line_width = line_display_width(buf, win.row);
-
-    if win.col < line_width {
+    let line_len = buf.line_char_len(win.row);
+    if win.col < line_len {
         let text = buf.line_text(win.row);
-        let mut current_col = 0;
-
+        let mut char_idx = 0;
         for grapheme in graphemes(&text) {
-            let width = display_width(grapheme);
-
-            // If win.col is exactly at the start of this grapheme
-            if current_col == win.col {
-                win.col = current_col + width;
+            if char_idx == win.col {
+                win.col += grapheme.chars().count();
                 break;
             }
-
-            // If win.col is inside this wide grapheme (e.g. right half of 🔴)
-            if current_col < win.col && current_col + width > win.col {
-                win.col = current_col + width; // Snap to the END of it
-                break;
-            }
-
-            current_col += width;
+            char_idx += grapheme.chars().count();
         }
     } else if win.row + 1 < buf.len_lines() {
         win.row += 1;
         win.col = 0;
     }
-    win.desired_col = win.col;
-}
-
-pub fn move_line_start(win: &mut Window, _buf: &Buffer) {
-    win.col = 0;
-    win.desired_col = 0;
+    win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
 }
 
 pub fn move_line_end(win: &mut Window, buf: &Buffer, mode: Mode) {
     if !valid_row(win, buf) {
         return;
     }
-    let width = line_display_width(buf, win.row);
+    let len = buf.line_char_len(win.row);
     win.col = if mode == Mode::Normal {
-        width.saturating_sub(1)
+        len.saturating_sub(1)
     } else {
-        width
+        len
     };
-    win.desired_col = win.col;
+    win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
+}
+
+pub fn move_up(win: &mut Window, buf: &Buffer) {
+    if !valid_row(win, buf) {
+        return;
+    }
+    if win.row > 0 {
+        let vcol = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
+        win.desired_col = win.desired_col.max(vcol);
+
+        let old_row = win.row;
+        let old_col = win.col;
+        win.row -= 1;
+        let new_line = buf.line_text(win.row);
+        win.col = char_idx_from_visual_col(&new_line, win.desired_col, buf.tab_size);
+    }
+}
+
+pub fn move_down(win: &mut Window, buf: &Buffer) {
+    if !valid_row(win, buf) {
+        return;
+    }
+    if win.row + 1 < buf.len_lines() {
+        let vcol = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
+        win.desired_col = win.desired_col.max(vcol);
+
+        let old_row = win.row;
+        let old_col = win.col;
+        win.row += 1;
+        let new_line = buf.line_text(win.row);
+        win.col = char_idx_from_visual_col(&new_line, win.desired_col, buf.tab_size);
+    }
+}
+
+pub fn move_line_start(win: &mut Window, _buf: &Buffer) {
+    win.col = 0;
+    win.desired_col = 0;
 }
 
 pub fn move_word_forward(win: &mut Window, buf: &Buffer) {
@@ -131,38 +129,34 @@ pub fn move_word_forward(win: &mut Window, buf: &Buffer) {
     }
     let text = buf.line_text(win.row);
     let gr = graphemes(&text);
-    let mut current_col = 0;
+    let mut char_idx = 0;
     let mut in_word = false;
     let mut past_word = false;
 
     for g in &gr {
-        let width = display_width(g);
-
-        if current_col > win.col {
+        let g_len = g.chars().count();
+        if char_idx > win.col {
             if !g.trim().is_empty() {
                 if past_word {
-                    win.col = current_col;
-                    win.desired_col = win.col;
+                    win.col = char_idx;
+                    win.desired_col = visual_col_from_char_idx(&text, win.col, buf.tab_size);
                     return;
                 }
                 in_word = true;
-            } else {
-                if in_word {
-                    past_word = true;
-                }
+            } else if in_word {
+                past_word = true;
             }
         }
-
-        current_col += width;
+        char_idx += g_len;
     }
 
     if win.row + 1 < buf.len_lines() {
         win.row += 1;
         win.col = 0;
     } else {
-        win.col = line_display_width(buf, win.row);
+        win.col = buf.line_char_len(win.row);
     }
-    win.desired_col = win.col;
+    win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
 }
 
 pub fn move_word_backward(win: &mut Window, buf: &Buffer) {
@@ -175,24 +169,22 @@ pub fn move_word_backward(win: &mut Window, buf: &Buffer) {
     if gr.is_empty() {
         if win.row > 0 {
             win.row -= 1;
-            win.col = line_display_width(buf, win.row);
-            win.desired_col = win.col;
+            win.col = buf.line_char_len(win.row);
+            win.desired_col =
+                visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
         }
         return;
     }
 
-    // Map graphemes to their start columns
     let mut nodes = Vec::new();
-    let mut current_col = 0;
+    let mut char_idx = 0;
     for g in &gr {
-        let width = display_width(g);
-        nodes.push((current_col, *g));
-        current_col += width;
+        nodes.push((char_idx, *g, g.chars().count()));
+        char_idx += g.chars().count();
     }
 
-    // Find the grapheme at or after the cursor
     let mut idx = nodes.len();
-    for (i, &(col, _)) in nodes.iter().enumerate() {
+    for (i, &(col, _, _)) in nodes.iter().enumerate() {
         if col >= win.col {
             idx = i;
             break;
@@ -203,59 +195,33 @@ pub fn move_word_backward(win: &mut Window, buf: &Buffer) {
     let mut past_space = false;
 
     for i in (0..idx).rev() {
-        let (col, g) = nodes[i];
+        let (col, g, _) = nodes[i];
         let is_ws = g.trim().is_empty();
 
         if !is_ws {
             if past_space {
                 win.col = col;
-                win.desired_col = win.col;
+                win.desired_col = visual_col_from_char_idx(&text, win.col, buf.tab_size);
                 return;
             }
             in_word = true;
-        } else {
-            if in_word {
-                past_space = true;
-            }
+        } else if in_word {
+            past_space = true;
         }
     }
 
     if win.row > 0 {
         win.row -= 1;
-        win.col = line_display_width(buf, win.row);
+        win.col = buf.line_char_len(win.row);
     } else {
         win.col = 0;
     }
-    win.desired_col = win.col;
+    win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
 }
 
 // ---------------------------------------------------------------------------
 // Vertical movement
 // ---------------------------------------------------------------------------
-
-pub fn move_up(win: &mut Window, buf: &Buffer) {
-    if !valid_row(win, buf) {
-        return;
-    }
-    if win.row > 0 {
-        win.desired_col = win.desired_col.max(win.col);
-        win.row -= 1;
-        let max_col = line_display_width(buf, win.row);
-        win.col = win.desired_col.min(max_col);
-    }
-}
-
-pub fn move_down(win: &mut Window, buf: &Buffer) {
-    if !valid_row(win, buf) {
-        return;
-    }
-    if win.row + 1 < buf.len_lines() {
-        win.desired_col = win.desired_col.max(win.col);
-        win.row += 1;
-        let max_col = line_display_width(buf, win.row);
-        win.col = win.desired_col.min(max_col);
-    }
-}
 
 pub fn move_to_first_line(win: &mut Window, _buf: &Buffer) {
     win.row = 0;
@@ -270,21 +236,25 @@ pub fn move_to_last_line(win: &mut Window, buf: &Buffer) {
 }
 
 pub fn page_up(win: &mut Window, buf: &Buffer, jump: usize) {
-    win.desired_col = win.desired_col.max(win.col);
+    let vcol = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
+    win.desired_col = win.desired_col.max(vcol);
+
     win.row = win.row.saturating_sub(jump);
     if win.row >= buf.len_lines() {
         win.row = buf.len_lines().saturating_sub(1);
     }
-    let max_col = line_display_width(buf, win.row);
-    win.col = win.desired_col.min(max_col);
+    let new_line = buf.line_text(win.row);
+    win.col = char_idx_from_visual_col(&new_line, win.desired_col, buf.tab_size);
 }
 
 pub fn page_down(win: &mut Window, buf: &Buffer, jump: usize) {
-    win.desired_col = win.desired_col.max(win.col);
+    let vcol = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
+    win.desired_col = win.desired_col.max(vcol);
+
     win.row = (win.row + jump).min(buf.len_lines().saturating_sub(1));
     if win.row >= buf.len_lines() {
         win.row = buf.len_lines().saturating_sub(1);
     }
-    let max_col = line_display_width(buf, win.row);
-    win.col = win.desired_col.min(max_col);
+    let new_line = buf.line_text(win.row);
+    win.col = char_idx_from_visual_col(&new_line, win.desired_col, buf.tab_size);
 }

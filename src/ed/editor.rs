@@ -18,7 +18,7 @@ use crate::lsp::{
 };
 use crate::msgbox::AppMessage;
 use crate::msgbox::AppMessage as LspAppMessage;
-use crate::popup::{PopupItem, PopupKind, PopupState};
+use crate::popup::{PopupItem, PopupState};
 use crate::render::statusbar_state::StatusBarState;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -209,6 +209,7 @@ pub struct Editor {
     /// Reset to `false` at the start of each `execute_action` call.
     pub action_failed: bool,
     pub replace_count: usize,
+    pub build: crate::ed::build::BuildState,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -222,8 +223,9 @@ const MAX_WINDOWS: usize = 8;
 
 impl Editor {
     pub fn new(filename: Option<String>) -> Result<Self> {
-        let first_buf = Buffer::new(0, filename.clone())?;
         let config = Config::load().unwrap_or_default();
+        let mut first_buf = Buffer::new(0, filename.clone())?;
+        first_buf.tab_size = config.tab_size;
         let cmd_history = Self::load_history();
         let vocab_words = Self::preload_vocabulary();
         let positions = Self::load_positions();
@@ -330,6 +332,7 @@ impl Editor {
             copilot_response_rx: None,
             action_failed: false,
             replace_count: 0,
+            build: crate::ed::build::BuildState::default(),
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -338,6 +341,9 @@ impl Editor {
             insert_buffer: None,
             quit_prompt: QuitPrompt::None,
         };
+
+        // ── Sync tab_size into all buffers ──────────────────────
+        editor.sync_tab_size();
 
         // ── Spawn LSP background task ────────────────────────────
         if editor.config.lsp_enabled {
@@ -859,95 +865,14 @@ impl Editor {
             }
         }
 
-        // ── Intercept for Pending Git Actions ──────────────────────
-        if self.pending_git_action != PendingGitAction::None {
-            self.handle_git_action_prompt_key(key);
-            return;
-        }
-
-        // ── Intercept for Error Popup ──────────────────────────────
-        if self.popup.error.is_some() {
-            if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
-                self.popup.error = None;
-                self.popup.kind = None;
-            }
-            return;
-        }
-
-        if self.popup.tag_candidates.is_some() {
-            self.handle_tag_candidates_key(key);
-            return;
-        }
-
-        if self.popup.workspace_symbols.is_some() {
-            self.handle_workspace_symbols_key(key);
-            return;
-        }
-
+        // ── Unified popup / overlay intercept ──────────────────────
         if self.substitution_state.is_some() {
             self.handle_substitution_key(key);
             return;
         }
 
-        if self.popup.file_picker.is_some() {
-            self.handle_file_picker_key(key);
-            return;
-        }
-
-        if self.popup.buffer_list.is_some() {
-            self.handle_buffer_list_key(key);
-            return;
-        }
-
-        if self.popup.function_list.is_some() {
-            self.handle_function_list_key(key);
-            return;
-        }
-
-        if self.popup.guide.is_some() {
-            self.handle_guide_popup_key(key);
-            return;
-        }
-
-        if self.popup.mru.is_some() {
-            self.handle_mru_key(key);
-            return;
-        }
-
-        // tag_fd_handle_key
-        if self.popup.fd.is_some() {
-            self.handle_fd_key(key);
-            return;
-        }
-
-        if self.popup.marks.is_some() {
-            self.handle_marks_key(key);
-            return;
-        }
-
-        if self.popup.quickfix.is_some() {
-            self.handle_quickfix_key(key);
-            return;
-        }
-
-        if self.popup.registers.is_some() {
-            self.handle_registers_key(key);
-            return;
-        }
-
-        if self.popup.git_hunk.is_some() {
-            self.handle_git_hunk_popup_key(key);
-            return;
-        }
-
-        if self.popup.command_palette.is_some() {
-            self.handle_command_palette_key(key);
-            return;
-        }
-
-        // WhichKey is a passive overlay, don't intercept keys for it!
-        if self.popup.is_open() && self.popup.kind != Some(PopupKind::Whichkey) {
-            self.handle_popup_key(key);
+        if self.popup.is_open() || self.popup.error.is_some() {
+            self.handle_any_popup_key(key);
             return;
         }
 
@@ -1014,10 +939,10 @@ impl Editor {
             return;
         }
 
-        if self.popup.is_open() {
-            self.handle_popup_key(key);
-            return;
-        }
+        // if self.popup.is_open() {
+        // self.handle_any_popup_key(key);
+        // return;
+        // }
 
         if self.quit_prompt != QuitPrompt::None {
             self.handle_quit_prompt_key(key);
@@ -1097,6 +1022,7 @@ impl Editor {
                 BufferKind::GitStatus => self.handle_git_status_key(key),
                 BufferKind::CheckHealth => self.handle_checkhealth_key(key),
                 BufferKind::Llm | BufferKind::LlmInput => self.handle_llm_buffer_key(key),
+                BufferKind::Build => self.handle_build_buffer_key(key),
                 BufferKind::CodeLlm => self.handle_codellm_key(key),
                 _ => false,
             };
@@ -1672,6 +1598,7 @@ impl Editor {
                 final_col = 0;
             } else {
                 let mut current_col = start_col;
+                let tab_size = buf.tab_size;
                 for c in text.chars() {
                     if c == '\n' {
                         final_row += 1;
@@ -3005,6 +2932,7 @@ impl Editor {
                 search_pattern: None,
                 named_bookmarks: std::collections::HashMap::new(),
                 llm_lock_line: 0,
+                tab_size: 4,
             };
             b.rope = Rope::from_str("\n");
             b
@@ -3122,6 +3050,16 @@ impl Editor {
         // 6. Auto-send if configured
         if action.auto_send {
             self.codellm_send();
+        }
+    }
+}
+
+impl Editor {
+    /// Push the current config.tab_size into all existing buffers.
+    pub fn sync_tab_size(&mut self) {
+        let ts = self.config.tab_size;
+        for buf in &mut self.buffers {
+            buf.tab_size = ts;
         }
     }
 }

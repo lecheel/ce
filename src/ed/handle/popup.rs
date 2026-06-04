@@ -40,21 +40,86 @@ impl Editor {
     // When an AI ghost is active the popup must NOT be shown; Tab/→ should
     // accept the ghost instead (handled in handle_key's ghost intercept block).
 
-    pub fn handle_popup_key(&mut self, key: crossterm::event::KeyEvent) {
+    /// Unified dispatcher for ALL popup types.
+    /// Called from handle_key when any popup or overlay is active.
+    pub fn handle_any_popup_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
 
-        // ── Guard: AI ghost takes priority over LSP popup ───────────────
-        // If a multi-line ghost is displayed, swallow popup-navigation keys
-        // silently so they don't interfere.  Single-key ghost dismissal is
-        // already handled in the ghost-intercept block in handle_key().
-        if self.comp.has_ghost() {
-            // Let the ghost-intercept block in handle_key() deal with it.
+        // ── Error popup takes absolute priority ────────────────────
+        if self.popup.error.is_some() {
+            if key.code == KeyCode::Esc || key.code == KeyCode::Enter {
+                self.popup.error = None;
+                self.popup.kind = None;
+            }
             return;
         }
+
         if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
 
+        // ── Ghost text takes priority over popup navigation ───────
+        if self.comp.has_ghost() {
+            return;
+        }
+
+        // ── Dispatch to the specific popup handler ────────────────
+        // Ordered by frequency of use for slight perf benefit
+
+        if self.popup.command_palette.is_some() {
+            self.handle_command_palette_key(key);
+            return;
+        }
+        if self.popup.file_picker.is_some() {
+            self.handle_file_picker_key(key);
+            return;
+        }
+        if self.popup.fd.is_some() {
+            self.handle_fd_key(key);
+            return;
+        }
+        if self.popup.quickfix.is_some() {
+            self.handle_quickfix_key(key);
+            return;
+        }
+        if self.popup.buffer_list.is_some() {
+            self.handle_buffer_list_key(key);
+            return;
+        }
+        if self.popup.function_list.is_some() {
+            self.handle_function_list_key(key);
+            return;
+        }
+        if self.popup.mru.is_some() {
+            self.handle_mru_key(key);
+            return;
+        }
+        if self.popup.registers.is_some() {
+            self.handle_registers_key(key);
+            return;
+        }
+        if self.popup.marks.is_some() {
+            self.handle_marks_key(key);
+            return;
+        }
+        if self.popup.guide.is_some() {
+            self.handle_guide_popup_key(key);
+            return;
+        }
+        if self.popup.git_hunk.is_some() {
+            self.handle_git_hunk_popup_key(key);
+            return;
+        }
+        if self.popup.tag_candidates.is_some() {
+            self.handle_tag_candidates_key(key);
+            return;
+        }
+        if self.popup.workspace_symbols.is_some() {
+            self.handle_workspace_symbols_key(key);
+            return;
+        }
+
+        // ── Config / Scankey / Completion (handled by kind) ───────
         let popup_kind = self.popup.kind.clone();
         match popup_kind {
             Some(crate::popup::PopupKind::Completion) => {
@@ -66,8 +131,11 @@ impl Editor {
             Some(crate::popup::PopupKind::Scankey) => {
                 self.handle_scankey(key);
             }
+            Some(crate::popup::PopupKind::Whichkey) => {
+                // WhichKey is a passive overlay — don't intercept keys!
+            }
             _ => {
-                // Default: Esc closes any unrecognised popup.
+                // Fallback: Esc closes any unrecognised popup
                 if key.code == KeyCode::Esc {
                     self.popup.close();
                 }

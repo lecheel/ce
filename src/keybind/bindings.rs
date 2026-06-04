@@ -1817,7 +1817,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::EnterAppend => {
             let (win, buf) = editor.active_window_and_buf_mut();
-            let step = editing::grapheme_width_at_col(buf, win.row, win.col);
+            let step = editing::grapheme_width_at_char(buf, win.row, win.col);
             let max_width = editing::line_display_width(buf, win.row);
             win.col = (win.col + step).min(max_width);
             editor.enter_insert();
@@ -1978,7 +1978,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     win.row = row;
                     let line_text = buf.line_text(row);
                     let char_offset = pos - buf.rope.line_to_char(row);
-                    win.col = editing::col_from_char_offset(&line_text, char_offset);
+                    win.col = char_offset;
+                    win.desired_col = crate::ed::editing::visual_col_from_char_idx(
+                        &line_text,
+                        char_offset,
+                        buf.tab_size,
+                    );
                     let viewport_h = win.position.height;
                     let viewport_w = win.position.width;
                     win.scroll_to_cursor(viewport_h, viewport_w, gutter);
@@ -2038,7 +2043,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     win.row = row;
                     let line_text = buf.line_text(row);
                     let char_offset = pos - buf.rope.line_to_char(row);
-                    win.col = editing::col_from_char_offset(&line_text, char_offset);
+                    win.col = char_offset;
+                    win.desired_col = crate::ed::editing::visual_col_from_char_idx(
+                        &line_text,
+                        char_offset,
+                        buf.tab_size,
+                    );
                     let viewport_h = win.position.height;
                     let viewport_w = win.position.width;
                     win.scroll_to_cursor(viewport_h, viewport_w, gutter);
@@ -2087,7 +2097,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     win.row = row;
                     let line_text = buf.line_text(row);
                     let char_offset = pos - buf.rope.line_to_char(row);
-                    win.col = editing::col_from_char_offset(&line_text, char_offset);
+                    win.col = char_offset;
+                    win.desired_col = crate::ed::editing::visual_col_from_char_idx(
+                        &line_text,
+                        char_offset,
+                        buf.tab_size,
+                    );
                     let viewport_h = win.position.height;
                     let viewport_w = win.position.width;
                     win.scroll_to_cursor(viewport_h, viewport_w, gutter);
@@ -2770,6 +2785,22 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::TransZhLine => {
             editor.trans_zh_line();
+        }
+        // ── Build actions ─────────────────────────────────────────────
+        Action::BuildRun => {
+            editor.run_build();
+        }
+        Action::BuildNextError => {
+            editor.build_next_error();
+        }
+        Action::BuildPrevError => {
+            editor.build_prev_error();
+        }
+        Action::BuildGotoError => {
+            editor.build_goto_error();
+        }
+        Action::BuildClose => {
+            editor.build_close();
         }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//

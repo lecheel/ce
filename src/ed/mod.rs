@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod build;
 pub mod clipboard;
 pub mod diff_align;
 pub mod editing;

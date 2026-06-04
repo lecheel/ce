@@ -49,6 +49,7 @@ pub enum BufferKind {
     CodeLlm,
     Llm,
     CheckHealth,
+    Build,
 }
 
 // ── GitSign (unchanged) ──────────────────────────────────────────────────
@@ -109,6 +110,7 @@ pub struct Buffer {
     /// Lines 0..llm_lock_line are locked history.
     /// Lines llm_lock_line.. are the active prompt area.
     pub llm_lock_line: usize,
+    pub tab_size: usize,
 }
 
 impl Buffer {
@@ -178,6 +180,7 @@ impl Buffer {
             named_bookmarks: std::collections::HashMap::new(),
             diff_alignment: None,
             llm_lock_line: 0,
+            tab_size: 4,
         };
 
         if let Some(ref path) = filename {
@@ -228,6 +231,7 @@ impl Buffer {
                 | BufferKind::Ripgrep
                 | BufferKind::Llm
                 | BufferKind::CheckHealth
+                | BufferKind::Build
         )
     }
 
@@ -496,6 +500,7 @@ impl Buffer {
             BufferKind::GitStatus => "[Git Status]".to_string(),
             BufferKind::CheckHealth => "[Check Health]".to_string(),
             BufferKind::CodeLlm => "[Code LLM]".to_string(),
+            BufferKind::Build => "Build".to_string(),
             BufferKind::GitDiffHead => self
                 .filename
                 .as_deref()

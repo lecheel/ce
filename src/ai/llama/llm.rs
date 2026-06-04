@@ -248,14 +248,10 @@ impl Editor {
     /// Polls completed responses from the background runtime channels.
     pub fn poll_llm_responses(&mut self) {
         while let Ok(res) = self.llm.response_rx.try_recv() {
-            // Take and drop the task handle to terminate the spinner animation
             let _ = self.llm.task_handle.take();
 
             match res {
                 Ok(response_text) => {
-                    // Take and drop the task handle to terminate the spinner animation
-                    let _ = self.llm.task_handle.take();
-
                     // ── Infobar response (translation, etc.) ──────────────
                     if self.llm.infobar_response {
                         self.llm.infobar_response = false;
@@ -264,10 +260,8 @@ impl Editor {
                         if trimmed.is_empty() {
                             self.set_status_msg("Translation returned empty", MessageKind::Error);
                         } else {
-                            // Store in register "z"
                             self.yank_to_register(trimmed.clone(), Some('z'));
 
-                            // Display in infobar (truncate for narrow terminals)
                             const MAX_INFOBAR: usize = 200;
                             let display = if trimmed.chars().count() > MAX_INFOBAR {
                                 let end = trimmed
@@ -295,8 +289,9 @@ impl Editor {
 
                         if let Some(id) = codellm_id {
                             if let Some(buf) = self.buf_mut_by_id(id) {
+                                let wrapped = word_wrap(&response_text, 100);
                                 let current_len = buf.rope.len_chars();
-                                buf.rope.insert(current_len, &response_text);
+                                buf.rope.insert(current_len, &wrapped);
                                 buf.parse_syntax();
                             }
                             self.codellm_finalize_response();
@@ -310,17 +305,17 @@ impl Editor {
                         // ── Legacy 2-panel Llm response handling ──
                         self.llm.buffer.text = response_text.clone();
 
-                        // Insert first, then read the line count for scrolling
+                        let wrapped = word_wrap(&response_text, 100);
+
                         let history_id = self.ensure_llm_buffer_exists();
                         if let Some(buf) = self.buf_mut_by_id(history_id) {
                             let current_len = buf.rope.len_chars();
                             buf.rope
-                                .insert(current_len, &format!("\nLLM: {}\n", response_text));
+                                .insert(current_len, &format!("\nLLM: {}\n", wrapped));
                             buf.mark_modified();
                             buf.parse_syntax();
                         }
 
-                        // Now read line count after the insert
                         let total_lines = self
                             .buf_by_id(history_id)
                             .map(|b| b.len_lines())
@@ -330,10 +325,8 @@ impl Editor {
                             if win.buffer_id() != history_id {
                                 continue;
                             }
-                            // Clamp to actual buffer length — guards against stale state
                             let target_row = total_lines.saturating_sub(1);
                             let h = win.position.height;
-                            let w = win.position.width;
                             win.row = target_row;
                             win.col = 0;
                             win.scroll_line = target_row.saturating_sub(h.saturating_sub(1));
@@ -356,7 +349,6 @@ impl Editor {
                     } else if self.git_commit_buffer_id.is_some() {
                         self.git_commit_on_llm_error(&err);
                     } else if self.llm.is_codellm {
-                        // ── CodeLlm error handling ──
                         self.llm.is_codellm = false;
 
                         let codellm_id = self
@@ -372,11 +364,9 @@ impl Editor {
                                     .insert(current_len, &format!("\n**Error:** {}\n", err));
                                 buf.parse_syntax();
                             }
-                            // Still finalize so the user can type a new prompt
                             self.codellm_finalize_response();
                         }
                     } else {
-                        // ── Legacy 2-panel error handling ──
                         let history_id = self.ensure_llm_buffer_exists();
                         if let Some(buf) = self.buf_mut_by_id(history_id) {
                             let current_len = buf.rope.len_chars();
@@ -1213,4 +1203,37 @@ impl Editor {
             self.codellm_send();
         }
     }
+}
+
+pub fn word_wrap(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        let mut cur = String::new();
+        for word in line.split(' ') {
+            if word.is_empty() {
+                continue;
+            }
+            if cur.is_empty() {
+                cur = word.to_string();
+            } else if cur.len() + 1 + word.len() <= max_width {
+                cur.push(' ');
+                cur.push_str(word);
+            } else {
+                out.push_str(&cur);
+                out.push('\n');
+                cur = word.to_string();
+            }
+        }
+        if !cur.is_empty() {
+            out.push_str(&cur);
+        }
+        out.push('\n');
+    }
+    out.pop(); // trailing newline
+    out
 }

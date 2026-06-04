@@ -237,6 +237,13 @@ pub enum Action {
     IndentSelection,
     OutdentSelection,
 
+    // Build
+    BuildRun,
+    BuildNextError,
+    BuildPrevError,
+    BuildGotoError,
+    BuildClose,
+
     // Vim Dot Repeat
     RepeatLastChange,
 
