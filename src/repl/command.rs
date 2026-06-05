@@ -611,6 +611,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 editor.set_status_msg("No tabs found to retab", MessageKind::Info);
             }
         }
+        "fninfo" => {
+            editor.open_fn_info_popup();
+        }
 
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
@@ -882,7 +885,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
-        "codellm", "cllm", "reg", "build","retab","close",
+        "codellm", "cllm", "reg", "build","retab","close","fninfo",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

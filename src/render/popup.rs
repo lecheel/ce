@@ -125,6 +125,12 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    // 9. Intercept FnInfo Popup
+    if editor.popup.fn_info.is_some() {
+        draw_fn_info(f, editor, screen);
+        return;
+    }
+
     if editor.popup.fd.is_some() {
         draw_fd(f, editor, screen);
         return;
@@ -2353,6 +2359,100 @@ pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
 
     f.render_widget(Clear, area);
     f.render_widget(List::new(items).block(block), area);
+}
+
+fn draw_fn_info(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let popup = match &editor.popup.fn_info {
+        Some(p) => p,
+        None => return,
+    };
+
+    let keys_per_line = 6;
+
+    // Calculate dynamic column width based on the widest entry
+    // " Fx(" = 4 chars, ") " = 2 chars -> action_len + 6
+    let col_width = popup
+        .entries
+        .iter()
+        .map(|(_, v)| v.chars().count() + 6)
+        .max()
+        .unwrap_or(12)
+        .max(12);
+
+    let inner_w = col_width * keys_per_line;
+    let width = (inner_w as u16)
+        .saturating_add(4) // +4 for borders/padding
+        .min(screen.width);
+    let height = 4u16; // 2 content lines + 2 borders
+
+    // Anchor: bottom of screen, grow upward (2 rows margin for status bar)
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = screen.height.saturating_sub(height).saturating_sub(2);
+
+    let area = clamp(
+        screen,
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        },
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            popup.title.clone(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " [Esc] close ",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+
+    let mut lines = Vec::new();
+    for row in 0..2 {
+        let mut spans = Vec::new();
+        for col in 0..keys_per_line {
+            let idx = row * keys_per_line + col;
+            if let Some((key, action)) = popup.entries.get(idx) {
+                let is_bound = action != "—";
+
+                let key_style = Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD);
+
+                let action_style = if is_bound {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let action_len = action.chars().count();
+                let needed_padding = col_width.saturating_sub(action_len + 6);
+                let padded_action = format!("{}{}", action, " ".repeat(needed_padding));
+
+                // Right-align key in 3 chars: " F1(" or "F12("
+                spans.push(Span::styled(format!("{:>3}", key), key_style));
+                spans.push(Span::styled("(", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(padded_action, action_style));
+                spans.push(Span::styled(") ", Style::default().fg(Color::DarkGray)));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let paragraph = Paragraph::new(lines);
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(paragraph, inner);
 }
 
 fn draw_error(f: &mut Frame, editor: &Editor, screen: Rect) {

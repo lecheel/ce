@@ -5,6 +5,7 @@ pub mod command_palette;
 pub mod fd;
 pub mod file_picker;
 pub mod filtered_list;
+pub mod fn_info;
 pub mod function_list;
 pub mod fuzzy;
 pub mod git_hunk;
@@ -96,6 +97,7 @@ pub enum PopupKind {
     Fd,
     WorkspaceSymbols,
     Quickfix,
+    FnInfo,
     Error, // Added for multi-line error redirection
 }
 
@@ -167,6 +169,7 @@ pub struct PopupState {
     pub fd: Option<FdPopup>, // tag_fd_struct
     pub registers: Option<crate::popup::registers::RegistersPopup>,
     pub workspace_symbols: Option<crate::popup::workspace_symbols::WorkspaceSymbolsPopup>,
+    pub fn_info: Option<fn_info::FnInfoPopup>,
     pub quickfix: Option<QuickfixPopup>,
 }
 
@@ -195,6 +198,7 @@ impl PopupState {
             command_palette: None,
             error: None,
             workspace_symbols: None,
+            fn_info: None,
             fd: None, // tag_fd_new
             quickfix: None,
         }
@@ -217,6 +221,7 @@ impl PopupState {
             || self.tag_candidates.is_some()
             || self.workspace_symbols.is_some()
             || self.quickfix.is_some()
+            || self.fn_info.is_some()
     }
 
     pub fn close(&mut self) {
@@ -243,6 +248,7 @@ impl PopupState {
         self.tag_candidates = None;
         self.workspace_symbols = None;
         self.quickfix = None;
+        self.fn_info = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {

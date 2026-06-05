@@ -2911,6 +2911,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::BuildClose => {
             editor.build_close();
         }
+        Action::FnInfo => {
+            editor.open_fn_info_popup();
+        }
 
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {

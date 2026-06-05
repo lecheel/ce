@@ -117,6 +117,10 @@ impl Editor {
             self.handle_tag_candidates_key(key);
             return;
         }
+        if self.popup.fn_info.is_some() {
+            self.handle_fn_info_key(key);
+            return;
+        }
         if self.popup.workspace_symbols.is_some() {
             self.handle_workspace_symbols_key(key);
             return;
@@ -338,5 +342,31 @@ impl Editor {
                 *selected = saved_idx;
             }
         }
+    }
+}
+
+impl Editor {
+    fn handle_fn_info_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                self.popup.fn_info = None;
+                self.popup.kind = None;
+            }
+            _ => {
+                // Any other key dismisses the info-only popup
+                self.popup.fn_info = None;
+                self.popup.kind = None;
+            }
+        }
+    }
+
+    /// Open the F-key quick-reference popup for the current mode.
+    pub fn open_fn_info_popup(&mut self) {
+        let mode = self.mode();
+        let popup = crate::popup::fn_info::FnInfoPopup::build(mode, &self.config);
+        self.popup.fn_info = Some(popup);
+        self.popup.kind = Some(crate::popup::PopupKind::FnInfo);
     }
 }

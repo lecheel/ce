@@ -197,6 +197,7 @@ pub enum Action {
     // LlmGenerate,  
     LlmAddToChat,
     TransZhLine,
+    FnInfo,
     
     FunctionList,
     Guide,
