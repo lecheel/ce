@@ -101,6 +101,9 @@ pub enum LayoutNode {
         direction: SplitDir,
         first: Box<LayoutNode>,
         second: Box<LayoutNode>,
+        /// Fraction of space allocated to `first` (0.0–1.0).
+        /// `None` → 50/50 split.
+        ratio: Option<f32>,
     },
 }
 
@@ -116,6 +119,20 @@ impl LayoutNode {
             direction,
             first: Box::new(first),
             second: Box::new(second),
+            ratio: None,
+        }
+    }
+
+    /// Create a split with an explicit ratio for the `first` child.
+    ///
+    /// `ratio` is the fraction of available space (after separator)
+    /// given to `first`.  E.g. `0.25` means first gets 25%, second 75%.
+    pub fn split_with_ratio(direction: SplitDir, first: Self, second: Self, ratio: f32) -> Self {
+        LayoutNode::Split {
+            direction,
+            first: Box::new(first),
+            second: Box::new(second),
+            ratio: Some(ratio.clamp(0.05, 0.95)),
         }
     }
 
@@ -163,18 +180,37 @@ impl LayoutNode {
         direction: SplitDir,
         new_window_id: usize,
     ) -> bool {
+        self.split_leaf_with_ratio(target_window_id, direction, new_window_id, None)
+    }
+
+    /// Same as `split_leaf` but with an explicit ratio for the first child.
+    ///
+    /// `ratio` of `None` → 50/50; `Some(0.25)` → first gets 25%.
+    pub fn split_leaf_with_ratio(
+        &mut self,
+        target_window_id: usize,
+        direction: SplitDir,
+        new_window_id: usize,
+        ratio: Option<f32>,
+    ) -> bool {
         match self {
             LayoutNode::Leaf(id) if *id == target_window_id => {
-                *self = LayoutNode::split(
+                *self = LayoutNode::Split {
                     direction,
-                    LayoutNode::Leaf(target_window_id),
-                    LayoutNode::Leaf(new_window_id),
-                );
+                    first: Box::new(LayoutNode::Leaf(target_window_id)),
+                    second: Box::new(LayoutNode::Leaf(new_window_id)),
+                    ratio,
+                };
                 true
             }
             LayoutNode::Split { first, second, .. } => {
-                first.split_leaf(target_window_id, direction, new_window_id)
-                    || second.split_leaf(target_window_id, direction, new_window_id)
+                first.split_leaf_with_ratio(target_window_id, direction, new_window_id, ratio)
+                    || second.split_leaf_with_ratio(
+                        target_window_id,
+                        direction,
+                        new_window_id,
+                        ratio,
+                    )
             }
             _ => false,
         }
@@ -230,36 +266,49 @@ impl LayoutNode {
                 direction,
                 first,
                 second,
-            } => match direction {
-                SplitDir::Horizontal => {
-                    let sep = if area.height > separator {
-                        separator
-                    } else {
-                        0
-                    };
-                    let available = area.height.saturating_sub(sep);
-                    let first_h = available / 2;
-                    let second_h = available - first_h;
-                    let first_area = WindowPosition::new(area.x, area.y, area.width, first_h);
-                    let second_area =
-                        WindowPosition::new(area.x, area.y + first_h + sep, area.width, second_h);
-                    let mut out = first.compute_positions(first_area, separator);
-                    out.extend(second.compute_positions(second_area, separator));
-                    out
+                ratio,
+            } => {
+                let first_frac = ratio.unwrap_or(0.5);
+
+                match direction {
+                    SplitDir::Horizontal => {
+                        let sep = if area.height > separator {
+                            separator
+                        } else {
+                            0
+                        };
+                        let available = area.height.saturating_sub(sep);
+                        let first_h = ((available as f32) * first_frac).round() as usize;
+                        let second_h = available.saturating_sub(first_h);
+                        let first_area = WindowPosition::new(area.x, area.y, area.width, first_h);
+                        let second_area = WindowPosition::new(
+                            area.x,
+                            area.y + first_h + sep,
+                            area.width,
+                            second_h,
+                        );
+                        let mut out = first.compute_positions(first_area, separator);
+                        out.extend(second.compute_positions(second_area, separator));
+                        out
+                    }
+                    SplitDir::Vertical => {
+                        let sep = if area.width > separator { separator } else { 0 };
+                        let available = area.width.saturating_sub(sep);
+                        let first_w = ((available as f32) * first_frac).round() as usize;
+                        let second_w = available.saturating_sub(first_w);
+                        let first_area = WindowPosition::new(area.x, area.y, first_w, area.height);
+                        let second_area = WindowPosition::new(
+                            area.x + first_w + sep,
+                            area.y,
+                            second_w,
+                            area.height,
+                        );
+                        let mut out = first.compute_positions(first_area, separator);
+                        out.extend(second.compute_positions(second_area, separator));
+                        out
+                    }
                 }
-                SplitDir::Vertical => {
-                    let sep = if area.width > separator { separator } else { 0 };
-                    let available = area.width.saturating_sub(sep);
-                    let first_w = available / 2;
-                    let second_w = available - first_w;
-                    let first_area = WindowPosition::new(area.x, area.y, first_w, area.height);
-                    let second_area =
-                        WindowPosition::new(area.x + first_w + sep, area.y, second_w, area.height);
-                    let mut out = first.compute_positions(first_area, separator);
-                    out.extend(second.compute_positions(second_area, separator));
-                    out
-                }
-            },
+            }
         }
     }
 }
@@ -390,13 +439,6 @@ impl Window {
         self.col = self.col.min(max_col);
     }
 
-    // -----------------------------------------------------------------------
-    // Scroll helpers
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Scroll helpers
-    // -----------------------------------------------------------------------
     // -----------------------------------------------------------------------
     // Scroll helpers
     // -----------------------------------------------------------------------

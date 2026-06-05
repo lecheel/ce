@@ -10,7 +10,7 @@ pub mod lsp;
 
 pub use ctagd::{DaemonInfo, DefinitionResult, RustLspClient, SessionInfo, SymbolResult};
 pub use lsp::{
-    path_to_uri, uri_to_path, CompletionItem, CompletionResponse, FormattingOptions, InlayHint,
-    InsertReplaceEdit, Location, LocationLink, LspManager, LspMessage, OffsetEncoding, Position,
-    Range, SignatureHelpState, TextEdit,
+    path_to_uri, pos_to_lsp_pos, uri_to_path, CompletionItem, CompletionResponse,
+    FormattingOptions, InlayHint, InsertReplaceEdit, Location, LocationLink, LspManager,
+    LspMessage, OffsetEncoding, Position, Range, SignatureHelpState, TextEdit,
 };

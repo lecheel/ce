@@ -7,3 +7,4 @@
 pub mod codeium;
 pub mod copilot;
 pub mod llama;
+pub mod mqtt;

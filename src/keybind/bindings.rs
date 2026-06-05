@@ -16,6 +16,7 @@ use crate::keybind::config_keys::find_custom_action;
 use crate::keybind::defaults::get_default_actions;
 use crate::keybind::display::action_display_name;
 use crate::keybind::safetynet::check_around_function_safetynet;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::Mutex;
@@ -1660,9 +1661,37 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // Editing
         // ---------------------------------------------------------------
         Action::Backspace => {
+            // Capture deletion range BEFORE the edit for LSP notification
+            let delete_range = {
+                let (win, buf) = editor.active_window_and_buf_mut();
+                let row = win.row;
+                let col = win.col;
+
+                if col > 0 {
+                    let line_text = buf.line_text(row);
+                    let mut char_idx = 0;
+                    let mut prev_char_idx = 0;
+                    for grapheme in line_text.graphemes(true) {
+                        // <-- FIX: use .graphemes(true) on &str
+                        if char_idx == col {
+                            break;
+                        }
+                        prev_char_idx = char_idx;
+                        char_idx += grapheme.chars().count();
+                    }
+                    Some((row, prev_char_idx, row, col))
+                } else {
+                    None // Line join - will use full sync
+                }
+            };
+
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
             editing::backspace(win, buf);
+
+            // Notify LSP of the deletion
+            editor.lsp_notify_backspace(delete_range);
+
             editor.on_completion_edit();
         }
         Action::DeleteCharForward => {
@@ -1688,12 +1717,48 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
                 editor.active_window_mut().visual_anchor = None;
             } else {
+                // Capture deletion range BEFORE the edit for LSP notification
+                let delete_range = {
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    let row = win.row;
+                    let col = win.col;
+                    let line_len = buf.line_char_len(row);
+
+                    if col < line_len {
+                        let line_text = buf.line_text(row);
+                        let mut char_idx = 0;
+                        let mut grapheme_len = 1;
+                        for grapheme in line_text.graphemes(true) {
+                            // <-- FIX: use .graphemes(true) on &str
+                            if char_idx == col {
+                                grapheme_len = grapheme.chars().count();
+                                break;
+                            }
+                            char_idx += grapheme.chars().count();
+                        }
+                        Some((row, col, row, col + grapheme_len))
+                    } else {
+                        None // Line join - will use full sync
+                    }
+                };
+
                 for _ in 0..count {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     editing::delete_char_forward(win, buf);
                 }
+
+                // Notify LSP (only for first char, to avoid redundant notifications)
+                if count == 1 {
+                    editor.lsp_notify_delete_forward(delete_range);
+                }
             }
-            editor.comp.on_edit();
+
+            // Use on_completion_edit for Insert/Brief mode typing
+            if matches!(editor.mode(), Mode::Insert | Mode::Brief) && !is_brief_selecting {
+                editor.on_completion_edit();
+            } else {
+                editor.comp.on_edit();
+            }
         }
         Action::BriefCopySelection => {
             if editor.active_window().visual_anchor.is_some() {
@@ -1730,12 +1795,17 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
                     win.clamp_cursor(buf);
                     buf.parse_syntax();
+
+                    // Notify LSP of cut
+                    if let Some(filename) = editor.active_filename() {
+                        editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                    }
+
                     editor.set_status_msg("Cut selection", MessageKind::Info);
                 }
                 editor.active_window_mut().visual_anchor = None;
-                editor.comp.on_edit();
+                editor.on_completion_edit();
             }
-            // If no selection, do nothing (NOP)
         }
         Action::DeleteCurrentLine => {
             let mut deleted_text = String::new();
@@ -1748,6 +1818,11 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
             editor.yank_to_register(deleted_text, register);
 
+            // Notify LSP of line deletion (full sync is simplest for multi-line ops)
+            if let Some(filename) = editor.active_filename() {
+                editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+            }
+
             // Recalculate column boundary with visual dimensions
             let (win, buf) = editor.active_window_and_buf_mut();
             win.col = win.col.min(editing::line_display_width(buf, win.row));
@@ -1757,6 +1832,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
             editing::delete_to_end_of_line(win, buf);
+
+            // Notify LSP of deletion (full sync for simplicity)
+            if let Some(filename) = editor.active_filename() {
+                editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+            }
+
             editor.comp.on_edit();
         }
         Action::InsertNewline => {
@@ -1764,14 +1845,31 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let (row, col) = (win.row, win.col);
             editing::insert_newline(win, buf);
             buf.parse_syntax();
-            editor.comp.on_edit();
+
+            // Notify LSP of newline insertion (full sync - newline changes line structure)
+            if let Some(filename) = editor.active_filename() {
+                editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+            }
+
+            editor.on_completion_edit();
         }
         Action::InsertTab => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
             editing::insert_tab(win, buf);
             buf.parse_syntax();
-            editor.comp.on_edit();
+
+            // Notify LSP of tab insertion (incremental - just adds spaces)
+            let path = match editor.active_filename() {
+                Some(f) => std::path::PathBuf::from(f),
+                None => {
+                    editor.comp.on_edit();
+                    return;
+                }
+            };
+            editor.lsp_notify_insert_text("    ");
+
+            editor.on_completion_edit();
         }
         Action::Undo => {
             let (win, buf) = editor.active_window_and_buf_mut();
@@ -1806,6 +1904,10 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col);
             editing::insert_char(win, buf, ch);
+
+            // Notify LSP of the edit BEFORE triggering completion
+            editor.lsp_notify_insert_edit(ch);
+
             editor.on_completion_edit();
         }
 
@@ -2730,20 +2832,18 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.pending_input = PendingInput::ReplaceChar;
             editor.set_status_msg("r", MessageKind::Info);
         }
-
         Action::ReplaceChar(ch) => {
             let replace_count = editor.replace_count.max(1);
             editor.replace_count = 0;
 
             if ch == '\n' {
-                // r<Enter>: replace char with newline (splits the line)
                 let (win, buf) = editor.active_window_and_buf_mut();
                 let row = win.row;
                 let col = win.col;
                 let line_len = buf.line_char_len(row);
 
                 if col < line_len {
-                    let line_start = buf.rope.line_to_char(row);
+                    let line_start = buf.rope.line_to_char(row); // <-- FIX: was buf.rope.line_start = ...
                     let offset = line_start + col;
                     buf.rope.remove(offset..offset + 1);
                     buf.rope.insert(offset, "\n");
@@ -2753,15 +2853,19 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     win.col = 0;
                     win.desired_col = 0;
                 }
+
+                // Notify LSP
+                if let Some(filename) = editor.active_filename() {
+                    editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                }
             } else {
                 let (win, buf) = editor.active_window_and_buf_mut();
                 let row = win.row;
                 let col = win.col;
                 let line_len = buf.line_char_len(row);
 
-                // Can only replace if cursor is on an actual character
                 if col < line_len {
-                    let line_start = buf.rope.line_to_char(row);
+                    let line_start = buf.rope.line_to_char(row); // <-- FIX: was buf.rope.line_start = ...
                     let offset = line_start + col;
                     let available = line_len - col;
                     let n = replace_count.min(available);
@@ -2774,15 +2878,20 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                         buf.mark_modified();
                         buf.parse_syntax();
 
-                        // Cursor lands on the last replaced character (Vim behavior)
                         win.col = col + n - 1;
                         win.desired_col = win.col;
+                    }
+
+                    // Notify LSP
+                    if let Some(filename) = editor.active_filename() {
+                        editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
                     }
                 }
             }
             editor.comp.on_edit();
             editor.clear_status_msg();
         }
+
         Action::TransZhLine => {
             editor.trans_zh_line();
         }
@@ -3078,6 +3187,11 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 if editor.clipboard_is_block && register.is_none() {
                     paste_block(editor, &text);
                     editor.comp.on_edit();
+
+                    // Notify LSP of paste
+                    if let Some(filename) = editor.active_filename() {
+                        editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                    }
                 } else {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     if text.ends_with('\n') {
@@ -3085,6 +3199,12 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     } else {
                         editing::paste_text(win, buf, &text);
                     }
+
+                    // Notify LSP of paste
+                    if let Some(filename) = editor.active_filename() {
+                        editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                    }
+
                     editor.comp.on_edit();
                 }
             } else {

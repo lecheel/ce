@@ -109,7 +109,7 @@ impl Editor {
         self.set_window_to_buffer(bid);
         self.enter_normal();
         self.set_status_msg(
-            "Git Log — Enter: open/diff  o: split  j/k: scroll  q: close",
+            "Git Log — Enter: open/diff  j/k: scroll  q: close",
             MessageKind::Info,
         );
     }

@@ -797,9 +797,7 @@ fn format_build_buffer(raw_output: &str, diagnostics: &[BuildDiagnostic]) -> Str
     // Keybindings hint
     buf.push('\n');
     buf.push_str(&format!("  {}\n", "─".repeat(40)));
-    buf.push_str(
-        "  [Enter] goto error  [n/N] next/prev  [y] yank snippet  [b] yank braces  [r] rebuild  [q] close\n",
-    );
+    buf.push_str("  [Enter] goto error  [r] rebuild  [q] close\n");
 
     buf
 }

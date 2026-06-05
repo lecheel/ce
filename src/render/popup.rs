@@ -2266,17 +2266,17 @@ pub fn draw_which_key(f: &mut Frame, editor: &Editor) {
 }
 
 /// Floating completion dropdown anchored below the cursor.
+///
+/// Draws candidates whose source is configured as `CompletionStyle::Popup`.
+/// Independently of ghost text — the popup appears even when no ghost
+/// text is displayed (e.g. LSP in popup mode without any AI source).
 pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
-    // ── Respect the global popup toggle ──────────────────────────
-    if !editor.config.popup_enabled {
+    if !editor.comp.should_show_popup(&editor.config) {
         return;
     }
 
-    let candidates = editor.comp.candidates();
-    if candidates.len() <= 1 {
-        return;
-    }
-    if editor.ghost_text().is_none() {
+    let popup_candidates = editor.comp.popup_candidates_filtered(&editor.config);
+    if popup_candidates.is_empty() {
         return;
     }
 
@@ -2290,8 +2290,8 @@ pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
     let abs_x: usize = pos.x + gutter_w + col_offset;
     let abs_y: usize = pos.y + row_offset + 1;
 
-    let max_visible = candidates.len().min(8);
-    let max_item_w = candidates
+    let max_visible = popup_candidates.len().min(8);
+    let max_item_w = popup_candidates
         .iter()
         .map(|c| c.text.chars().count() + 5) // +5 for " [SRC]"
         .max()
@@ -2313,9 +2313,9 @@ pub fn draw_completion_popup(f: &mut Frame, editor: &Editor) {
         },
     );
 
-    let selected = editor.completion_idx();
+    let selected = editor.comp.popup_selection_index(&editor.config);
 
-    let items: Vec<ListItem> = candidates
+    let items: Vec<ListItem> = popup_candidates
         .iter()
         .take(max_visible)
         .enumerate()

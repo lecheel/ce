@@ -1,9 +1,7 @@
 //! Central editor state and key dispatch.
 use crate::comp::state::CompletionMachine;
-use crate::comp::state::CompletionSource;
 use crate::config::app_config::Config;
 use crate::ed::buffer::{Buffer, BufferKind};
-use crate::ed::handle::tag::LSP_GOTO_TIMEOUT_MS;
 use crate::ed::misc_helper::{count_nested_fns, is_fn_kind, is_valid_register_char};
 use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::syntax::SyntaxState;
@@ -11,12 +9,7 @@ use crate::ed::syntax::TextObject;
 use crate::ed::window::{LayoutNode, Window};
 use crate::keybind::bindings::Action;
 use crate::keybind::bindings::FunctionSpanInfo;
-use crate::lsp::TextEdit;
-use crate::lsp::{
-    path_to_uri, uri_to_path, CompletionItem, FormattingOptions, InlayHint, Location, LspManager,
-    LspMessage, OffsetEncoding, SignatureHelpState,
-};
-use crate::msgbox::AppMessage;
+use crate::lsp::{InlayHint, LspManager, LspMessage, OffsetEncoding, SignatureHelpState};
 use crate::msgbox::AppMessage as LspAppMessage;
 use crate::popup::{PopupItem, PopupState};
 use crate::render::statusbar_state::StatusBarState;
@@ -24,6 +17,16 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ropey::Rope;
 use std::collections::HashSet;
+
+/// Info about a pending LSP completion request waiting for throttle.
+#[derive(Debug, Clone)]
+pub struct LspCompletionPending {
+    pub comp_version: u64,
+    pub path: std::path::PathBuf,
+    pub line: u32,
+    pub col: u32,
+    pub request_time: std::time::Instant,
+}
 
 /// In-flight LSP go-to-definition request.
 #[derive(Debug)]
@@ -211,6 +214,15 @@ pub struct Editor {
     pub replace_count: usize,
     pub build: crate::ed::build::BuildState,
 
+    /// Maps CompletionMachine version → (URI, LSP document version)
+    /// for reconciling async LSP completion responses.
+    pub comp_lsp_version_map: std::collections::HashMap<u64, (String, i32)>,
+
+    /// Pending LSP completion request info, waiting for throttle debounce.
+    pub lsp_completion_pending: Option<LspCompletionPending>,
+    /// Channel to receive MQTT messages from the background subscriber.
+    pub mqtt_rx: Option<std::sync::mpsc::Receiver<String>>,
+
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
 }
@@ -333,6 +345,9 @@ impl Editor {
             action_failed: false,
             replace_count: 0,
             build: crate::ed::build::BuildState::default(),
+            comp_lsp_version_map: std::collections::HashMap::new(),
+            lsp_completion_pending: None,
+            mqtt_rx: None,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -342,6 +357,7 @@ impl Editor {
             quit_prompt: QuitPrompt::None,
         };
 
+        editor.comp.sync_config(&editor.config);
         // ── Sync tab_size into all buffers ──────────────────────
         editor.sync_tab_size();
 
@@ -352,6 +368,28 @@ impl Editor {
             // ── Open initial file with LSP ───────────────────────
             if let Some(ref name) = filename {
                 editor.lsp_notify_open(std::path::PathBuf::from(name));
+            }
+        }
+
+        // ── Spawn MQTT subscriber (if enabled) ────────────────────
+        if editor.config.mqtt_enabled {
+            match crate::ai::mqtt::spawn_mqtt_subscriber(
+                &editor.config.mqtt_host,
+                editor.config.mqtt_port,
+                &editor.config.mqtt_topic,
+            ) {
+                Ok(rx) => {
+                    editor.mqtt_rx = Some(rx);
+                    log::info!(
+                        "[MQTT] Subscriber started for {}:{} / {}",
+                        editor.config.mqtt_host,
+                        editor.config.mqtt_port,
+                        editor.config.mqtt_topic,
+                    );
+                }
+                Err(e) => {
+                    log::error!("[MQTT] Failed to start subscriber: {}", e);
+                }
             }
         }
 
@@ -792,6 +830,69 @@ impl Editor {
             return;
         }
 
+        // ── Pending bookmark / quickmark / replace-char input ────────
+        if self.pending_input != PendingInput::None
+            && matches!(self.mode, Mode::Normal | Mode::Visual | Mode::VisualLine)
+        {
+            match self.pending_input {
+                // ── Replace-char: accept ANY character (not just a-z) ──
+                PendingInput::ReplaceChar => match key.code {
+                    KeyCode::Esc => {
+                        self.pending_input = PendingInput::None;
+                        self.replace_count = 0;
+                        self.clear_status_msg();
+                    }
+                    KeyCode::Enter => {
+                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar('\n'));
+                        self.pending_input = PendingInput::None;
+                    }
+                    KeyCode::Char(c) => {
+                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar(c));
+                        self.pending_input = PendingInput::None;
+                    }
+                    KeyCode::Tab => {
+                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar('\t'));
+                        self.pending_input = PendingInput::None;
+                    }
+                    _ => {
+                        self.pending_input = PendingInput::None;
+                        self.replace_count = 0;
+                        self.clear_status_msg();
+                    }
+                },
+
+                // ── Bookmark handlers (unchanged logic, just re-indented) ──
+                PendingInput::SetBookmark | PendingInput::GotoBookmark => match key.code {
+                    KeyCode::Esc => {
+                        self.pending_input = PendingInput::None;
+                        self.clear_status_msg();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_lowercase() || c == '`' => {
+                        match self.pending_input {
+                            PendingInput::SetBookmark => {
+                                self.set_named_bookmark(c);
+                            }
+                            PendingInput::GotoBookmark => {
+                                if c == '`' {
+                                    self.jump_last_position();
+                                } else {
+                                    self.goto_named_bookmark(c);
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                        self.pending_input = PendingInput::None;
+                    }
+                    _ => {
+                        self.pending_input = PendingInput::None;
+                        self.clear_status_msg();
+                    }
+                },
+                PendingInput::None => unreachable!(),
+            }
+            return;
+        }
+
         if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
@@ -876,69 +977,6 @@ impl Editor {
             return;
         }
 
-        // ── Pending bookmark / quickmark / replace-char input ────────
-        if self.pending_input != PendingInput::None
-            && matches!(self.mode, Mode::Normal | Mode::Visual | Mode::VisualLine)
-        {
-            match self.pending_input {
-                // ── Replace-char: accept ANY character (not just a-z) ──
-                PendingInput::ReplaceChar => match key.code {
-                    KeyCode::Esc => {
-                        self.pending_input = PendingInput::None;
-                        self.replace_count = 0;
-                        self.clear_status_msg();
-                    }
-                    KeyCode::Enter => {
-                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar('\n'));
-                        self.pending_input = PendingInput::None;
-                    }
-                    KeyCode::Char(c) => {
-                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar(c));
-                        self.pending_input = PendingInput::None;
-                    }
-                    KeyCode::Tab => {
-                        crate::keybind::bindings::execute_action(self, Action::ReplaceChar('\t'));
-                        self.pending_input = PendingInput::None;
-                    }
-                    _ => {
-                        self.pending_input = PendingInput::None;
-                        self.replace_count = 0;
-                        self.clear_status_msg();
-                    }
-                },
-
-                // ── Bookmark handlers (unchanged logic, just re-indented) ──
-                PendingInput::SetBookmark | PendingInput::GotoBookmark => match key.code {
-                    KeyCode::Esc => {
-                        self.pending_input = PendingInput::None;
-                        self.clear_status_msg();
-                    }
-                    KeyCode::Char(c) if c.is_ascii_lowercase() || c == '`' => {
-                        match self.pending_input {
-                            PendingInput::SetBookmark => {
-                                self.set_named_bookmark(c);
-                            }
-                            PendingInput::GotoBookmark => {
-                                if c == '`' {
-                                    self.jump_last_position();
-                                } else {
-                                    self.goto_named_bookmark(c);
-                                }
-                            }
-                            _ => unreachable!(),
-                        }
-                        self.pending_input = PendingInput::None;
-                    }
-                    _ => {
-                        self.pending_input = PendingInput::None;
-                        self.clear_status_msg();
-                    }
-                },
-                PendingInput::None => unreachable!(),
-            }
-            return;
-        }
-
         // if self.popup.is_open() {
         // self.handle_any_popup_key(key);
         // return;
@@ -955,31 +993,73 @@ impl Editor {
             return;
         }
 
-        let ghost_active = self.comp.has_ghost();
+        let ghost_active = self.comp.should_show_ghost(&self.config);
+        let popup_active = self.comp.should_show_popup(&self.config);
 
-        //-- 1. Intercept typing and command modes (Insert/Brief/Command) and return early --//
-        // ── Ghost-text navigation (Insert / Brief modes) ─────────────────────
-        if matches!(self.mode, Mode::Insert | Mode::Brief) && ghost_active {
+        let ghost_active = self.comp.should_show_ghost(&self.config);
+        let popup_active = self.comp.should_show_popup(&self.config);
+        let any_completion = ghost_active || popup_active;
+
+        if matches!(self.mode, Mode::Insert | Mode::Brief) && any_completion {
+            // log::debug!("[handle_key] → INTERCEPT BLOCK (1)");
+
+            let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
             match key.code {
-                KeyCode::Down => {
+                // ── Cycle Down ──────────────────────────────────────────
+                KeyCode::Char('n') if is_ctrl => {
                     self.cycle_completion(1);
+                    self.update_completion_popup_state();
                     return;
                 }
-                KeyCode::Up => {
+                // ── Cycle Up ────────────────────────────────────────────
+                KeyCode::Char('p') if is_ctrl => {
                     self.cycle_completion(-1);
+                    self.update_completion_popup_state();
                     return;
                 }
-                KeyCode::Right | KeyCode::Char('\t') if key.modifiers.is_empty() => {
+                KeyCode::Down if key.modifiers.is_empty() && any_completion => {
+                    self.cycle_completion(1);
+                    self.update_completion_popup_state();
+                    return;
+                }
+                KeyCode::Up if key.modifiers.is_empty() && any_completion => {
+                    self.cycle_completion(-1);
+                    self.update_completion_popup_state();
+                    return;
+                }
+                KeyCode::Tab if key.modifiers.is_empty() => {
                     crate::keybind::bindings::execute_action(self, Action::AcceptCompletion);
                     return;
                 }
+                KeyCode::Right if key.modifiers.is_empty() => {
+                    let should_accept = if ghost_active {
+                        true
+                    } else {
+                        popup_active && self.comp.user_has_cycled
+                    };
+                    if should_accept {
+                        crate::keybind::bindings::execute_action(self, Action::AcceptCompletion);
+                        return;
+                    }
+                }
+                KeyCode::Enter => {
+                    if popup_active {
+                        crate::keybind::bindings::execute_action(self, Action::AcceptCompletion);
+                        return;
+                    }
+                }
                 KeyCode::Esc => {
                     self.comp.reset_to_idle();
+                    if self.popup.kind == Some(crate::popup::PopupKind::Completion) {
+                        self.popup.kind = None;
+                    }
                     return;
                 }
                 _ => {
-                    self.comp.reset_to_idle();
-                    // fall through
+                    if ghost_active {
+                        self.comp.reset_to_idle();
+                    }
                 }
             }
         }
@@ -1254,12 +1334,15 @@ impl Editor {
 
         self.config_bool_keys = bool_keys;
 
-        // ── Cycle / selectable items ──────────────────────────────
         let base_offset = self.config_bool_keys.len();
+        // ── Cycle / selectable items ──────────────────────────────
         let cycle_defs: Vec<(&str, Vec<&str>)> = vec![
             ("init_mode", vec!["vim", "brief"]),
             ("llm_backend", vec!["llamacpp", "ollama"]),
             ("commit_backend", vec!["llamacpp", "ollama"]),
+            ("copilot_style", vec!["ghost_text", "popup"]),
+            ("codeium_style", vec!["ghost_text", "popup"]),
+            ("lsp_completion_style", vec!["ghost_text", "popup"]),
         ];
 
         self.config_cycle_keys = cycle_defs
@@ -1579,6 +1662,33 @@ impl Editor {
             (win.row, win.col)
         };
 
+        // Compute final position OUTSIDE the block so it stays in scope
+        let (final_row, final_col) = {
+            let is_line_paste = text.ends_with('\n') || text.ends_with('\r');
+
+            let mut f_row = start_row;
+            let mut f_col = start_col;
+
+            if is_line_paste {
+                let newlines = text.matches('\n').count();
+                f_row = (start_row + newlines).min(self.buf().len_lines().saturating_sub(1));
+                f_col = 0;
+            } else {
+                let mut current_col = start_col;
+                for c in text.chars() {
+                    if c == '\n' {
+                        f_row += 1;
+                        current_col = 0;
+                    } else if c != '\r' {
+                        current_col += 1;
+                    }
+                }
+                f_col = current_col;
+            }
+
+            (f_row, f_col)
+        };
+
         {
             let (win, buf) = self.active_window_and_buf_mut();
 
@@ -1587,34 +1697,6 @@ impl Editor {
                 crate::ed::editing::paste_line_below(win, buf, text);
             } else {
                 crate::ed::editing::paste_text(win, buf, text);
-            }
-
-            let mut final_row = start_row;
-            let mut final_col = start_col;
-
-            if is_line_paste {
-                let newlines = text.matches('\n').count();
-                final_row = (start_row + newlines).min(buf.len_lines().saturating_sub(1));
-                final_col = 0;
-            } else {
-                let mut current_col = start_col;
-                let tab_size = buf.tab_size;
-                for c in text.chars() {
-                    if c == '\n' {
-                        final_row += 1;
-                        current_col = 0;
-                    } else if c != '\r' {
-                        current_col += 1;
-                    }
-                }
-                final_col = current_col;
-            }
-
-            final_row = final_row.min(buf.len_lines().saturating_sub(1));
-            if final_row < buf.len_lines() {
-                final_col = final_col.min(crate::ed::editing::line_display_width(buf, final_row));
-            } else {
-                final_col = 0;
             }
 
             // ── FIX: enforce trailing-newline invariant ───────────
@@ -1640,210 +1722,6 @@ impl Editor {
     /// Alias for bracketed paste event loop compatibility.
     pub fn insert_str(&mut self, text: &str) {
         self.handle_paste(text);
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Completion
-// ═══════════════════════════════════════════════════════════════════════════
-
-impl Editor {
-    /// Called by the main loop on every edit while in Insert/Brief mode.
-    ///
-    /// Fires fast (synchronous / low-latency) sources immediately.
-    /// AI sources (Codeium, Copilot) are intentionally NOT fired here —
-    /// they are triggered from `poll_completion()` after `ai_idle_ms` of
-    /// silence so that rapid typing never spawns redundant AI requests.
-    pub fn on_completion_edit(&mut self) {
-        self.comp.on_edit();
-
-        let prefix = self.get_current_word_prefix();
-        let is_path_prefix = prefix.starts_with("./");
-
-        self.comp.set_prefix(prefix.clone());
-
-        let (row, col) = {
-            let win = self.active_window();
-            (win.row, win.col)
-        };
-
-        let min_word_prefix: usize = 4;
-
-        // ── Source 1: FilePaths (ghost text, triggered by "./" prefix) ──
-        if is_path_prefix && prefix.len() >= 2 {
-            let (_req_id, version) = self.comp.start_source_request(CompletionSource::FilePaths);
-            let matches = crate::comp::path_complete::complete_path(&prefix);
-            self.comp
-                .merge_source(CompletionSource::FilePaths, matches, version);
-        } else {
-            let (_req_id, version) = self.comp.start_source_request(CompletionSource::FilePaths);
-            self.comp
-                .merge_source(CompletionSource::FilePaths, Vec::new(), version);
-        }
-
-        // ── Source 2: Buffer words (prefix ≥ 4) ─────────────────────────
-        if self.config.buffer_word_scan
-            && !self.buffer_words.is_empty()
-            && prefix.len() >= min_word_prefix
-        {
-            let (_req_id, version) = self
-                .comp
-                .start_source_request(CompletionSource::BufferWords);
-            let matches: Vec<String> = self
-                .buffer_words
-                .iter()
-                .filter(|w| w.starts_with(&prefix) && w.as_str() != prefix)
-                .take(30)
-                .cloned()
-                .collect();
-            self.comp
-                .merge_source(CompletionSource::BufferWords, matches, version);
-        }
-
-        // ── Source 3: Vocab words (prefix ≥ 4) ──────────────────────────
-        if !self.vocab_words.is_empty() && prefix.len() >= min_word_prefix {
-            let (_req_id, version) = self.comp.start_source_request(CompletionSource::VocabWords);
-            let matches: Vec<String> = self
-                .vocab_words
-                .iter()
-                .filter(|w| w.starts_with(&prefix) && w.as_str() != prefix)
-                .take(30)
-                .cloned()
-                .collect();
-            self.comp
-                .merge_source(CompletionSource::VocabWords, matches, version);
-        }
-
-        // ── Source 4: LSP — fires on every keystroke, no min-prefix ─────
-        //   (RA and other servers filter by prefix on their end.)
-        if self.lsp_full_active && self.config.lsp_completion_enabled {
-            let (_req_id, version) = self.comp.start_source_request(CompletionSource::Lsp);
-            if let Some(filename) = self.active_filename() {
-                let path = std::path::PathBuf::from(filename);
-                let lsp_line = row as u32;
-                let lsp_col = col as u32;
-                self.lsp_request_completion(&path, lsp_line, lsp_col, version);
-            } else {
-                self.comp
-                    .merge_source(CompletionSource::Lsp, Vec::new(), version);
-            }
-        }
-
-        // ── Sources 5 & 6: Codeium / Copilot — NOT fired here. ──────────
-        //   They are idle-debounced inside poll_completion() (500 ms).
-        //   We intentionally do NOT call start_source_request() for them here
-        //   so that the pending-source map doesn't hold them open on every
-        //   keystroke.
-    }
-
-    // -----------------------------------------------------------------------
-    // LSP completion helpers (unchanged)
-    // -----------------------------------------------------------------------
-
-    pub fn apply_lsp_completion(&mut self, items: Option<Vec<CompletionItem>>, version: u64) {
-        let prefix = self.comp.prefix().to_string();
-        let prefix_lower = prefix.to_lowercase();
-        let labels = match items {
-            Some(items) => items
-                .into_iter()
-                .filter_map(|item| {
-                    let filter_key = item.filter_text.as_deref().unwrap_or(&item.label);
-                    if !prefix.is_empty() && !filter_key.to_lowercase().starts_with(&prefix_lower) {
-                        return None;
-                    }
-                    Some(item.get_insert_text().unwrap_or_else(|| item.label.clone()))
-                })
-                .collect(),
-            None => Vec::new(),
-        };
-        self.comp
-            .merge_source(CompletionSource::Lsp, labels, version);
-    }
-
-    pub fn ingest_lsp_completion(&mut self, request_id: usize, version: u64, items: Vec<String>) {
-        let expected = self.comp.get_pending_request_id(CompletionSource::Lsp);
-        match expected {
-            Some(id) if id == request_id => {
-                self.comp
-                    .merge_source(CompletionSource::Lsp, items, version);
-            }
-            _ => {}
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Vocabulary & Word Index
-// ═══════════════════════════════════════════════════════════════════════════
-
-impl Editor {
-    // tag_vocab
-    pub fn refresh_buffer_words(&mut self) {
-        if !self.config.buffer_word_scan {
-            self.buffer_words.clear();
-            return;
-        }
-        let total = self.buf().len_lines();
-        let mut words = HashSet::new();
-        let buf = self.buf();
-        for i in 0..total {
-            for w in buf
-                .line_text(i)
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-            {
-                if w.len() >= 6 {
-                    words.insert(w.to_string());
-                }
-            }
-        }
-        self.buffer_words = words.into_iter().collect();
-    }
-
-    /// Call `refresh_buffer_words()` only when the config allows it.
-    // tag_vocab
-    pub fn maybe_refresh_buffer_words(&mut self) {
-        if self.config.buffer_word_scan {
-            self.refresh_buffer_words();
-        }
-    }
-
-    fn preload_vocabulary() -> HashSet<String> {
-        if let Ok(config) = Config::load() {
-            if !config.vocab_wordlist {
-                return HashSet::new();
-            }
-        }
-        let mut words = HashSet::new();
-        if let Ok(dir) = Config::config_dir() {
-            let path = dir.join("wordlist.txt");
-            if let Ok(content) = std::fs::read_to_string(path) {
-                for line in content.lines() {
-                    let t = line.trim();
-                    if !t.is_empty() {
-                        words.insert(t.to_string());
-                    }
-                }
-            }
-        }
-        words
-    }
-
-    pub fn add_vocab_word(&mut self, word: &str) -> anyhow::Result<()> {
-        let trimmed = word.trim().to_string();
-        if trimmed.is_empty() {
-            return Ok(());
-        }
-        if self.vocab_words.insert(trimmed.clone()) {
-            if let Ok(dir) = Config::config_dir() {
-                use std::io::Write;
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(dir.join("wordlist.txt"))?;
-                writeln!(file, "{}", trimmed)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -2066,368 +1944,6 @@ impl Editor {
 
         self.popup.registers = Some(crate::popup::registers::RegistersPopup::new(entries));
         self.popup.kind = Some(crate::popup::PopupKind::Registers);
-    }
-}
-
-impl Editor {
-    /// Get the LSP sender, if available.
-    fn lsp_sender(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<LspMessage>> {
-        self.lsp_tx.as_ref()
-    }
-
-    // ── File lifecycle ────────────────────────────────────────────
-
-    pub fn lsp_notify_open(&mut self, path: std::path::PathBuf) {
-        if let Some(tx) = self.lsp_sender() {
-            let _ = tx.send(LspMessage::OpenFile(path));
-        }
-    }
-
-    pub fn lsp_notify_close(&mut self, path: std::path::PathBuf) {
-        if let Some(tx) = self.lsp_sender() {
-            let _ = tx.send(LspMessage::CloseFile(path));
-        }
-    }
-
-    pub fn lsp_notify_change(&mut self, path: std::path::PathBuf) {
-        if self.lsp_tx.is_none() {
-            return;
-        }
-        let uri = path_to_uri(&path);
-        let version = {
-            let v = self.lsp_file_versions.entry(uri).or_insert(1);
-            *v += 1;
-            *v
-        };
-        let text = self.buf().rope.to_string();
-        if let Some(tx) = self.lsp_tx.as_ref() {
-            let _ = tx.send(LspMessage::ChangeFile(path, String::new(), text, version));
-        }
-    }
-
-    pub fn lsp_notify_save(&mut self, path: std::path::PathBuf) {
-        if let Some(tx) = self.lsp_sender() {
-            let _ = tx.send(LspMessage::SaveFile(path));
-        }
-    }
-
-    pub fn lsp_notify_change_incremental(
-        &mut self,
-        path: std::path::PathBuf,
-        start_line: u32,
-        start_char: u32,
-        end_line: u32,
-        end_char: u32,
-        new_text: String,
-    ) {
-        if self.lsp_tx.is_none() {
-            return;
-        }
-        let uri = path_to_uri(&path);
-        let version = {
-            let v = self.lsp_file_versions.entry(uri).or_insert(1);
-            *v += 1;
-            *v
-        };
-        if let Some(tx) = self.lsp_tx.as_ref() {
-            let _ = tx.send(LspMessage::ChangeFileIncremental {
-                path,
-                version,
-                start_line,
-                start_char,
-                end_line,
-                end_char,
-                new_text,
-            });
-        }
-    }
-
-    // ── Completion request ────────────────────────────────────────
-    pub fn lsp_request_completion(
-        &mut self,
-        path: &std::path::PathBuf,
-        line: u32,
-        col: u32,
-        version: u64,
-    ) {
-        if let Some(tx) = self.lsp_sender() {
-            let _ = tx.send(LspMessage::RequestCompletion(
-                path.clone(),
-                line,
-                col,
-                None,
-                version,
-            ));
-        }
-    }
-
-    // ── Signature help ────────────────────────────────────────────
-
-    pub fn lsp_request_signature_help(&mut self, path: &std::path::PathBuf, line: u32, col: u32) {
-        if let Some(tx) = self.lsp_sender() {
-            let _ = tx.send(LspMessage::RequestSignatureHelp(path.clone(), line, col));
-        }
-    }
-
-    // ── Formatting ────────────────────────────────────────────────
-    pub fn lsp_request_formatting(
-        &mut self,
-        path: std::path::PathBuf,
-        buffer_idx: usize,
-        save_after: bool,
-    ) {
-        if let Some(tx) = self.lsp_sender() {
-            let win = self.active_window();
-            let cursor = Some((win.row, win.col));
-            let text = self.buf().rope.to_string();
-            let tab_size = self.config.tab_size as u32;
-            let options = FormattingOptions {
-                tab_size,
-                insert_spaces: self.config.insert_spaces,
-                trim_trailing_whitespace: Some(true),
-                insert_final_newline: Some(true),
-                trim_final_newlines: Some(true),
-            };
-            let _ = tx.send(LspMessage::RequestFormatting(
-                path, text, options, buffer_idx, cursor, save_after,
-            ));
-        }
-    }
-
-    // ── Inlay hints ───────────────────────────────────────────────
-
-    pub fn lsp_request_inlay_hints(&mut self, path: &std::path::PathBuf, version: i32) {
-        if let Some(tx) = self.lsp_sender() {
-            let total_lines = self.buf().len_lines();
-            let _ = tx.send(LspMessage::RequestInlayHintsRange(
-                path.clone(),
-                0,
-                total_lines as usize,
-                version,
-            ));
-        }
-    }
-
-    fn apply_lsp_diagnostics(
-        &mut self,
-        uri: &str,
-        diagnostics: Vec<crate::ed::buffer::Diagnostic>,
-    ) {
-        let path = uri_to_path(uri);
-        for buf in &mut self.buffers {
-            if buf.filename.as_deref() == path.to_str() {
-                buf.diagnostics = diagnostics;
-                return;
-            }
-        }
-    }
-
-    fn apply_lsp_format(
-        &mut self,
-        result: Result<Option<Vec<TextEdit>>, String>,
-        buffer_idx: usize,
-        cursor_state: Option<(usize, usize)>,
-        save_after: bool,
-    ) {
-        let edits = match result {
-            Ok(Some(edits)) => edits,
-            Ok(None) => return,
-            Err(e) => {
-                self.set_status_msg(&format!("Format error: {}", e), MessageKind::Error);
-                return;
-            }
-        };
-
-        if edits.is_empty() {
-            return;
-        }
-
-        if buffer_idx >= self.buffers.len() {
-            return;
-        }
-
-        // ── Apply edits in a scoped block to release the borrow ──────
-        let (line_count, filename) = {
-            let buf = &mut self.buffers[buffer_idx];
-
-            let mut sorted_edits = edits.clone();
-            sorted_edits.sort_by(|a, b| {
-                let a_start =
-                    a.range.start.line as usize * 1_000_000 + a.range.start.character as usize;
-                let b_start =
-                    b.range.start.line as usize * 1_000_000 + b.range.start.character as usize;
-                b_start.cmp(&a_start)
-            });
-
-            for edit in &sorted_edits {
-                let start_line = edit.range.start.line as usize;
-                let start_char = edit.range.start.character as usize;
-                let end_line = edit.range.end.line as usize;
-                let end_char = edit.range.end.character as usize;
-
-                if start_line >= buf.len_lines() || end_line >= buf.len_lines() {
-                    continue;
-                }
-
-                let start_offset = buf.rope.line_to_char(start_line)
-                    + start_char.min(buf.line_char_len(start_line));
-                let end_offset =
-                    buf.rope.line_to_char(end_line) + end_char.min(buf.line_char_len(end_line));
-
-                if end_offset > start_offset {
-                    buf.rope.remove(start_offset..end_offset);
-                }
-                if !edit.new_text.is_empty() {
-                    buf.rope.insert(start_offset, &edit.new_text);
-                }
-            }
-
-            buf.mark_modified();
-            buf.parse_syntax();
-
-            (buf.len_lines(), buf.filename.clone())
-        };
-
-        // ── Restore cursor (borrow on buffers is now released) ───────
-        if let Some((row, col)) = cursor_state {
-            let win = self.active_window_mut();
-            win.row = row.min(line_count.saturating_sub(1));
-            win.col = col;
-        }
-
-        // ── Optionally save after formatting ─────────────────────────
-        if save_after && filename.is_some() {
-            let _ = self.save_active_buffer();
-        }
-    }
-
-    fn apply_lsp_inlay_hints(&mut self, uri: String, hints: Vec<InlayHint>, _version: i32) {
-        self.inlay_hints.insert(uri, hints);
-    }
-
-    // ── Shutdown ──────────────────────────────────────────────────
-
-    pub fn lsp_shutdown(&mut self) {
-        if let Some(tx) = self.lsp_sender() {
-            let _ = tx.send(LspMessage::Shutdown);
-        }
-    }
-}
-
-impl Editor {
-    pub fn poll_lsp_responses(&mut self) {
-        let messages: Vec<_> = {
-            let Some(rx) = &mut self.lsp_rx else { return };
-            std::iter::from_fn(|| rx.try_recv().ok()).collect()
-        };
-        for msg in messages {
-            self.handle_lsp_message(msg);
-        }
-
-        self.check_lsp_goto_timeout();
-    }
-
-    fn handle_lsp_message(&mut self, msg: AppMessage) {
-        match msg {
-            AppMessage::LspDiagnostics {
-                uri, diagnostics, ..
-            } => {
-                self.apply_lsp_diagnostics(&uri, diagnostics);
-            }
-
-            AppMessage::LspFormatResult {
-                result,
-                buffer_idx,
-                cursor_state,
-                save_after,
-            } => {
-                self.apply_lsp_format(result, buffer_idx, cursor_state, save_after);
-            }
-
-            AppMessage::LspInlayHints {
-                uri,
-                hints,
-                version,
-            } => {
-                self.apply_lsp_inlay_hints(uri, hints, version);
-            }
-
-            AppMessage::LspSignatureHelp(state) => {
-                self.signature_help = state;
-            }
-
-            AppMessage::LspCompletion { items, version } => {
-                self.apply_lsp_completion(items, version);
-            }
-
-            AppMessage::LspCompletionResolved(item) => {
-                log::debug!("Resolved completion item: {:?}", item.label);
-            }
-
-            AppMessage::LspError(e) => {
-                log::warn!("LSP error: {}", e);
-            }
-
-            AppMessage::LspGotoDefinitionResult { locations } => {
-                self.handle_lsp_goto_result(locations);
-            }
-        }
-    }
-
-    /// LSP responded to go-to-definition.
-    fn handle_lsp_goto_result(&mut self, locations: Vec<Location>) {
-        let pending = match self.pending_lsp_goto.take() {
-            Some(p) => p,
-            None => return,
-        };
-
-        if locations.is_empty() {
-            // LSP says no definition — fall through to ctagd / ctags
-            if pending.pushed_tag_stack {
-                self.tag_manager.pop();
-            }
-            self.tag_goto_fallback(&pending.symbol);
-            return;
-        }
-
-        if locations.len() == 1 {
-            self.lsp_do_goto_jump(&locations[0], &pending.symbol, 1);
-        } else {
-            self.lsp_goto_picker(locations, &pending.symbol);
-        }
-    }
-
-    /// LSP timeout — fall back to ctagd / ctags.
-    pub fn check_lsp_goto_timeout(&mut self) {
-        let timed_out = self.pending_lsp_goto.as_ref().map_or(false, |p| {
-            p.created_at.elapsed() > std::time::Duration::from_millis(LSP_GOTO_TIMEOUT_MS)
-        });
-
-        if !timed_out {
-            return;
-        }
-
-        let pending = self.pending_lsp_goto.take().unwrap();
-        if pending.pushed_tag_stack {
-            self.tag_manager.pop();
-        }
-
-        self.set_status_msg(
-            &format!("LSP timeout — falling back for '{}'", pending.symbol),
-            MessageKind::Info,
-        );
-
-        self.tag_goto_fallback(&pending.symbol);
-    }
-
-    /// Fall back to ctagd → ctags (used when LSP times out or returns empty).
-    fn tag_goto_fallback(&mut self, symbol: &str) {
-        if self.ctagd.is_available() {
-            if let Some(()) = self.ctagd_definition(symbol) {
-                return;
-            }
-        }
-        self.ctags_jump(symbol);
     }
 }
 
@@ -2659,247 +2175,6 @@ impl Editor {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Copilot Auth
-// ═══════════════════════════════════════════════════════════════════════════
-
-impl Editor {
-    /// Kick off the Copilot authentication flow in a background thread.
-    /// Only starts when `copilot_enabled` is true in config.
-    pub fn copilot_auth(&mut self) {
-        if !self.config.copilot_enabled {
-            self.set_status_msg(
-                "Copilot is disabled. Set copilot_enabled: true in config.",
-                MessageKind::Error,
-            );
-            return;
-        }
-
-        if self.copilot_auth_rx.is_some() {
-            self.set_status_msg("Copilot auth already in progress...", MessageKind::Info);
-            return;
-        }
-
-        let (tx, rx) = std::sync::mpsc::channel::<crate::ai::copilot::auth::CopilotAuthMsg>();
-        self.copilot_auth_rx = Some(rx);
-
-        self.set_status_msg("Requesting Copilot device code...", MessageKind::Info);
-
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let client = reqwest::Client::new();
-
-                // 1. Request device code
-                let res = client
-                    .post("https://github.com/login/device/code")
-                    .header("User-Agent", "copilot-cli/0.1.0")
-                    .header("Accept", "application/json")
-                    .form(&[
-                        ("client_id", "Iv1.b507a08c87ecfe98"),
-                        ("scope", "read:user"),
-                    ])
-                    .send()
-                    .await;
-
-                let resp = match res {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(format!(
-                            "Auth request failed: {}",
-                            e
-                        )));
-                        return;
-                    }
-                };
-
-                let device: crate::ai::copilot::types::DeviceCodeResponse =
-                    match resp.json().await {
-                        Ok(d) => d,
-                        Err(e) => {
-                            let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(
-                                format!("Parse device code failed: {}", e),
-                            ));
-                            return;
-                        }
-                    };
-
-                let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::DeviceCode(
-                    device.verification_uri.clone(),
-                    device.user_code.clone(),
-                ));
-
-                // Try to open browser
-                if let Err(e) = crate::ai::copilot::auth::open_browser(&device.verification_uri) {
-                    log::debug!("Could not open browser automatically: {}", e);
-                }
-
-                // 2. Poll for access token
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(device.expires_in as u64);
-                let mut interval = device.interval.max(5) as u64;
-
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(interval));
-
-                    if std::time::Instant::now() > deadline {
-                        let _ = tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(
-                            "Copilot auth timed out".into(),
-                        ));
-                        return;
-                    }
-
-                    let poll_res = client
-                        .post("https://github.com/login/oauth/access_token")
-                        .header("User-Agent", "copilot-cli/0.1.0")
-                        .header("Accept", "application/json")
-                        .form(&[
-                            ("client_id", "Iv1.b507a08c87ecfe98"),
-                            ("device_code", &device.device_code),
-                            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                        ])
-                        .send()
-                        .await;
-
-                    match poll_res {
-                        Ok(poll_resp) => {
-                            if let Ok(result) = poll_resp
-                                .json::<crate::ai::copilot::types::DeviceAccessTokenResponse>()
-                                .await
-                            {
-                                if let Some(error) = &result.error {
-                                    match error.as_str() {
-                                        "authorization_pending" => continue,
-                                        "slow_down" => {
-                                            interval += 5;
-                                            continue;
-                                        }
-                                        _ => {
-                                            let _ = tx.send(
-                                                crate::ai::copilot::auth::CopilotAuthMsg::Error(
-                                                    format!("Auth error: {}", error),
-                                                ),
-                                            );
-                                            return;
-                                        }
-                                    }
-                                } else if let Some(access_token) = result.access_token {
-                                    let _ =
-                                        tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Success(
-                                            access_token,
-                                        ));
-                                    return;
-                                } else {
-                                    let _ =
-                                        tx.send(crate::ai::copilot::auth::CopilotAuthMsg::Error(
-                                            "No token received".into(),
-                                        ));
-                                    return;
-                                }
-                            }
-                        }
-                        Err(_) => continue, // Network error, retry
-                    }
-                }
-            });
-        });
-    }
-
-    /// Poll for Copilot completion responses and merge them into the
-    /// completion machine.  Call this from the main tick handler.
-    pub fn poll_copilot_completions(&mut self) {
-        if !self.config.copilot_enabled {
-            if let Some(rx) = &mut self.copilot_response_rx {
-                while rx.try_recv().is_ok() {}
-            }
-            return;
-        }
-
-        let messages: Vec<_> = {
-            let Some(rx) = &mut self.copilot_response_rx else {
-                return;
-            };
-            std::iter::from_fn(|| rx.try_recv().ok()).collect()
-        };
-
-        for msg in messages {
-            match msg {
-                crate::ai::copilot::server::CopilotResponse::Items { version, items } => {
-                    self.comp
-                        .merge_source(CompletionSource::Copilot, items, version);
-                }
-                crate::ai::copilot::server::CopilotResponse::Error { version, error } => {
-                    log::debug!("Copilot completion error: {}", error);
-                    self.comp
-                        .merge_source(CompletionSource::Copilot, Vec::new(), version);
-                }
-                crate::ai::copilot::server::CopilotResponse::ReauthResult { ok } => {
-                    if ok {
-                        log::info!("Copilot re-authenticated successfully.");
-                    } else {
-                        log::warn!("Copilot re-auth failed — token may still be invalid.");
-                    }
-                }
-            }
-        }
-    }
-
-    /// Poll for Copilot auth messages (call this from the main loop).
-    pub fn poll_copilot_auth(&mut self) {
-        if !self.config.copilot_enabled {
-            // Drain and discard any stale messages
-            if let Some(rx) = &mut self.copilot_auth_rx {
-                while rx.try_recv().is_ok() {}
-                self.copilot_auth_rx = None;
-            }
-            return;
-        }
-        let messages: Vec<_> = {
-            let Some(rx) = &mut self.copilot_auth_rx else {
-                return;
-            };
-            std::iter::from_fn(|| rx.try_recv().ok()).collect()
-        };
-
-        for msg in messages {
-            match msg {
-                // In ed/editor.rs -> poll_copilot_auth()
-                crate::ai::copilot::auth::CopilotAuthMsg::DeviceCode(uri, code) => {
-                    // Put the CODE first so it never gets truncated on narrow screens!
-                    let msg = format!("Copilot Code: {} | Visit: {}", code, uri);
-                    self.set_status_msg(&msg, crate::ed::mode::MessageKind::Info);
-                }
-                crate::ai::copilot::auth::CopilotAuthMsg::Success(access_token) => {
-                    self.copilot_auth_rx = None; // Done
-                    match crate::ai::copilot::auth::AuthManager::save_token_to_hosts(&access_token)
-                    {
-                        Ok(path) => {
-                            self.config.api_key = Some(access_token);
-                            self.set_status_msg(
-                                &format!("Copilot authenticated! Token saved to {:?}", path),
-                                crate::ed::mode::MessageKind::Success,
-                            );
-                        }
-                        Err(e) => {
-                            self.set_status_msg(
-                                &format!("Auth succeeded but failed to save token: {}", e),
-                                crate::ed::mode::MessageKind::Error,
-                            );
-                        }
-                    }
-                }
-                crate::ai::copilot::auth::CopilotAuthMsg::Error(e) => {
-                    self.copilot_auth_rx = None; // Done
-                    self.set_status_msg(
-                        &format!("Copilot auth failed: {}", e),
-                        crate::ed::mode::MessageKind::Error,
-                    );
-                }
-            }
-        }
-    }
-}
-
 // ── Add these methods to impl Editor ──────────────────────
 
 impl Editor {
@@ -2974,10 +2249,12 @@ impl Editor {
         win.scroll_line = 0;
 
         self.enter_insert();
-        self.set_status_msg(
-            "Code LLM — type your prompt, Ctrl+Enter to send, q to close",
-            MessageKind::Info,
+        let hint = format!(
+            "Code LLM ({}) — type your prompt, Ctrl+Enter to send, q to close",
+            self.config.llm_backend
         );
+
+        self.set_status_msg(&hint, MessageKind::Info);
     }
 
     /// Called by the LLM streaming layer to append a token
@@ -3060,6 +2337,84 @@ impl Editor {
         let ts = self.config.tab_size;
         for buf in &mut self.buffers {
             buf.tab_size = ts;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MQTT Integration — receives text from external audio service
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pipeline:
+//
+//   ┌──────────────┐     ┌────────────┐     ┌────────────────────────┐
+//   │ AudioService │────▶│ MQTT Broker│────▶│ Editor (SUB on topic)  │
+//   │   (PUB)      │     │ localhost  │     │  ├▶ Register "i"       │
+//   │              │     │  :1883     │     │  └▶ CodeLlm prompt     │
+//   └──────────────┘     └────────────┘     │      └▶ auto-send?     │
+//                                           └────────────────────────┘
+//
+
+impl Editor {
+    /// Poll the MQTT channel for new messages from the audio service
+    /// and inject them into register `"i"` and (optionally) the active
+    /// CodeLlm session. Called from the main-loop tick handler.
+    pub fn poll_mqtt(&mut self) {
+        // Drain the channel into a local vec first so the immutable
+        // borrow of self.mqtt_rx ends before we mutate self below.
+        let incoming: Vec<String> = match &self.mqtt_rx {
+            Some(rx) => rx.try_iter().collect(),
+            None => return,
+        };
+
+        for text in incoming {
+            // 1. Always store in register "i" (paste with "ip in Normal mode)
+            self.registers.named.insert('i', text.clone());
+
+            // 2. Inject into CodeLlm session if one exists
+            self.mqtt_inject_codellm(&text);
+        }
+    }
+
+    /// Insert an MQTT message (from the audio service) into the CodeLlm
+    /// prompt area. If `mqtt_auto_send` is configured and the LLM is
+    /// idle, automatically sends the prompt to the LLM.
+    fn mqtt_inject_codellm(&mut self, text: &str) {
+        let codellm_id = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::CodeLlm)
+            .map(|b| b.id);
+
+        let Some(id) = codellm_id else {
+            return;
+        };
+
+        // Switch the active window to the CodeLlm buffer if needed
+        if self.active_window().buffer_id() != id {
+            self.switch_window_to_buffer(id);
+        }
+
+        // Inject text at the end of the prompt area (after the lock line)
+        if let Some(buf) = self.buf_mut_by_id(id) {
+            let current_len = buf.rope.len_chars();
+            buf.rope.insert(current_len, text);
+            buf.mark_modified();
+            buf.parse_syntax();
+
+            // Move cursor to the end of injected text
+            let total = buf.len_lines().saturating_sub(1);
+            let last_col = buf.line_char_len(total);
+
+            let win = self.active_window_mut();
+            win.row = total;
+            win.col = last_col;
+            win.desired_col = last_col;
+        }
+
+        // Auto-send if configured and LLM is not busy
+        if self.config.mqtt_auto_send && self.llm.task_handle.is_none() {
+            self.codellm_send();
         }
     }
 }

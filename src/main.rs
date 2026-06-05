@@ -479,7 +479,7 @@ async fn run_loop(
                 editor.set_lsp_loading(!server_ready);
                 editor.tick_spinner();
 
-                // 2. Ask the completion machine if a request should fire.
+                // 2. Ask the completion machine if a request should fire (Codeium/Copilot idle-debounce)
                 if let Some((id, text, offset, lang, version)) = editor.poll_completion() {
                     spawn_completion(
                         id,
@@ -493,32 +493,37 @@ async fn run_loop(
                     );
                 }
 
-                // 3. Poll LSP responses from the background LspManager task
+                // 3. Poll debounced LSP completion request (throttle_ms)
+                editor.poll_completion_lsp();
+
+                // 4. Poll LSP responses from the background LspManager task
                 //    (diagnostics, inlay hints, signature help, completions, formatting)
                 editor.poll_lsp_responses();
                 editor.poll_copilot_auth();
                 editor.poll_copilot_completions();
 
-                // 4. Poll git debounce timer and background diff results
+                // 5. Poll git debounce timer and background diff results
                 editor.run_git_tasks();
 
-                // 5. Poll background LLM task responses
+                // 6. Poll background LLM task responses
                 editor.poll_llm_responses();
-                // editor.poll_llm_translate();
 
-                // 6. Animate the git commit generation buffer
+                // 7. Animate the git commit generation buffer
                 editor.tick_git_commit();
 
-                // 7. Animate general LLM prompt spinner
+                // 8. Animate general LLM prompt spinner
                 editor.tick_llm_prompt();
 
-                // 8. Build
+                // 9. Build
                 editor.tick_build();
 
-                // 9. Trigger redraw if which-key debounce just elapsed
+                // 10. Trigger redraw if which-key debounce just elapsed
                 if editor.is_whichkey_visible() {
                     needs_redraw = true;
                 }
+
+                // 11. Poll MQTT subscriber for incoming messages
+                editor.poll_mqtt();
             }
         }
 

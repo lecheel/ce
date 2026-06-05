@@ -1,19 +1,20 @@
-//! Completion state machine (ghost-text).
+//! Completion state machine (ghost-text + popup).
 //!
 //! `CompletionMachine` is the single owner of all completion lifecycle.
 //! The editor calls one method per event; the machine decides what to do.
 //!
 //! ## Source taxonomy
 //!
-//! | Source            | Trigger              | Min-prefix | Ghost style        |
-//! |-------------------|----------------------|------------|--------------------|
-//! | LSP               | keystroke (via edit) | 0          | single-line popup  |
-//! | Codeium / Copilot | 500 ms idle          | 0          | multi-line ghost   |
-//! | BufferWords       | keystroke            | 4          | single-line ghost  |
-//! | VocabWords        | keystroke            | 4          | single-line ghost  |
-//! | FilePaths         | keystroke ("./")     | 2          | single-line ghost  |
-//! | Manual            | Alt+/                | any        | single-line ghost  |
+//! | Source            | Trigger              | Min-prefix | Default style       |
+//! |-------------------|----------------------|------------|---------------------|
+//! | LSP               | keystroke (via edit) | 3          | popup               |
+//! | Codeium / Copilot | 500 ms idle          | 0          | ghost_text          |
+//! | BufferWords       | keystroke            | 4          | ghost_text          |
+//! | VocabWords        | keystroke            | 4          | ghost_text          |
+//! | FilePaths         | keystroke ("./")     | 2          | ghost_text          |
+//! | Manual            | Alt+/                | any        | ghost_text          |
 
+use crate::config::app_config::{CompletionStyle, Config};
 use crate::ed::buffer::{detect_language, Buffer};
 use crate::ed::mode::Mode;
 use ratatui::style::Color;
@@ -65,6 +66,15 @@ impl CompletionSource {
     #[inline]
     pub fn is_ai(&self) -> bool {
         matches!(self, Self::Codeium | Self::Copilot)
+    }
+
+    /// Word-based sources (buffer scan, vocabulary, file paths).
+    #[inline]
+    pub fn is_word(&self) -> bool {
+        matches!(
+            self,
+            Self::BufferWords | Self::VocabWords | Self::Manual | Self::FilePaths
+        )
     }
 }
 
@@ -127,6 +137,7 @@ pub struct CompletionMachine {
     pub request_id: usize,
     pub ghost_text: Option<String>,
     pub completion_idx: usize,
+    pub user_has_cycled: bool,
 
     // ── Multi-source aggregation ─────────────────────────────────
     /// Monotonically increasing version, bumped on every edit.
@@ -180,6 +191,149 @@ impl CompletionMachine {
             ai_idle_ms: 500,
             last_ai_request_version: u64::MAX,
             ghost_full: None,
+            user_has_cycled: false,
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Config sync
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Sync runtime parameters from the editor config.
+    /// Call once at startup and whenever the config changes.
+    pub fn sync_config(&mut self, config: &Config) {
+        self.throttle_ms = config.completion_delay_ms;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Display-style resolution
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Returns the configured display style for a completion source.
+    #[inline]
+    pub fn source_display_style(source: CompletionSource, config: &Config) -> CompletionStyle {
+        match source {
+            CompletionSource::Copilot => config.copilot_style,
+            CompletionSource::Codeium => config.codeium_style,
+            CompletionSource::Lsp => config.lsp_completion_style,
+            CompletionSource::BufferWords
+            | CompletionSource::VocabWords
+            | CompletionSource::Manual
+            | CompletionSource::FilePaths => config.word_completion_style,
+        }
+    }
+
+    /// Whether ghost text should be rendered for the currently selected
+    /// candidate.  Returns `false` when the source is configured as `Popup`.
+    pub fn should_show_ghost(&self, config: &Config) -> bool {
+        if self.ghost_text.is_none() {
+            return false;
+        }
+        self.merged
+            .get(self.completion_idx)
+            .map(|c| Self::source_display_style(c.source, config) == CompletionStyle::GhostText)
+            .unwrap_or(false)
+    }
+
+    /// Whether the completion popup should be displayed.
+    /// True when any candidate's source is configured as `Popup`.
+    pub fn should_show_popup(&self, config: &Config) -> bool {
+        if !config.popup_enabled {
+            return false;
+        }
+        self.merged
+            .iter()
+            .any(|c| Self::source_display_style(c.source, config) == CompletionStyle::Popup)
+    }
+
+    /// Whether any completion is visible (ghost or popup).
+    pub fn is_visible(&self, config: &Config) -> bool {
+        self.should_show_ghost(config) || self.should_show_popup(config)
+    }
+
+    /// Returns candidates whose source is configured for popup display,
+    /// preserving the merged sort order.
+    pub fn popup_candidates_filtered<'a>(
+        &'a self,
+        config: &Config,
+    ) -> Vec<&'a CompletionCandidate> {
+        self.merged
+            .iter()
+            .filter(|c| Self::source_display_style(c.source, config) == CompletionStyle::Popup)
+            .collect()
+    }
+
+    /// Index of the currently selected item among popup-only candidates.
+    /// Used to highlight the correct row in the popup widget.
+    pub fn popup_selection_index(&self, config: &Config) -> usize {
+        let popup: Vec<_> = self
+            .merged
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| Self::source_display_style(c.source, config) == CompletionStyle::Popup)
+            .collect();
+
+        popup
+            .iter()
+            .position(|(i, _)| *i == self.completion_idx)
+            .unwrap_or(0)
+    }
+
+    /// When cycling through candidates, skip to the next/prev candidate
+    /// whose source matches the given display style.  Returns `true` if
+    /// the index actually changed.
+    pub fn cycle_by_style(&mut self, dir: i32, style: CompletionStyle, config: &Config) -> bool {
+        if self.merged.is_empty() {
+            return false;
+        }
+
+        let len = self.merged.len();
+        let mut idx = self.completion_idx;
+        let start = idx;
+
+        loop {
+            idx = if dir > 0 {
+                (idx + 1) % len
+            } else if idx > 0 {
+                idx - 1
+            } else {
+                len - 1
+            };
+
+            if Self::source_display_style(self.merged[idx].source, config) == style {
+                self.completion_idx = idx;
+                self.sync_ghost_to_index();
+                return idx != start;
+            }
+
+            // Full loop without finding a match
+            if idx == start {
+                return false;
+            }
+        }
+    }
+
+    fn sync_ghost_to_index(&mut self) {
+        if let Some(c) = self.merged.get(self.completion_idx) {
+            let prefix = &self.current_prefix;
+            let prefix_lower = prefix.to_lowercase();
+            let text_lower = c.text.to_lowercase();
+
+            let has_trigger =
+                prefix.contains('.') || prefix.contains("::") || prefix.contains("->");
+
+            if prefix.is_empty()
+                || text_lower.starts_with(&prefix_lower)
+                || c.source.is_ai()
+                || has_trigger
+            {
+                self.ghost_full = Some(c.text.clone());
+                let first = c.text.split('\n').next().unwrap_or(&c.text);
+                self.ghost_text = Some(first.to_string());
+            } else {
+                self.ghost_text = None;
+                self.ghost_full = None;
+            }
         }
     }
 
@@ -190,53 +344,71 @@ impl CompletionMachine {
     /// Called on every buffer edit while in Insert / Brief mode.
     ///
     /// * Bumps the prefix version so stale results are discarded.
-    /// * Clears non-AI ghost text immediately (AI ghost fades after idle).
+    /// * Preserves non-AI source results (LSP, BufferWords, etc.) so they
+    ///   can be immediately re-filtered against the new prefix while the
+    ///   next request is in flight. This prevents the popup from flickering.
     /// * Resets the AI idle timer.
     pub fn on_edit(&mut self) {
         let old_version = self.prefix_version;
         self.prefix_version += 1;
         self.phase = Phase::Throttling;
         self.completion_idx = 0;
+        self.user_has_cycled = false;
         self.last_edit_time = std::time::Instant::now();
         self.last_ai_trigger_time = self.last_edit_time;
 
-        // Clear fast-source results immediately.
-        self.source_results.retain(|src, _| src.is_ai());
-
-        // Keep AI pending entries alive — their in-flight requests
-        // are still valid; merge_source version-gates them on arrival.
+        // Clear AI pending entries — they need to be re-requested.
         self.source_pending.retain(|src, _| src.is_ai());
 
-        self.merged.clear();
+        // Remove AI source results (they need fresh idle-timeout requests).
+        // Keep LSP / BufferWords / VocabWords / FilePaths results so they
+        // can be immediately re-filtered against the new prefix while the
+        // next request is in flight.
+        self.source_results.retain(|src, bucket| {
+            if src.is_ai() {
+                false
+            } else {
+                // Update version so rebuild_merged doesn't discard them
+                bucket.version = self.prefix_version;
+                true
+            }
+        });
+
+        // Clear the prefix — the caller will set_prefix() and then refilter().
         self.current_prefix.clear();
 
-        // Dismiss non-AI ghost text so it doesn't linger while typing.
-        // AI ghost text is kept briefly (until a new result arrives or
-        // ai_idle_ms triggers a fresh request).
-        let ghost_is_ai = self
-            .ghost_full
-            .as_ref()
-            .map(|_| {
-                // If the current best candidate came from an AI source,
-                // keep the ghost; otherwise clear.
-                self.merged
-                    .first()
-                    .map(|c| c.source.is_ai())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        if !ghost_is_ai {
-            self.ghost_text = None;
-            self.ghost_full = None;
-        }
+        // Don't clear merged or ghost_text here!
+        // refilter() will narrow them down against the new prefix.
+        // This prevents the popup from flickering between keystrokes.
 
         log::debug!(
-            "[comp:on_edit] version {} → {}, AI pending retained: {}",
+            "[comp:on_edit] version {} → {}, retained {} source buckets",
             old_version,
             self.prefix_version,
-            self.source_pending.len(),
+            self.source_results.len(),
         );
+    }
+
+    /// Re-filter existing source results against the current prefix.
+    /// Called after on_edit() + set_prefix() to immediately narrow down
+    /// visible completions while new LSP requests are still in flight.
+    ///
+    /// Example: typing `a` after `person.` narrows 26 results to just
+    /// those starting with `a` (e.g. `age`), without waiting for the
+    /// next LSP round-trip.
+    pub fn refilter(&mut self) {
+        self.rebuild_merged();
+        self.update_ghost_text();
+
+        if self.merged.is_empty() {
+            self.ghost_text = None;
+            self.ghost_full = None;
+            if self.source_pending.is_empty() {
+                self.phase = Phase::Idle;
+            }
+        } else {
+            self.phase = Phase::Active;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -245,11 +417,6 @@ impl CompletionMachine {
 
     /// Returns `true` when AI sources (Codeium / Copilot) should fire a new
     /// request. Called from the main-loop tick via `poll_completion`.
-    ///
-    /// Conditions:
-    /// 1. Mode is Insert or Brief.
-    /// 2. At least `ai_idle_ms` have elapsed since the last edit.
-    /// 3. We haven't already dispatched a request for this version.
     pub fn should_fire_ai_request(&self, mode: Mode) -> bool {
         if mode != Mode::Insert && mode != Mode::Brief {
             return false;
@@ -257,12 +424,10 @@ impl CompletionMachine {
         if self.last_ai_trigger_time.elapsed() < std::time::Duration::from_millis(self.ai_idle_ms) {
             return false;
         }
-        // Don't re-fire for the same version.
         self.last_ai_request_version != self.prefix_version
     }
 
     /// Mark the current version as having had an AI request dispatched.
-    /// Call this right after sending the request to Codeium / Copilot.
     pub fn mark_ai_request_fired(&mut self) {
         self.last_ai_request_version = self.prefix_version;
     }
@@ -289,14 +454,9 @@ impl CompletionMachine {
     /// Merge results from `source`.
     ///
     /// **Version-gated:** stale results are silently discarded.
-    /// AI sources get a one-version tolerance for in-flight latency.
+    /// All sources get a one-version tolerance for in-flight latency.
     pub fn merge_source(&mut self, source: CompletionSource, items: Vec<String>, version: u64) {
-        let version_ok = if source.is_ai() {
-            // Accept if within one version behind (user typed one more char).
-            version == self.prefix_version || version + 1 == self.prefix_version
-        } else {
-            version == self.prefix_version
-        };
+        let version_ok = version == self.prefix_version || version + 1 == self.prefix_version;
 
         if !version_ok {
             log::debug!(
@@ -354,6 +514,12 @@ impl CompletionMachine {
         let version = self.prefix_version;
         let prefix_lower = prefix.to_lowercase();
 
+        // ── Trigger character awareness ────────────────────────────
+        // If the prefix contains `.`, `::`, or `->`, the LSP has already
+        // contextually filtered the results (e.g. `person.` → `name`).
+        // We must NOT require the results to start with the whole prefix.
+        let has_trigger = prefix.contains('.') || prefix.contains("::") || prefix.contains("->");
+
         let mut seen: HashMap<String, CompletionSource> = HashMap::new();
         let mut candidates: Vec<CompletionCandidate> = Vec::new();
 
@@ -374,6 +540,16 @@ impl CompletionMachine {
                     prefix.is_empty()
                         || text.to_lowercase().contains(&prefix_lower)
                         || text.to_lowercase().starts_with(&prefix_lower)
+                } else if has_trigger && *source == CompletionSource::Lsp {
+                    // Contextual LSP completion (e.g. `person.ag` → `age`).
+                    // Filter by the word fragment AFTER the last trigger character.
+                    let post_trigger = post_trigger_prefix(prefix);
+                    if post_trigger.is_empty() {
+                        true // Right after trigger (e.g. `person.`), show all
+                    } else {
+                        let post_lower = post_trigger.to_lowercase();
+                        text.to_lowercase().starts_with(&post_lower)
+                    }
                 } else {
                     prefix.is_empty() || text.to_lowercase().starts_with(&prefix_lower)
                 };
@@ -426,10 +602,17 @@ impl CompletionMachine {
 
         let prefix = &self.current_prefix;
         let best = &self.merged[self.completion_idx].text;
+        let prefix_lower = prefix.to_lowercase();
+        let best_lower = best.to_lowercase();
 
-        if prefix.is_empty() || best.starts_with(prefix) || best.contains(prefix.as_str()) {
+        let has_trigger = prefix.contains('.') || prefix.contains("::") || prefix.contains("->");
+
+        if prefix.is_empty()
+            || best_lower.starts_with(&prefix_lower)
+            || best_lower.contains(&prefix_lower)
+            || has_trigger
+        {
             self.ghost_full = Some(best.clone());
-            // First line goes to the cursor-row ghost slot.
             let first_line = best.split('\n').next().unwrap_or(best);
             self.ghost_text = Some(first_line.to_string());
         } else {
@@ -467,7 +650,6 @@ impl CompletionMachine {
     }
 
     /// First line of ghost text for inline display at the cursor row.
-    /// Returns `None` if empty.
     pub fn ghost_text_display(&self) -> Option<String> {
         let full = self.ghost_full.as_deref()?;
         let first = full.split('\n').next().unwrap_or(full);
@@ -479,7 +661,6 @@ impl CompletionMachine {
     }
 
     /// Lines 2..N of a multi-line AI ghost suggestion.
-    /// These are rendered below the cursor row as continuation ghost lines.
     pub fn ghost_lines_below(&self) -> Vec<String> {
         let full = match &self.ghost_full {
             Some(f) => f,
@@ -489,8 +670,7 @@ impl CompletionMachine {
         if lines.len() <= 1 {
             return Vec::new();
         }
-        lines.remove(0); // drop first line — already in ghost_text_display()
-                         // Strip trailing empty line produced by a trailing '\n'.
+        lines.remove(0);
         if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
         }
@@ -509,6 +689,8 @@ impl CompletionMachine {
     // Cycling
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// Cycle through ALL candidates regardless of display style.
+    /// Used for Up/Down when both ghost and popup are visible.
     pub fn cycle(&mut self, dir: i32) {
         if self.merged.is_empty() {
             return;
@@ -521,18 +703,8 @@ impl CompletionMachine {
         } else {
             self.completion_idx = len - 1;
         }
-
-        if let Some(c) = self.merged.get(self.completion_idx) {
-            let prefix = &self.current_prefix;
-            if prefix.is_empty() || c.text.starts_with(prefix) || c.source.is_ai() {
-                self.ghost_full = Some(c.text.clone());
-                let first = c.text.split('\n').next().unwrap_or(&c.text);
-                self.ghost_text = Some(first.to_string());
-            } else {
-                self.ghost_text = None;
-                self.ghost_full = None;
-            }
-        }
+        self.user_has_cycled = true;
+        self.sync_ghost_to_index();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -548,6 +720,7 @@ impl CompletionMachine {
         self.source_results.clear();
         self.source_pending.clear();
         self.completion_idx = 0;
+        self.user_has_cycled = false;
     }
 
     pub fn set_prefix(&mut self, prefix: String) {
@@ -604,14 +777,9 @@ impl CompletionMachine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Codeium tick poll (unchanged API, updated logic)
+    // Codeium tick poll
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// Called on every tick. Returns `Some((id, text, offset, lang, version))`
-    /// when the machine decides a Codeium request should fire.
-    ///
-    /// AI idle-debounce is applied here rather than inside `on_edit`, so
-    /// that the caller can fire Codeium/Copilot from a single poll site.
     pub fn maybe_take_request(
         &mut self,
         rope_text: String,
@@ -626,11 +794,9 @@ impl CompletionMachine {
         if mode != Mode::Insert && mode != Mode::Brief {
             return None;
         }
-        // Only fire if Codeium source is pending.
         if !self.source_pending.contains_key(&CompletionSource::Codeium) {
             return None;
         }
-        // Enforce the AI idle debounce.
         if self.last_ai_trigger_time.elapsed() < std::time::Duration::from_millis(self.ai_idle_ms) {
             return None;
         }
@@ -653,7 +819,6 @@ impl CompletionMachine {
         }
     }
 
-    /// Called when a Codeium response arrives.
     pub fn on_response(&mut self, items: Vec<String>, version: u64) {
         self.merge_source(CompletionSource::Codeium, items, version);
     }
@@ -674,9 +839,9 @@ impl CompletionMachine {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Accept the current ghost text.
-    /// Returns `None` if nothing is active.
+    /// Works for both GhostText and Popup display styles because the
+    /// internal `ghost_full` is always kept in sync with `completion_idx`.
     pub fn accept(&mut self, buf: &Buffer, row: usize, col: usize) -> Option<AcceptResult> {
-        // Prefer the full multi-line ghost for AI sources.
         let ghost = self.ghost_full.take().or_else(|| self.ghost_text.take())?;
         self.ghost_text = None;
 
@@ -687,7 +852,6 @@ impl CompletionMachine {
         let prefix_overlap = find_prefix_overlap(&before, &ghost);
         let ghost_suffix: String = ghost.chars().skip(prefix_overlap).collect();
 
-        // For multi-line text, only try to overlap the first line's suffix.
         let first_ghost_line = ghost_suffix.split('\n').next().unwrap_or(&ghost_suffix);
         let overlap = common_prefix_len(&after, first_ghost_line);
         let to_insert: String = ghost_suffix.chars().skip(overlap).collect();
@@ -702,6 +866,36 @@ impl CompletionMachine {
             advance_past: overlap,
             is_multiline: ghost_suffix.contains('\n'),
         })
+    }
+
+    /// Returns `true` if an LSP completion request should be dispatched
+    /// based on the current line state and config.
+    ///
+    /// Trigger characters (`.`, `::`, `->`) bypass `lsp_completion_min_prefix`.
+    pub fn should_request_lsp(&self, line_before_cursor: &str, config: &Config) -> bool {
+        if !config.lsp_completion_enabled {
+            return false;
+        }
+
+        // ── Trigger characters bypass the min prefix requirement ─────
+        if line_before_cursor.ends_with('.')
+            || line_before_cursor.ends_with("::")
+            || line_before_cursor.ends_with("->")
+        {
+            return true;
+        }
+
+        // ── Calculate the word prefix (alphanumeric + underscore) ────
+        let prefix: String = line_before_cursor
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+
+        prefix.len() >= config.lsp_completion_min_prefix
     }
 }
 
@@ -736,4 +930,23 @@ pub fn find_prefix_overlap(prefix: &str, completion: &str) -> usize {
 
 fn common_prefix_len(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+/// Extract the word fragment after the last trigger character.
+fn post_trigger_prefix(text: &str) -> &str {
+    let mut trigger_end = 0usize;
+    if let Some(pos) = text.rfind("::") {
+        trigger_end = trigger_end.max(pos + 2);
+    }
+    if let Some(pos) = text.rfind("->") {
+        trigger_end = trigger_end.max(pos + 2);
+    }
+    if let Some(pos) = text.rfind('.') {
+        trigger_end = trigger_end.max(pos + 1);
+    }
+    if trigger_end > 0 && trigger_end <= text.len() {
+        text.get(trigger_end..).unwrap_or("")
+    } else {
+        text
+    }
 }

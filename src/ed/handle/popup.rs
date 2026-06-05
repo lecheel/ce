@@ -1,5 +1,6 @@
 //! Generic popup key handlers (scankey diagnostics, config toggles).
 
+use crate::ed::Mode;
 use crate::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::popup::PopupContent;
 use crate::Editor;
@@ -58,10 +59,12 @@ impl Editor {
             return;
         }
 
-        // ── Ghost text takes priority over popup navigation ───────
-        if self.comp.has_ghost() {
-            return;
-        }
+        // ── REMOVED: Ghost text early return ──────────────────────────
+        // Ghost text handling is done in handle_key() BEFORE this is called.
+        // Tab/→/Esc/Up/Down are handled there with early return.
+        // Other keys reset ghost and fall through to here.
+        // We must NOT check has_ghost() here — it can cause a freeze if
+        // the state hasn't fully propagated after reset_to_idle().
 
         // ── Dispatch to the specific popup handler ────────────────
         // Ordered by frequency of use for slight perf benefit
@@ -143,47 +146,68 @@ impl Editor {
         }
     }
 
-    /// Internal handler for the word-completion popup (LSP / buffer / vocab).
     fn handle_completion_popup_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
 
+        let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_plain = key.modifiers.is_empty();
+
+        log::debug!(
+            "[handle_completion_popup_key] key={:?} ctrl={} plain={} ghost_text={:?} merged_len={}",
+            key.code,
+            is_ctrl,
+            is_plain,
+            self.comp.ghost_text(),
+            self.comp.candidates().len(),
+        );
+
         match key.code {
-            // ── Navigation ──────────────────────────────────────────────
-            KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Navigation: Down arrow (with or without Ctrl) or Ctrl+n
+            KeyCode::Down if is_ctrl || is_plain => {
+                log::debug!("[handle_completion_popup_key] Down → cycle_completion(1)");
                 self.cycle_completion(1);
             }
-            KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('n') if is_ctrl => {
+                log::debug!("[handle_completion_popup_key] Ctrl-n → cycle_completion(1)");
+                self.cycle_completion(1);
+            }
+            // Navigation: Up arrow (with or without Ctrl) or Ctrl+p
+            KeyCode::Up if is_ctrl || is_plain => {
+                log::debug!("[handle_completion_popup_key] Up → cycle_completion(-1)");
                 self.cycle_completion(-1);
             }
-
-            // ── Accept ───────────────────────────────────────────────────
-            // Tab and → accept the ghost / selected item.
-            // This mirrors the ghost-text intercept in handle_key() but
-            // is reached when the popup is visually open.
-            KeyCode::Tab | KeyCode::Right if key.modifiers.is_empty() => {
+            KeyCode::Char('p') if is_ctrl => {
+                log::debug!("[handle_completion_popup_key] Ctrl-p → cycle_completion(-1)");
+                self.cycle_completion(-1);
+            }
+            // Accept (works for both ghost text and popup)
+            KeyCode::Tab | KeyCode::Right if is_plain => {
+                log::debug!("[handle_completion_popup_key] Tab/Right → AcceptCompletion");
                 crate::keybind::bindings::execute_action(
                     self,
                     crate::keybind::bindings::Action::AcceptCompletion,
                 );
             }
             KeyCode::Enter => {
+                log::debug!("[handle_completion_popup_key] Enter → AcceptCompletion");
                 crate::keybind::bindings::execute_action(
                     self,
                     crate::keybind::bindings::Action::AcceptCompletion,
                 );
             }
-
-            // ── Dismiss ──────────────────────────────────────────────────
+            // Dismiss
             KeyCode::Esc => {
+                log::debug!("[handle_completion_popup_key] Esc → reset_to_idle");
                 self.comp.reset_to_idle();
-                self.popup.close();
+                self.popup.kind = None;
             }
-
-            // ── Any other key: close popup and fall through ──────────────
+            // Any other key: close popup and re-dispatch for normal processing
             _ => {
-                self.popup.close();
-                // Re-dispatch so the character is actually inserted.
-                self.handle_key(key);
+                log::debug!("[handle_completion_popup_key] other → close popup, re-dispatch");
+                self.popup.kind = None;
+                if matches!(self.mode, Mode::Insert | Mode::Brief) {
+                    self.handle_key(key);
+                }
             }
         }
     }

@@ -738,7 +738,8 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             if let Some(text) = selection_text {
                 editor.llm.active_context = Some(text);
             }
-            editor.open_llm_chat_session();
+            // editor.open_llm_chat_session();
+            editor.open_codellm_chat_session();
         }
         s if s.starts_with("llm ") => {
             let msg = s.strip_prefix("llm ").unwrap().trim().to_string();

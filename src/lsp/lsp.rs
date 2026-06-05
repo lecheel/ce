@@ -515,7 +515,7 @@ pub struct LspDiagnostic {
 
 #[derive(Debug)]
 pub enum LspMessage {
-    OpenFile(PathBuf),
+    OpenFile(PathBuf, String),
     CloseFile(PathBuf),
     ChangeFile(PathBuf, String, String, i32),
     ChangeFileIncremental {
@@ -1243,17 +1243,17 @@ impl LspManager {
                 }
             }
 
-            LspMessage::OpenFile(path) => {
+            LspMessage::OpenFile(path, text) => {
                 if let Some(lsp) = &mut self.active_lsp {
                     let uri = path_to_uri(&path);
                     let lang = crate::file_lang::FileLang::from_path(&path);
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        let _ = lsp.did_open(&uri, lang.language_id, &text).await;
-                        self.opened_files.insert(uri.clone());
-                        self.current_file_version.insert(uri, 1);
-                    }
+                    // Use provided buffer text, NOT disk read
+                    let _ = lsp.did_open(&uri, lang.language_id, &text).await;
+                    self.opened_files.insert(uri.clone());
+                    self.current_file_version.insert(uri, 1);
                 } else {
-                    self.start_lsp_for_file(&path).await;
+                    // BUG FIX: Use provided text, not disk read
+                    self.start_lsp_for_file_with_content(&path, &text).await;
                 }
             }
 
@@ -1420,10 +1420,9 @@ impl LspManager {
                 }
             }
 
-            // ── LspManager::dispatch_editor_msg ─────────────────────────────
             LspMessage::RequestCompletion(path, line, character, trigger, version) => {
                 let Some(lsp) = &mut self.active_lsp else {
-                    // FIX: always respond so CompletionMachine can transition
+                    // FIX: Always respond so CompletionMachine can transition
                     let _ = self.app_tx.send(AppMessage::LspCompletion {
                         items: None,
                         version,
@@ -1432,7 +1431,7 @@ impl LspManager {
                 };
                 let uri = path_to_uri(&path);
                 if !self.opened_files.contains(&uri) {
-                    // FIX: same here
+                    // FIX: Same here — file not opened yet
                     let _ = self.app_tx.send(AppMessage::LspCompletion {
                         items: None,
                         version,
@@ -1449,8 +1448,18 @@ impl LspManager {
                     "position": { "line": line, "character": character },
                     "context": context,
                 });
-                if let Ok(id) = lsp.send_request("textDocument/completion", params).await {
-                    self.pending.insert(id, PendingKind::Completion { version });
+                // FIX: Handle send failure
+                match lsp.send_request("textDocument/completion", params).await {
+                    Ok(id) => {
+                        self.pending.insert(id, PendingKind::Completion { version });
+                    }
+                    Err(e) => {
+                        log::debug!("LSP completion request failed: {}", e);
+                        let _ = self.app_tx.send(AppMessage::LspCompletion {
+                            items: None,
+                            version,
+                        });
+                    }
                 }
             }
 
@@ -1477,6 +1486,40 @@ impl LspManager {
 
             LspMessage::Error(e) => {
                 let _ = self.app_tx.send(AppMessage::LspError(e));
+            }
+        }
+    }
+
+    async fn start_lsp_for_file_with_content(&mut self, path: &PathBuf, text: &str) {
+        let lang = crate::file_lang::FileLang::from_path(path);
+        let command = match lang.lsp_command {
+            Some(cmd) => cmd,
+            None => return,
+        };
+        let args = lang.lsp_args;
+        let root_uri = format!(
+            "file://{}",
+            std::env::current_dir().unwrap_or_default().display()
+        );
+
+        match LanguageServer::new(command, args, &root_uri).await {
+            Ok((mut lsp, _)) => {
+                self.supports_snippets = lsp.supports_snippets;
+                self.supports_completion_resolve = lsp.supports_completion_resolve;
+                let uri = path_to_uri(path);
+                let lang2 = crate::file_lang::FileLang::from_path(path);
+                // Use provided text instead of reading from disk
+                if lsp.did_open(&uri, lang2.language_id, text).await.is_ok() {
+                    self.opened_files.insert(uri.clone());
+                    self.current_file_version.insert(uri, 1);
+                }
+                self.active_lsp = Some(lsp);
+            }
+            Err(e) => {
+                let _ = self.app_tx.send(AppMessage::LspError(format!(
+                    "Failed to start {}: {}",
+                    command, e
+                )));
             }
         }
     }

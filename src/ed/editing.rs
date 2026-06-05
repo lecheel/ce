@@ -10,9 +10,20 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
-// Helper utilities
+// Edit tracking for LSP incremental sync
 // ---------------------------------------------------------------------------
 
+/// Record of a single edit operation for LSP incremental sync.
+#[derive(Debug, Clone, Default)]
+pub struct Edit {
+    pub start: usize,
+    pub end: usize,
+    pub inserted_text: String,
+}
+
+// ---------------------------------------------------------------------------
+// Helper utilities
+// ---------------------------------------------------------------------------
 fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }

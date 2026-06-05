@@ -1,29 +1,220 @@
 //! Git key dispatch — thin match arms that delegate to business logic
-//! in [`super::git_ops`] and [`super::git_hunk`].
+//! in git/tig.rs, git/commit.rs, and other git modules.
 
 use crate::ed::editor::PendingGitAction;
-use crate::ed::MessageKind;
+use crate::ed::mode::MessageKind;
 use crate::event::KeyEvent;
+use crate::git::log::GitLogLineAction;
 use crate::Editor;
 use crossterm::event::KeyCode;
 
 impl Editor {
-    // ── GitLog ────────────────────────────────────────────────────────
+    // ── GitLog (tig-style vsplit) ─────────────────────────────────────
 
     pub fn handle_git_log_key(&mut self, key: KeyEvent) -> bool {
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            return false;
+        }
+
         match key.code {
-            KeyCode::Enter => {
-                self.git_log_enter();
-                true
-            }
-            KeyCode::Char('o') => {
-                self.git_log_open_file_split();
-                true
-            }
+            // ── Quit: close both panes (tig behavior) ───────────────
             KeyCode::Char('q') => {
-                self.close_buffer();
+                if self.active_window().diff_sibling.is_some() {
+                    self.close_git_log_session();
+                } else {
+                    self.close_buffer();
+                }
                 true
             }
+
+            // ── Enter: tig-style vsplit diff ─────────────────────────
+            //  On commit header → full commit diff
+            //  On file line     → file-only diff in that commit
+            KeyCode::Enter => {
+                let row = self.active_window().row;
+                let action = self
+                    .buf()
+                    .git_log_state
+                    .as_ref()
+                    .and_then(|s| s.action_for_line(row).cloned());
+
+                match action {
+                    Some(GitLogLineAction::ShowDiff { ref commit }) => {
+                        self.open_git_log_diff_vsplit(commit, None);
+                    }
+                    Some(GitLogLineAction::OpenFile {
+                        ref path,
+                        ref commit,
+                    }) => {
+                        self.open_git_log_diff_vsplit(commit, Some(path));
+                    }
+                    None => {}
+                }
+                true
+            }
+
+            // ── 'e': open file in editor (original Enter behavior) ───
+            //  Replaces the log buffer with the file at HEAD.
+            KeyCode::Char('e') => {
+                let row = self.active_window().row;
+                let action = self
+                    .buf()
+                    .git_log_state
+                    .as_ref()
+                    .and_then(|s| s.action_for_line(row).cloned());
+
+                if let Some(GitLogLineAction::OpenFile { ref path, .. }) = action {
+                    let file_path = path.clone();
+                    // Close the log session first (collapses vsplit if open)
+                    if self.active_window().diff_sibling.is_some() {
+                        self.close_git_log_session();
+                    } else {
+                        self.close_buffer();
+                    }
+                    // Open the file in a normal buffer at line 0
+                    let p = std::path::PathBuf::from(&file_path);
+                    self.open_file_at_line(&p, 0);
+                }
+                true
+            }
+
+            // ── Tab: switch focus between panes ──────────────────────
+            KeyCode::Tab => {
+                if let Some(sib_id) = self.active_window().diff_sibling {
+                    if let Some(idx) = self.windows.iter().position(|w| w.id == sib_id) {
+                        self.active_window_idx = idx;
+                    }
+                }
+                true
+            }
+
+            // ── Movement: j/k auto-update the diff pane ──────────────
+            KeyCode::Up | KeyCode::Char('k') => {
+                {
+                    let (win, buf) = self.active_window_and_buf_mut();
+                    crate::ed::movement::move_up(win, buf);
+                }
+                if self.active_window().diff_sibling.is_some() {
+                    self.update_diff_for_log_cursor();
+                }
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                {
+                    let (win, buf) = self.active_window_and_buf_mut();
+                    crate::ed::movement::move_down(win, buf);
+                }
+                if self.active_window().diff_sibling.is_some() {
+                    self.update_diff_for_log_cursor();
+                }
+                true
+            }
+            KeyCode::PageUp => {
+                {
+                    let (win, buf) = self.active_window_and_buf_mut();
+                    let jump = win.position.height.saturating_sub(2).max(1);
+                    crate::ed::movement::page_up(win, buf, jump);
+                }
+                if self.active_window().diff_sibling.is_some() {
+                    self.update_diff_for_log_cursor();
+                }
+                true
+            }
+            KeyCode::PageDown => {
+                {
+                    let (win, buf) = self.active_window_and_buf_mut();
+                    let jump = win.position.height.saturating_sub(2).max(1);
+                    crate::ed::movement::page_down(win, buf, jump);
+                }
+                if self.active_window().diff_sibling.is_some() {
+                    self.update_diff_for_log_cursor();
+                }
+                true
+            }
+
+            // ── Space: load more commits ─────────────────────────────
+            KeyCode::Char(' ') => {
+                let repo_root = self.get_git_log_repo_root();
+                let current_count = self
+                    .buf()
+                    .git_log_state
+                    .as_ref()
+                    .map(|s| s.entries.len())
+                    .unwrap_or(10);
+                let new_limit = (current_count * 2).max(20);
+                self.open_git_log_with_root(&repo_root, Some(new_limit));
+                true
+            }
+
+            // ── Refresh ──────────────────────────────────────────────
+            KeyCode::Char('r') => {
+                let repo_root = self.get_git_log_repo_root();
+                let current_count = self
+                    .buf()
+                    .git_log_state
+                    .as_ref()
+                    .map(|s| s.entries.len())
+                    .unwrap_or(10);
+                self.open_git_log_with_root(&repo_root, Some(current_count));
+                true
+            }
+
+            _ => false,
+        }
+    }
+
+    // ── GitDiff (right pane of vsplit, or standalone) ─────────────────
+
+    pub fn handle_git_diff_key(&mut self, key: KeyEvent) -> bool {
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            return false;
+        }
+
+        match key.code {
+            // ── Quit: close both panes if sibling exists ─────────────
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if self.active_window().diff_sibling.is_some() {
+                    self.close_git_log_session();
+                } else {
+                    self.close_buffer();
+                }
+                true
+            }
+
+            // ── Tab: switch focus back to the log pane ───────────────
+            KeyCode::Tab => {
+                if let Some(sib_id) = self.active_window().diff_sibling {
+                    if let Some(idx) = self.windows.iter().position(|w| w.id == sib_id) {
+                        self.active_window_idx = idx;
+                    }
+                }
+                true
+            }
+
+            // ── Scrolling ────────────────────────────────────────────
+            KeyCode::Up | KeyCode::Char('k') => {
+                let (win, buf) = self.active_window_and_buf_mut();
+                crate::ed::movement::move_up(win, buf);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let (win, buf) = self.active_window_and_buf_mut();
+                crate::ed::movement::move_down(win, buf);
+                true
+            }
+            KeyCode::PageUp => {
+                let (win, buf) = self.active_window_and_buf_mut();
+                let jump = win.position.height.saturating_sub(2).max(1);
+                crate::ed::movement::page_up(win, buf, jump);
+                true
+            }
+            KeyCode::PageDown => {
+                let (win, buf) = self.active_window_and_buf_mut();
+                let jump = win.position.height.saturating_sub(2).max(1);
+                crate::ed::movement::page_down(win, buf, jump);
+                true
+            }
+
             _ => false,
         }
     }
@@ -85,20 +276,8 @@ impl Editor {
                 self.set_status_msg("Type stash comment and press Enter", MessageKind::Info);
                 true
             }
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.git_status_close();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    // ── GitDiff ───────────────────────────────────────────────────────
-
-    pub fn handle_git_diff_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
             KeyCode::Char('q') => {
-                self.close_buffer();
+                self.git_status_close();
                 true
             }
             _ => false,

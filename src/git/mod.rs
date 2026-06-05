@@ -5,3 +5,4 @@ pub mod gutter;
 pub mod log;
 pub mod revert;
 pub mod status;
+pub mod tig;

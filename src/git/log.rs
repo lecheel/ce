@@ -225,6 +225,11 @@ impl GitLogState {
             return None;
         }
 
+        // ── Footer help ─────────────────────────────────────────────
+        display_lines.push(String::new());
+        display_lines.push(format!("  {}", "─".repeat(40)));
+        display_lines.push("  [Enter] Diff  [Tab] Switch pane  [q] Close".to_string());
+
         // Ensure trailing newline (rope convention)
         let display_text = format!("{}\n", display_lines.join("\n"));
 
@@ -243,6 +248,37 @@ impl GitLogState {
     pub fn action_for_line(&self, line: usize) -> Option<&GitLogLineAction> {
         self.line_actions.get(&line)
     }
+}
+
+/// Run `git diff <commit>^..<commit> -- <path>` and return the
+/// display text showing only that file's changes in the commit.
+pub fn load_file_diff_in_commit(repo_root: &Path, commit: &str, path: &str) -> Option<String> {
+    let parent = format!("{}^", commit);
+
+    let output = Command::new("git")
+        .args(["diff", "--no-color", &parent, commit, "--", path])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    // git diff returns 0 even if the path didn't change in that commit
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.is_empty() {
+        // Fallback: try git show filtered to the file
+        let output2 = Command::new("git")
+            .args(["show", "--no-color", "--format=", commit, "--", path])
+            .current_dir(repo_root)
+            .output()
+            .ok()?;
+
+        let text2 = String::from_utf8_lossy(&output2.stdout);
+        if text2.is_empty() {
+            return Some(format!("{} @ {} — (no diff for this file)\n", path, commit));
+        }
+        return Some(format!("{} @ {}\n\n{}\n", path, commit, text2));
+    }
+
+    Some(format!("{} @ {}\n\n{}\n", path, commit, text))
 }
 
 // ---------------------------------------------------------------------------
