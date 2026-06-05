@@ -172,7 +172,7 @@ impl Editor {
 
         match key.code {
             // ── Quit: close both panes if sibling exists ─────────────
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') => {
                 if self.active_window().diff_sibling.is_some() {
                     self.close_git_log_session();
                 } else {

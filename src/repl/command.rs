@@ -623,6 +623,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "on" | "only" => {
             editor.only_window();
         }
+        "close" | "clo" => {
+            editor.close_window(false);
+        }
 
         // ---- Ripgrep Commands ----
         "rg" | "lastrg" => {
@@ -879,7 +882,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
-        "codellm", "cllm", "reg", "build","retab",
+        "codellm", "cllm", "reg", "build","retab","close",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();
