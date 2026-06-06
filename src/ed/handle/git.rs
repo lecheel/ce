@@ -74,10 +74,15 @@ impl Editor {
                     // Open the file in a normal buffer at line 0
                     let p = std::path::PathBuf::from(&file_path);
                     self.open_file_at_line(&p, 0);
+                    // ── Request git gutter for the opened file ──
+                    let bid = self.buf().id;
+                    let rope = self.buf().rope.clone();
+                    if let Some(ref name) = self.buf().filename {
+                        self.async_gutter.request_diff(bid, &rope, Some(name));
+                    }
                 }
                 true
             }
-
             // ── Tab: switch focus between panes ──────────────────────
             KeyCode::Tab => {
                 if let Some(sib_id) = self.active_window().diff_sibling {

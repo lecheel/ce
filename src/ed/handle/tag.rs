@@ -199,6 +199,15 @@ impl Editor {
             self.open_buffer(Some(filename.to_string()));
         }
 
+        // ── Request git gutter for the opened/switched file ──
+        {
+            let bid = self.buf().id;
+            let rope = self.buf().rope.clone();
+            if let Some(ref name) = self.buf().filename {
+                self.async_gutter.request_diff(bid, &rope, Some(name));
+            }
+        }
+
         let (win, buf) = self.active_window_and_buf_mut();
         let max_row = buf.len_lines().saturating_sub(1);
         win.row = entry.row.min(max_row);
@@ -399,6 +408,15 @@ impl Editor {
                     self.open_buffer(Some(path_str));
                 }
 
+                // ── Request git gutter for the opened/switched file ──
+                {
+                    let bid = self.buf().id;
+                    let rope = self.buf().rope.clone();
+                    if let Some(ref name) = self.buf().filename {
+                        self.async_gutter.request_diff(bid, &rope, Some(name));
+                    }
+                }
+
                 {
                     let (win, buf) = self.active_window_and_buf_mut();
                     let max_row = buf.len_lines().saturating_sub(1);
@@ -507,6 +525,15 @@ impl Editor {
                     self.switch_window_to_buffer(bid);
                 } else {
                     self.open_buffer(Some(path_str));
+                }
+
+                // ── Request git gutter for the opened/switched file ──
+                {
+                    let bid = self.buf().id;
+                    let rope = self.buf().rope.clone();
+                    if let Some(ref name) = self.buf().filename {
+                        self.async_gutter.request_diff(bid, &rope, Some(name));
+                    }
                 }
 
                 let target_row;
@@ -909,6 +936,15 @@ impl Editor {
                 MessageKind::Error,
             );
             return;
+        }
+
+        // ── Request git gutter for the opened/switched file ──
+        {
+            let bid = self.buf().id;
+            let rope = self.buf().rope.clone();
+            if let Some(ref name) = self.buf().filename {
+                self.async_gutter.request_diff(bid, &rope, Some(name));
+            }
         }
 
         {

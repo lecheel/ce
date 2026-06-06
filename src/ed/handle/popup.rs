@@ -121,6 +121,10 @@ impl Editor {
             self.handle_fn_info_key(key);
             return;
         }
+        if self.popup.input_box.is_some() {
+            self.handle_input_box_key(key);
+            return;
+        }
         if self.popup.workspace_symbols.is_some() {
             self.handle_workspace_symbols_key(key);
             return;
@@ -368,5 +372,115 @@ impl Editor {
         let popup = crate::popup::fn_info::FnInfoPopup::build(mode, &self.config);
         self.popup.fn_info = Some(popup);
         self.popup.kind = Some(crate::popup::PopupKind::FnInfo);
+    }
+}
+
+impl Editor {
+    fn handle_input_box_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if key.kind != crossterm::event::KeyEventKind::Press {
+            return;
+        }
+
+        let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        match key.code {
+            // ── Confirm (Ctrl+Enter) ──────────────────────────────
+            KeyCode::Enter if is_ctrl => {
+                let text = self
+                    .popup
+                    .input_box
+                    .as_ref()
+                    .map(|ib| ib.input.clone())
+                    .unwrap_or_default();
+
+                self.input_box_result = Some(text);
+                self.popup.input_box = None;
+                self.popup.kind = None;
+            }
+
+            // ── Next line (Enter) ────────────────────────────────
+            KeyCode::Enter => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.insert_newline();
+                }
+            }
+
+            // ── Cancel ────────────────────────────────────────────
+            KeyCode::Esc => {
+                self.input_box_result = None;
+                self.popup.input_box = None;
+                self.popup.kind = None;
+            }
+
+            // ── Typing ────────────────────────────────────────────
+            KeyCode::Char(ch) if !is_ctrl => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.insert_char(ch);
+                }
+            }
+
+            // ── Backspace ─────────────────────────────────────────
+            KeyCode::Backspace => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.backspace();
+                }
+            }
+
+            // ── Delete ────────────────────────────────────────────
+            KeyCode::Delete => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.delete_char();
+                }
+            }
+
+            // ── Cursor movement ───────────────────────────────────
+            KeyCode::Left => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.move_left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.move_right();
+                }
+            }
+            KeyCode::Home => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.move_home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.move_end();
+                }
+            }
+
+            // ── Ctrl+ shortcuts ───────────────────────────────────
+            KeyCode::Char('a') if is_ctrl => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.move_home();
+                }
+            }
+            KeyCode::Char('e') if is_ctrl => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.move_end();
+                }
+            }
+            KeyCode::Char('k') if is_ctrl => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.kill_to_end();
+                }
+            }
+            KeyCode::Char('u') if is_ctrl => {
+                if let Some(ib) = &mut self.popup.input_box {
+                    ib.cursor = 0;
+                    ib.input.clear();
+                }
+            }
+
+            _ => {}
+        }
     }
 }

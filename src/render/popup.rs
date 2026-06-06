@@ -131,6 +131,11 @@ pub fn draw_popup(f: &mut Frame, editor: &Editor) {
         return;
     }
 
+    if editor.popup.input_box.is_some() {
+        draw_input_box(f, editor, screen);
+        return;
+    }
+
     if editor.popup.fd.is_some() {
         draw_fd(f, editor, screen);
         return;
@@ -2453,6 +2458,143 @@ fn draw_fn_info(f: &mut Frame, editor: &Editor, screen: Rect) {
     f.render_widget(Clear, area);
     f.render_widget(outer_block, area);
     f.render_widget(paragraph, inner);
+}
+
+fn draw_input_box(f: &mut Frame, editor: &Editor, screen: Rect) {
+    let ib = match &editor.popup.input_box {
+        Some(ib) => ib,
+        None => return,
+    };
+
+    // ── Layout: anchored at top-center ───────────────────────────
+    let width = popup_width(screen).min(120);
+    // Use split('\n') instead of .lines() so trailing newlines create a new visible row
+    let num_lines = ib.input.split('\n').count().max(1);
+    // 2 borders + 1 prompt + N input lines. Cap at 10 rows total.
+    let height = (2 + 1 + num_lines).min(10) as u16;
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = 1u16; // 1 row margin from the very top
+
+    let area = clamp(
+        screen,
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        },
+    );
+
+    // ── Border block ─────────────────────────────────────────────
+    let title = format!(" {} ", ib.title);
+    let outer_block = Block::default()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            format!(" {} ", ib.hint),
+            Style::default().fg(Color::DarkGray),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = outer_block.inner(area);
+
+    // ── Prompt line (row 0 of inner) ─────────────────────────────
+    let prompt_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+
+    let prompt_line = Paragraph::new(Line::from(vec![Span::styled(
+        format!("{} ", ib.prompt),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    // ── Input lines (row 1.. of inner) ───────────────────────────
+    let input_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    // Build the input display lines with a block cursor
+    let mut lines_spans = Vec::new();
+    let mut current_line = Vec::new();
+    let mut current_byte = 0;
+
+    for ch in ib.input.chars() {
+        if ch == '\n' {
+            if current_byte == ib.cursor {
+                // Cursor is right before the newline (end of this line)
+                current_line.push(Span::styled(
+                    " ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines_spans.push(Line::from(std::mem::take(&mut current_line)));
+            current_byte += 1; // Newline is exactly 1 byte
+        } else {
+            if current_byte == ib.cursor {
+                current_line.push(Span::styled(
+                    ch.to_string(),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                current_line.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(Color::White),
+                ));
+            }
+            current_byte += ch.len_utf8();
+        }
+    }
+
+    // Cursor at the very end of the input
+    if current_byte == ib.cursor {
+        current_line.push(Span::styled(
+            " ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    lines_spans.push(Line::from(current_line));
+
+    if lines_spans.is_empty() {
+        lines_spans.push(Line::from(Span::styled(
+            " ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let input_paragraph = Paragraph::new(lines_spans);
+
+    f.render_widget(Clear, area);
+    f.render_widget(outer_block, area);
+    f.render_widget(prompt_line, prompt_area);
+    f.render_widget(input_paragraph, input_area);
 }
 
 fn draw_error(f: &mut Frame, editor: &Editor, screen: Rect) {

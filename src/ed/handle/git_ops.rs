@@ -180,6 +180,12 @@ impl Editor {
                     return;
                 }
                 self.open_buffer(Some(full_path.to_string_lossy().to_string()));
+                // ── Request git gutter for the opened file ──
+                let bid = self.buf().id;
+                let rope = self.buf().rope.clone();
+                if let Some(ref name) = self.buf().filename {
+                    self.async_gutter.request_diff(bid, &rope, Some(name));
+                }
             }
             crate::git::status::GitStatusLineAction::SwitchBranch { branch } => {
                 let is_clean = self
@@ -337,6 +343,12 @@ impl Editor {
                     return;
                 }
                 self.open_buffer(Some(full_path.to_string_lossy().to_string()));
+                // ── Request git gutter for the opened file ──
+                let bid = self.buf().id;
+                let rope = self.buf().rope.clone();
+                if let Some(ref name) = self.buf().filename {
+                    self.async_gutter.request_diff(bid, &rope, Some(name));
+                }
             }
             crate::git::log::GitLogLineAction::ShowDiff { commit } => {
                 self.open_git_diff(&repo_root, &commit);
@@ -359,6 +371,12 @@ impl Editor {
                 }
                 self.split_horizontal();
                 self.open_buffer(Some(full_path.to_string_lossy().to_string()));
+                // ── Request git gutter for the opened file ──
+                let bid = self.buf().id;
+                let rope = self.buf().rope.clone();
+                if let Some(ref name) = self.buf().filename {
+                    self.async_gutter.request_diff(bid, &rope, Some(name));
+                }
             }
             _ => {
                 self.set_status_msg("No file on this line", MessageKind::Info);

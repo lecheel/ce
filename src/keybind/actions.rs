@@ -93,6 +93,7 @@ pub enum Action {
 
     // Config Toggles
     TogglePopup,
+    InputBox,
 
     // Window management
     SplitHorizontal,

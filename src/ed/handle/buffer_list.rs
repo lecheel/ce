@@ -45,6 +45,11 @@ impl Editor {
                 self.popup.close();
                 self.switch_window_to_buffer(bid);
                 self.set_status_msg("Switched buffer", MessageKind::Info);
+                // ── Request git gutter for the switched buffer ──
+                let rope = self.buf().rope.clone();
+                if let Some(ref name) = self.buf().filename {
+                    self.async_gutter.request_diff(bid, &rope, Some(name));
+                }
             }
         }
     }

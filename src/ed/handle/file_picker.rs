@@ -194,6 +194,12 @@ impl Editor {
                 self.popup.last_file_picker_dir = cwd;
                 self.popup.close();
                 self.open_buffer(Some(path.to_string_lossy().to_string()));
+                // ── Kick off git gutter diff for the newly opened buffer ──
+                let bid = self.buf().id;
+                let rope = self.buf().rope.clone();
+                if let Some(ref name) = self.buf().filename {
+                    self.async_gutter.request_diff(bid, &rope, Some(name));
+                }
             }
             PickerAction::EnterDir(path) => {
                 if let Some(picker) = &mut self.popup.file_picker {

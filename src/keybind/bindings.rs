@@ -2914,7 +2914,13 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::FnInfo => {
             editor.open_fn_info_popup();
         }
-
+        Action::InputBox => {
+            editor.open_input_box_with_hint(
+                "info",
+                "",
+                "[Esc] cancel  [Ctrl+u] clear  [Ctrl+k] kill-to-end",
+            );
+        }
         //-- Action::ExitMode execute_action (anchor dont removed) --//
         Action::ExitMode => {
             let current_mode = editor.mode();

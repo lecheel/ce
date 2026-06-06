@@ -61,10 +61,20 @@ impl Editor {
                 if let Some(entry) = selected_entry {
                     let path_str = entry.path.to_string_lossy().to_string();
                     self.open_buffer(Some(path_str));
-                    let (win, buf) = self.active_window_and_buf_mut();
-                    win.row = entry.line.min(buf.len_lines().saturating_sub(1));
-                    win.col = entry.col.min(buf.line_char_len(win.row));
+
+                    let (bid, rope, fname) = {
+                        let (win, buf) = self.active_window_and_buf_mut();
+                        win.row = entry.line.min(buf.len_lines().saturating_sub(1));
+                        win.col = entry.col.min(buf.line_char_len(win.row));
+                        (buf.id, buf.rope.clone(), buf.filename.clone())
+                    };
+
                     self.scroll_active_window_to_cursor();
+
+                    // ── Kick off git gutter diff for the newly opened buffer ──
+                    if let Some(ref name) = fname {
+                        self.async_gutter.request_diff(bid, &rope, Some(name));
+                    }
                 }
             }
             _ => {}

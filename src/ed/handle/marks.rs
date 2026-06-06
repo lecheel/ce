@@ -47,6 +47,12 @@ impl Editor {
 
         if self.active_window().buffer_id() != entry.buffer_id {
             self.switch_window_to_buffer(entry.buffer_id);
+            // ── Request git gutter for the switched buffer ──
+            let bid = self.buf().id;
+            let rope = self.buf().rope.clone();
+            if let Some(ref name) = self.buf().filename {
+                self.async_gutter.request_diff(bid, &rope, Some(name));
+            }
         }
 
         let buf_len = self.buf().len_lines();

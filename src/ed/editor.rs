@@ -222,6 +222,7 @@ pub struct Editor {
     pub lsp_completion_pending: Option<LspCompletionPending>,
     /// Channel to receive MQTT messages from the background subscriber.
     pub mqtt_rx: Option<std::sync::mpsc::Receiver<String>>,
+    pub input_box_result: Option<String>,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -348,6 +349,7 @@ impl Editor {
             comp_lsp_version_map: std::collections::HashMap::new(),
             lsp_completion_pending: None,
             mqtt_rx: None,
+            input_box_result: None,
 
             //-- Editor fn new() (anchor dont removed) --//
             last_action: crate::ed::repeat::LastAction::default(),
@@ -947,6 +949,17 @@ impl Editor {
             }
         }
 
+        // ── Unified popup / overlay intercept ──────────────────────
+        if self.substitution_state.is_some() {
+            self.handle_substitution_key(key);
+            return;
+        }
+
+        if self.popup.is_open() || self.popup.error.is_some() {
+            self.handle_any_popup_key(key);
+            return;
+        }
+
         // ── Count prefix for Normal / Visual modes ─────────────────
         if matches!(
             self.mode,
@@ -964,17 +977,6 @@ impl Editor {
                     }
                 }
             }
-        }
-
-        // ── Unified popup / overlay intercept ──────────────────────
-        if self.substitution_state.is_some() {
-            self.handle_substitution_key(key);
-            return;
-        }
-
-        if self.popup.is_open() || self.popup.error.is_some() {
-            self.handle_any_popup_key(key);
-            return;
         }
 
         // if self.popup.is_open() {
@@ -2416,5 +2418,45 @@ impl Editor {
         if self.config.mqtt_auto_send && self.llm.task_handle.is_none() {
             self.codellm_send();
         }
+    }
+}
+
+impl Editor {
+    /// Open a top-anchored input box popup.
+    ///
+    /// After the user presses Enter, the result is stored in
+    /// `self.input_box_result`.  Call `self.input_box_result.take()`
+    /// to consume it.
+    pub fn open_input_box(&mut self, title: impl Into<String>, prompt: impl Into<String>) {
+        let ib = crate::popup::input_box::InputBox::new(title, prompt);
+        self.popup.input_box = Some(ib);
+        self.popup.kind = Some(crate::popup::PopupKind::InputBox);
+        self.input_box_result = None;
+    }
+
+    /// Open an input box with a pre-filled default value.
+    pub fn open_input_box_with_default(
+        &mut self,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        default: impl Into<String>,
+    ) {
+        let ib = crate::popup::input_box::InputBox::new(title, prompt).with_default(default);
+        self.popup.input_box = Some(ib);
+        self.popup.kind = Some(crate::popup::PopupKind::InputBox);
+        self.input_box_result = None;
+    }
+
+    /// Open an input box with a custom hint line.
+    pub fn open_input_box_with_hint(
+        &mut self,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        hint: impl Into<String>,
+    ) {
+        let ib = crate::popup::input_box::InputBox::new(title, prompt).with_hint(hint);
+        self.popup.input_box = Some(ib);
+        self.popup.kind = Some(crate::popup::PopupKind::InputBox);
+        self.input_box_result = None;
     }
 }

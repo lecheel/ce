@@ -10,6 +10,7 @@ pub mod function_list;
 pub mod fuzzy;
 pub mod git_hunk;
 pub mod guide;
+pub mod input_box;
 pub mod marks;
 pub mod mru;
 pub mod quickfix;
@@ -98,7 +99,8 @@ pub enum PopupKind {
     WorkspaceSymbols,
     Quickfix,
     FnInfo,
-    Error, // Added for multi-line error redirection
+    InputBox, // Added for top-anchored input box
+    Error,    // Added for multi-line error redirection
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +173,7 @@ pub struct PopupState {
     pub workspace_symbols: Option<crate::popup::workspace_symbols::WorkspaceSymbolsPopup>,
     pub fn_info: Option<fn_info::FnInfoPopup>,
     pub quickfix: Option<QuickfixPopup>,
+    pub input_box: Option<crate::popup::input_box::InputBox>,
 }
 
 impl PopupState {
@@ -201,6 +204,7 @@ impl PopupState {
             fn_info: None,
             fd: None, // tag_fd_new
             quickfix: None,
+            input_box: None,
         }
     }
 
@@ -222,6 +226,7 @@ impl PopupState {
             || self.workspace_symbols.is_some()
             || self.quickfix.is_some()
             || self.fn_info.is_some()
+            || self.input_box.is_some()
     }
 
     pub fn close(&mut self) {
@@ -249,6 +254,7 @@ impl PopupState {
         self.workspace_symbols = None;
         self.quickfix = None;
         self.fn_info = None;
+        self.input_box = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {
@@ -386,5 +392,36 @@ impl PopupState {
         self.close();
         self.quickfix = Some(QuickfixPopup::new(entries, root_dir));
         self.kind = Some(PopupKind::Quickfix);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Input Box Popup
+    // ═══════════════════════════════════════════════════════════════════
+
+    pub fn open_input_box(
+        &mut self,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        hint: impl Into<String>,
+    ) {
+        self.close();
+        let ib = crate::popup::input_box::InputBox::new(title, prompt).with_hint(hint);
+        self.input_box = Some(ib);
+        self.kind = Some(PopupKind::InputBox);
+    }
+
+    pub fn open_input_box_with_default(
+        &mut self,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        hint: impl Into<String>,
+        default: impl Into<String>,
+    ) {
+        self.close();
+        let ib = crate::popup::input_box::InputBox::new(title, prompt)
+            .with_hint(hint)
+            .with_default(default);
+        self.input_box = Some(ib);
+        self.kind = Some(PopupKind::InputBox);
     }
 }

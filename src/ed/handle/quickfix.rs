@@ -70,6 +70,13 @@ impl Editor {
         self.quickfix_index = index;
         self.open_file_at_line(&result.file_path, result.line_number);
 
+        // ── Request git gutter for the opened file ──
+        let bid = self.buf().id;
+        let rope = self.buf().rope.clone();
+        if let Some(ref name) = self.buf().filename {
+            self.async_gutter.request_diff(bid, &rope, Some(name));
+        }
+
         let display_path = result
             .file_path
             .file_name()

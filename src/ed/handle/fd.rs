@@ -59,6 +59,13 @@ impl Editor {
                 if let Some(path) = path_opt {
                     let path_str = path.to_string_lossy().to_string();
                     self.open_buffer(Some(path_str));
+
+                    // ── Request git gutter for the opened file ──
+                    let bid = self.buf().id;
+                    let rope = self.buf().rope.clone();
+                    if let Some(ref name) = self.buf().filename {
+                        self.async_gutter.request_diff(bid, &rope, Some(name));
+                    }
                 }
             }
 

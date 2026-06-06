@@ -46,6 +46,15 @@ impl Editor {
                         self.open_buffer(Some(abs_path.to_string_lossy().to_string()));
                     }
 
+                    // ── Request git gutter for the opened/switched file ──
+                    {
+                        let bid = self.buf().id;
+                        let rope = self.buf().rope.clone();
+                        if let Some(ref name) = self.buf().filename {
+                            self.async_gutter.request_diff(bid, &rope, Some(name));
+                        }
+                    }
+
                     let source = self.buf().rope.to_string();
                     if let Some(line) = Guide::find_anchor_line(&source, &entry.anchor) {
                         let win = self.active_window_mut();
