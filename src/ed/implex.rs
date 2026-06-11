@@ -394,6 +394,9 @@ impl Editor {
                 diff_alignment: None,
                 llm_lock_line: 0,
                 tab_size: 4,
+                wgrep_mode: false,
+                wgrep_prefix_lens: Vec::new(),
+                wgrep_original_texts: Vec::new(),
             };
 
             self.buffers.push(buf);

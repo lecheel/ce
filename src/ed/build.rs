@@ -86,7 +86,7 @@ impl Editor {
             }
 
             // ── Close build buffer ───────────────────────────────
-            KeyCode::Char('q') | KeyCode::Esc => {
+            KeyCode::Char('q') => {
                 self.build_close();
                 true
             }
@@ -167,10 +167,7 @@ impl Editor {
         });
 
         // Create build buffer with animation header
-        let header = format!(
-            "  [BUILD] cargo build --release — Building... 0.0s ⠋\n  {}\n\n  (compiling, please wait...)\n",
-            "─".repeat(40)
-        );
+        let header = format!("  [BUILD] cargo build --release — Building... 0.0s ⠋\n  {}\n\n  (compiling, please wait...)\n", "─".repeat(40));
         let build_id = self.ensure_build_buffer(&header);
         self.build.buffer_id = Some(build_id);
 
@@ -404,10 +401,7 @@ impl Editor {
             // Update build buffer header with animation
             if let Some(id) = self.build.buffer_id {
                 if let Some(buf) = self.buf_mut_by_id(id) {
-                    let header = format!(
-                        "  [BUILD] cargo build — Building... {:.1}s {}\n  {}\n\n  (compiling, please wait...)\n",
-                        elapsed, spinner, "─".repeat(40)
-                    );
+                    let header = format!("  [BUILD] cargo build — Building... {:.1}s {}\n  {}\n\n  (compiling, please wait...)\n", elapsed, spinner, "─".repeat(40));
                     buf.rope = Rope::from(header.as_str());
                 }
             }
@@ -521,6 +515,9 @@ impl Editor {
             diff_alignment: None,
             llm_lock_line: 0,
             tab_size: 4,
+            wgrep_mode: false,
+            wgrep_prefix_lens: Vec::new(),
+            wgrep_original_texts: Vec::new(),
         };
 
         self.buffers.push(buf);

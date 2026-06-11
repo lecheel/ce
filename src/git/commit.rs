@@ -218,10 +218,7 @@ impl Editor {
 
         let buffer_id = if let Some(id) = existing_id {
             if let Some(buf) = self.buf_mut_by_id(id) {
-                buf.rope = Rope::from_str(&format!(
-                    "  [COMMIT] Generating commit message… 0.0s ⠋\n  {}\n\n  (querying LLM, please wait...)\n",
-                    "─".repeat(40)
-                ));
+                buf.rope = Rope::from_str(&format!("  [COMMIT] Generating commit message… 0.0s ⠋\n  {}\n\n  (querying LLM, please wait...)\n", "─".repeat(40)));
                 buf.modified = false;
             }
             id
@@ -231,10 +228,7 @@ impl Editor {
 
             let buf = Buffer {
                 id,
-                rope: Rope::from_str(&format!(
-                    "  [COMMIT] Generating commit message… 0.0s ⠋\n  {}\n\n  (querying LLM, please wait...)\n",
-                    "─".repeat(40)
-                )),
+                rope: Rope::from_str(&format!("  [COMMIT] Generating commit message… 0.0s ⠋\n  {}\n\n  (querying LLM, please wait...)\n", "─".repeat(40))),
                 filename: Some(target_filename.to_string()),
                 modified: false,
                 undo_stack: Vec::new(),
@@ -253,6 +247,9 @@ impl Editor {
                 diff_alignment: None,
                 llm_lock_line: 0,
                 tab_size: 4,
+                wgrep_mode: false,
+                wgrep_prefix_lens: Vec::new(),
+                wgrep_original_texts: Vec::new(),
             };
 
             self.buffers.push(buf);
@@ -580,12 +577,7 @@ impl Editor {
 
                 if let Some(id) = self.git_commit_buffer_id {
                     if let Some(buf) = self.buf_mut_by_id(id) {
-                        let header = format!(
-                            "  [COMMIT] Generating commit message… {:.1}s {}\n  {}\n\n  querying LLM, please wait ...\n",
-                            elapsed,
-                            spinner,
-                            "─".repeat(40)
-                        );
+                        let header = format!("  [COMMIT] Generating commit message… {:.1}s {}\n  {}\n\n  querying LLM, please wait ...\n", elapsed, spinner, "─".repeat(40));
                         buf.rope = Rope::from_str(&header);
                     }
                 }

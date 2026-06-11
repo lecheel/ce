@@ -111,6 +111,9 @@ pub struct Buffer {
     /// Lines llm_lock_line.. are the active prompt area.
     pub llm_lock_line: usize,
     pub tab_size: usize,
+    pub wgrep_mode: bool,
+    pub wgrep_prefix_lens: Vec<usize>,
+    pub wgrep_original_texts: Vec<String>,
 }
 
 impl Buffer {
@@ -121,6 +124,7 @@ impl Buffer {
         if self.kind == BufferKind::Normal
             || self.kind == BufferKind::LlmInput
             || self.kind == BufferKind::GitCommit
+            || (self.kind == BufferKind::Ripgrep && self.wgrep_mode)
         {
             self.modified = true;
         }
@@ -133,7 +137,13 @@ impl Buffer {
             BufferKind::GitStatus => "gitstatus".to_string(),
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
-            BufferKind::Ripgrep => "rg".to_string(),
+            BufferKind::Ripgrep => {
+                if self.wgrep_mode {
+                    "plaintext".to_string()
+                } else {
+                    "rg".to_string()
+                }
+            }
             BufferKind::CheckHealth => "checkhealth".to_string(),
             BufferKind::CodeLlm => "markdown".to_string(),
             BufferKind::GitDiffHead => detect_language(self.filename.as_deref()),
@@ -148,7 +158,13 @@ impl Buffer {
             BufferKind::GitStatus => "gitstatus".to_string(),
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
-            BufferKind::Ripgrep => "rg".to_string(),
+            BufferKind::Ripgrep => {
+                if self.wgrep_mode {
+                    "plaintext".to_string()
+                } else {
+                    "rg".to_string()
+                }
+            }
             BufferKind::CodeLlm => "markdown".to_string(),
             BufferKind::CheckHealth => "checkhealth".to_string(),
             _ => detect_language(self.filename.as_deref()),
@@ -181,6 +197,9 @@ impl Buffer {
             diff_alignment: None,
             llm_lock_line: 0,
             tab_size: 4,
+            wgrep_mode: false,
+            wgrep_prefix_lens: Vec::new(),
+            wgrep_original_texts: Vec::new(),
         };
 
         if let Some(ref path) = filename {
@@ -223,6 +242,9 @@ impl Buffer {
     /// Returns `true` for read-only special buffers (git log / diff).
     #[inline]
     pub fn is_readonly(&self) -> bool {
+        if self.kind == BufferKind::Ripgrep && self.wgrep_mode {
+            return false;
+        }
         matches!(
             self.kind,
             BufferKind::GitLog
@@ -355,10 +377,7 @@ impl Buffer {
                                         None
                                     }
                                     Err(_) => {
-                                        warning = Some(
-                                            "Saved, but neither ruff nor black found for formatting"
-                                                .to_string(),
-                                        );
+                                        warning = Some("Saved, but neither ruff nor black found for formatting".to_string());
                                         None
                                     }
                                 }
@@ -495,7 +514,13 @@ impl Buffer {
         match self.kind {
             BufferKind::GitLog => "[Git Log]".to_string(),
             BufferKind::GitDiff => "[Git Diff]".to_string(),
-            BufferKind::Ripgrep => "[Ripgrep]".to_string(),
+            BufferKind::Ripgrep => {
+                if self.wgrep_mode {
+                    "[wgrep]".to_string()
+                } else {
+                    "[Ripgrep]".to_string()
+                }
+            }
             BufferKind::GitCommit => "[Git Commit]".to_string(),
             BufferKind::GitStatus => "[Git Status]".to_string(),
             BufferKind::CheckHealth => "[Check Health]".to_string(),
@@ -578,6 +603,20 @@ impl Buffer {
             "dart" => "Dart",
             _ => "Plain Text",
         }
+    }
+
+    /// Returns the first character column that is editable on the given row
+    /// in wgrep mode (i.e. just after the `file:line:col:` prefix).
+    /// Returns 0 for non-wgrep buffers. Returns line_char_len for
+    /// header/malformed lines that should be fully protected.
+    pub fn wgrep_editable_col_start(&self, row: usize) -> usize {
+        if !self.wgrep_mode || self.kind != BufferKind::Ripgrep {
+            return 0;
+        }
+        self.wgrep_prefix_lens
+            .get(row)
+            .copied()
+            .unwrap_or_else(|| self.line_char_len(row))
     }
 }
 

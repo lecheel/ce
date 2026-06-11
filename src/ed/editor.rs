@@ -1066,6 +1066,15 @@ impl Editor {
             }
         }
 
+        if self.buf().kind == BufferKind::CodeLlm && matches!(self.mode, Mode::Insert | Mode::Brief)
+        {
+            if self.handle_codellm_insert_key(key) {
+                return;
+            }
+            // Key not consumed (cursor in editable zone, normal typing)
+            // → fall through to the standard Insert-mode handler below
+        }
+
         // ── CodeLlm Insert/Brief guard ──────────────────────────
         // Must run before the generic Insert-mode dispatch so we
         // can block edits above the lock line and intercept send.
@@ -1223,6 +1232,14 @@ impl Editor {
                 }
             }
         }
+
+        // ── wgrep cursor clamp ────────────────────────────────────
+        // After any key that might have moved the cursor (e.g. j/k in
+        // normal mode), push it out of the protected prefix.
+        if self.buf().kind == BufferKind::Ripgrep && self.buf().wgrep_mode {
+            self.clamp_wgrep_cursor();
+        }
+
         self.sync_diff_windows();
     }
 }
@@ -2210,6 +2227,9 @@ impl Editor {
                 named_bookmarks: std::collections::HashMap::new(),
                 llm_lock_line: 0,
                 tab_size: 4,
+                wgrep_mode: false,
+                wgrep_prefix_lens: Vec::new(),
+                wgrep_original_texts: Vec::new(),
             };
             b.rope = Rope::from_str("\n");
             b

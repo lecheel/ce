@@ -8,14 +8,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-
-use ropey::Rope;
 
 use crate::ed::buffer::Diagnostic;
 use crate::msgbox::{AppMessage, AppSender};
@@ -594,8 +593,24 @@ impl LanguageServer {
         args: &[&str],
         root_uri: &str,
     ) -> Result<(Self, Value), Box<dyn std::error::Error + Send + Sync>> {
+        // ── Create a per-project /tmp/ target dir ──────────────────
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        root_uri.hash(&mut hasher);
+        let project_hash = format!("{:016x}", hasher.finish());
+        let tmp_target_dir = format!("/tmp/rust-analyzer-target-{}", project_hash);
+        let _ = std::fs::create_dir_all(&tmp_target_dir);
+
+        // Resolve the actual working directory using find_git_root
+        let root_path_str = root_uri.trim_start_matches("file://").to_string();
+        let root_path_buf = std::path::PathBuf::from(&root_path_str);
+        let work_dir = crate::git::gutter::find_git_root(&root_path_buf).unwrap_or(root_path_buf);
+
         let mut child = tokio::process::Command::new(command)
             .args(args)
+            .current_dir(&work_dir)
+            .env("CARGO_TARGET_DIR", &tmp_target_dir)
+            .env("CARGO_BUILD_TARGET_DIR", &tmp_target_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -649,70 +664,80 @@ impl LanguageServer {
             supports_snippets: false,
             supports_completion_resolve: false,
         };
-
         // Blocking initialize – only once at startup
-        let init_response = server.blocking_request("initialize", json!(
-            InitializeParams {
-                process_id: Some(std::process::id()),
-                root_path: Some(root_uri.trim_start_matches("file://").to_string()),
-                root_uri: Some(root_uri.to_string()),
-                initialization_options: Some(json!({
-                    "rust-analyzer": {
-                        "inlayHints": {
-                            "bindingModeHints": true,
-                            "closureReturnTypeHints": "always",
-                            "lifetimeElisionHints": "always",
-                            "parameterHints": true,
-                            "reborrowHints": true,
-                            "renderColons": true,
-                            "typeHints": true,
-                            "chainingHints": true
+        let init_response = server
+            .blocking_request(
+                "initialize",
+                json!(InitializeParams {
+                    process_id: Some(std::process::id()),
+                    root_path: Some(root_uri.trim_start_matches("file://").to_string()),
+                    root_uri: Some(root_uri.to_string()),
+                    initialization_options: Some(json!({
+                        "rust-analyzer": {
+                            "checkOnSave": false,
+                            "check": {
+                                "enable": false,
+                                "extraEnv": {
+                                    "CARGO_TARGET_DIR": tmp_target_dir
+                                }
+                            },
+                            "cargo": {
+                                "targetDir": tmp_target_dir,
+                                "extraEnv": {
+                                    "CARGO_TARGET_DIR": tmp_target_dir
+                                }
+                            },
+                            "inlayHints": {
+                                "bindingModeHints": true,
+                                "closureReturnTypeHints": "always",
+                                "lifetimeElisionHints": "always",
+                                "parameterHints": true,
+                                "reborrowHints": true,
+                                "renderColons": true,
+                                "typeHints": true,
+                                "chainingHints": true
+                            },
+                            "procMacro": {
+                                "enable": false
+                            }
                         }
-                    }
-                })),
-                capabilities: ClientCapabilities {
-                    text_document: TextDocumentCapabilities {
-                        synchronization: Some(TextDocumentSyncCapabilities {
-                            dynamic_registration: Some(false),
-                            will_save: Some(true),
-                            will_save_wait_until: Some(false),
-                            did_save: Some(true),
-                        }),
-                        publish_diagnostics: Some(json!({})),
-                        signature_help: Some(SignatureHelpCapability {
-                            dynamic_registration: Some(false),
-                            context_support: Some(true),
-                            signature_information: Some(SignatureInformationCapability {
-                                documentation_format: Some(vec!["plaintext".into()]),
-                                parameter_information: Some(ParameterInformationCapability {
-                                    label_offset_support: Some(true),
+                    })),
+                    capabilities: ClientCapabilities {
+                        text_document: TextDocumentCapabilities {
+                            synchronization: Some(TextDocumentSyncCapabilities {
+                                dynamic_registration: Some(false),
+                                will_save: Some(true),
+                                will_save_wait_until: Some(false),
+                                did_save: Some(true),
+                            }),
+                            publish_diagnostics: Some(json!({})),
+                            signature_help: Some(SignatureHelpCapability {
+                                dynamic_registration: Some(false),
+                                context_support: Some(true),
+                                signature_information: Some(SignatureInformationCapability {
+                                    documentation_format: Some(vec!["plaintext".into()]),
+                                    parameter_information: Some(ParameterInformationCapability { label_offset_support: Some(true) }),
                                 }),
                             }),
-                        }),
-                        completion: Some(CompletionCapability {
-                            completion_item: Some(json!({
-                                "snippetSupport": true,
-                                "resolveSupport": {
-                                    "properties": ["documentation", "detail", "additionalTextEdits"]
-                                },
-                                "insertReplaceSupport": false,
-                            })),
-                            context_support: Some(true),
+                            completion: Some(CompletionCapability {
+                                completion_item: Some(json!({
+                                    "snippetSupport": true,
+                                    "resolveSupport": {
+                                        "properties": ["documentation", "detail", "additionalTextEdits"]
+                                    },
+                                    "insertReplaceSupport": false,
+                                })),
+                                context_support: Some(true),
+                            }),
+                        },
+                        workspace: WorkspaceCapabilities { did_change_configuration: Some(json!({})) },
+                        general: Some(GeneralClientCapabilities {
+                            position_encodings: Some(vec!["utf-8".to_string(), "utf-16".to_string(), "utf-32".to_string(),]),
                         }),
                     },
-                    workspace: WorkspaceCapabilities {
-                        did_change_configuration: Some(json!({})),
-                    },
-                    general: Some(GeneralClientCapabilities {
-                        position_encodings: Some(vec![
-                            "utf-8".to_string(),
-                            "utf-16".to_string(),
-                            "utf-32".to_string(),
-                        ]),
-                    }),
-                },
-            }
-        )).await?;
+                }),
+            )
+            .await?;
 
         // Parse capabilities
         if let Some(enc) = init_response
@@ -774,7 +799,7 @@ impl LanguageServer {
             json!(DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
                     uri: uri.to_string(),
-                    version,
+                    version
                 },
                 content_changes: vec![TextDocumentContentChangeEvent {
                     range: Some(Range {
@@ -921,12 +946,12 @@ impl LanguageServer {
             json!(DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
                     uri: uri.to_string(),
-                    version,
+                    version
                 },
                 content_changes: vec![TextDocumentContentChangeEvent {
                     range: None,
                     range_length: None,
-                    text: new_text.to_string(),
+                    text: new_text.to_string()
                 }],
             }),
         )

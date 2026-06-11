@@ -100,10 +100,7 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 .map(|c| c.is_alphanumeric())
                 .unwrap_or(true);
         if is_percent_subst {
-            editor.set_status_msg(
-                "E481: No range allowed with '%s' when using visual selection ('\\<,'\\>%s is invalid, use '\\<,'\\>s instead)",
-                MessageKind::Error,
-            );
+            editor.set_status_msg("E481: No range allowed with '%s' when using visual selection ('\\<,'\\>%s is invalid, use '\\<,'\\>s instead)", MessageKind::Error);
             return;
         }
     }
@@ -614,6 +611,23 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "fninfo" => {
             editor.open_fn_info_popup();
         }
+        "wgrep!" => {
+            if editor.buf().kind == BufferKind::Ripgrep && editor.buf().wgrep_mode {
+                editor.wgrep_force_exit();
+            } else {
+                editor.set_status_msg("Not in wgrep mode", MessageKind::Error);
+            }
+        }
+        "wgrep-write" | "wgrepw" => {
+            editor.wgrep_apply();
+        }
+        "wg" | "wgrep" => {
+            editor.wgrep_toggle();
+        }
+        s if s.starts_with("wg ") => {
+            let pattern = s.strip_prefix("wg ").unwrap().trim();
+            editor.ripgrep_search_wgrep(pattern);
+        }
 
         //-- repl commands (anchor dont removed) --//
         // ---- Window commands ----
@@ -885,7 +899,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
-        "codellm", "cllm", "reg", "build","retab","close","fninfo",
+        "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();

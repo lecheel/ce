@@ -91,6 +91,9 @@ impl Editor {
             named_bookmarks: std::collections::HashMap::new(),
             llm_lock_line: 0,
             tab_size: self.config.tab_size,
+            wgrep_mode: false,
+            wgrep_prefix_lens: Vec::new(),
+            wgrep_original_texts: Vec::new(),
         });
 
         buf.kind = BufferKind::GitDiff;

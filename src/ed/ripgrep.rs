@@ -80,6 +80,26 @@ impl RipgrepOutput {
         }
         line_map
     }
+
+    /// Format results as `file:line:0:text` (vimgrep-style) for wgrep editing.
+    /// Returns the formatted string and a vec of prefix char-lengths per line.
+    pub fn format_for_wgrep_buffer(&self) -> (String, Vec<usize>) {
+        let mut formatted = String::new();
+        let mut prefix_lens = Vec::new();
+        for result in &self.results {
+            let display_path = result
+                .file_path
+                .strip_prefix(&self.root_dir)
+                .unwrap_or(&result.file_path);
+            let prefix = format!("{}:{}:0:", display_path.display(), result.line_number);
+            let prefix_char_len = prefix.chars().count();
+            formatted.push_str(&prefix);
+            formatted.push_str(&result.line_text);
+            formatted.push('\n');
+            prefix_lens.push(prefix_char_len);
+        }
+        (formatted, prefix_lens)
+    }
 }
 
 /// Escapes regular expression special characters to perform literal search matches.
@@ -265,6 +285,149 @@ impl Editor {
         self.ripgrep_search_internal(pattern, &root_dir);
     }
 
+    /// Run ripgrep and open results directly in wgrep edit mode.
+    pub fn ripgrep_search_wgrep(&mut self, pattern: &str) {
+        if pattern.is_empty() {
+            self.set_status_msg("Empty search pattern", MessageKind::Error);
+            return;
+        }
+        let root_dir = self
+            .buf()
+            .filename
+            .as_ref()
+            .and_then(|f| find_git_root(Path::new(f)))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        self.set_status_msg(
+            &format!("Searching for '{}'...", pattern),
+            MessageKind::Info,
+        );
+        let escaped = escape_regex(pattern);
+        match run_ripgrep(&escaped, &root_dir) {
+            Ok(output) => {
+                if output.results.is_empty() {
+                    self.set_status_msg(
+                        &format!("No matches for '{}' in {}", pattern, root_dir.display()),
+                        MessageKind::Info,
+                    );
+                    return;
+                }
+                let count = output.results.len();
+                let file_count = output
+                    .results
+                    .iter()
+                    .map(|r| r.file_path.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                let output = RipgrepOutput {
+                    pattern: pattern.to_string(),
+                    ..output
+                };
+                self.last_rg_pattern = Some(pattern.to_string());
+                self.last_rg_root_dir = Some(root_dir.to_path_buf());
+                self.last_rg_output = Some(output.clone());
+                let _ = save_last_rg_output(&output);
+                self.populate_wgrep_buffer(pattern, output);
+                self.set_status_msg(
+                    &format!(
+                        "[wgrep] '{}' — {} match{} in {} file{}  (w: apply, q: exit)",
+                        pattern,
+                        count,
+                        if count == 1 { "" } else { "es" },
+                        file_count,
+                        if file_count == 1 { "" } else { "s" },
+                    ),
+                    MessageKind::Info,
+                );
+            }
+            Err(e) => {
+                self.set_status_msg(&format!("Ripgrep failed: {}", e), MessageKind::Error);
+            }
+        }
+    }
+
+    /// Populate a ripgrep buffer in wgrep (vimgrep) format for direct editing.
+    pub(crate) fn populate_wgrep_buffer(&mut self, pattern: &str, rg_output: RipgrepOutput) {
+        let existing_rg = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::Ripgrep)
+            .map(|b| b.id);
+        let rg_buffer_id = if let Some(id) = existing_rg {
+            id
+        } else {
+            let id = self.next_buf_id;
+            self.next_buf_id += 1;
+            let buf = Buffer {
+                id,
+                rope: ropey::Rope::from_str(""),
+                filename: Some("*ripgrep*".to_string()),
+                modified: false,
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+                diagnostics: Vec::new(),
+                syntax: crate::ed::syntax::SyntaxState::new(),
+                bookmarks: std::collections::HashSet::new(),
+                git_diffs: std::collections::HashMap::new(),
+                named_bookmarks: std::collections::HashMap::new(),
+                kind: BufferKind::Ripgrep,
+                git_log_state: None,
+                git_status_state: None,
+                ripgrep_results: Vec::new(),
+                ripgrep_line_map: Vec::new(),
+                search_pattern: None,
+                diff_alignment: None,
+                llm_lock_line: 0,
+                tab_size: 4,
+                wgrep_mode: false,
+                wgrep_prefix_lens: Vec::new(),
+                wgrep_original_texts: Vec::new(),
+            };
+            self.buffers.push(buf);
+            id
+        };
+
+        let (formatted, prefix_lens) = rg_output.format_for_wgrep_buffer();
+        let original_texts: Vec<String> = rg_output
+            .results
+            .iter()
+            .map(|r| r.line_text.clone())
+            .collect();
+
+        let editable_col = prefix_lens.first().copied().unwrap_or(0);
+        let tab_size = self.config.tab_size;
+
+        if let Some(buffer) = self.buf_mut_by_id(rg_buffer_id) {
+            buffer.rope = ropey::Rope::from_str(&formatted);
+            buffer.ripgrep_results = rg_output.results.clone();
+            buffer.ripgrep_line_map = rg_output.build_line_map();
+            buffer.search_pattern = Some(pattern.to_string());
+            buffer.wgrep_mode = true;
+            buffer.wgrep_prefix_lens = prefix_lens;
+            buffer.wgrep_original_texts = original_texts;
+            buffer.modified = false;
+            buffer.parse_syntax();
+        }
+
+        self.quickfix_results = rg_output.results.clone();
+        self.quickfix_index = 0;
+        self.last_rg_pattern = Some(pattern.to_string());
+        self.last_rg_root_dir = Some(rg_output.root_dir.clone());
+        self.last_rg_output = Some(rg_output.clone());
+        let _ = save_last_rg_output(&rg_output);
+
+        self.switch_window_to_buffer(rg_buffer_id);
+
+        let line_text = self.buf().line_text(0);
+        {
+            let win = self.active_window_mut();
+            win.row = 0;
+            win.col = editable_col;
+            win.desired_col =
+                crate::ed::editing::visual_col_from_char_idx(&line_text, editable_col, tab_size);
+        }
+    }
+
     fn ripgrep_search_internal(&mut self, pattern: &str, root_dir: &Path) {
         self.set_status_msg(
             &format!("Searching for '{}'...", pattern),
@@ -441,6 +604,9 @@ impl Editor {
                 diff_alignment: None,
                 llm_lock_line: 0,
                 tab_size: 4,
+                wgrep_mode: false,
+                wgrep_prefix_lens: Vec::new(),
+                wgrep_original_texts: Vec::new(),
             };
             self.buffers.push(buf);
             id
@@ -680,5 +846,369 @@ impl Editor {
             ),
             MessageKind::Info,
         );
+    }
+    // ── wgrep: toggle / exit / apply / guard ──────────────────
+
+    /// Toggle wgrep edit mode on the current ripgrep buffer.
+    pub fn wgrep_toggle(&mut self) {
+        if self.buf().kind != BufferKind::Ripgrep {
+            self.set_status_msg("Not a ripgrep buffer", MessageKind::Error);
+            return;
+        }
+
+        if self.buf().wgrep_mode {
+            if self.buf().modified {
+                self.set_status_msg(
+                    "Unsaved changes — w to apply, q! to discard",
+                    MessageKind::Error,
+                );
+                return;
+            }
+            self.wgrep_exit();
+            return;
+        }
+
+        let rg_output = match self.last_rg_output.clone() {
+            Some(o) => o,
+            None => {
+                self.set_status_msg("No ripgrep results to edit", MessageKind::Error);
+                return;
+            }
+        };
+
+        if rg_output.results.is_empty() {
+            self.set_status_msg("No results to edit", MessageKind::Error);
+            return;
+        }
+
+        let (formatted, prefix_lens) = rg_output.format_for_wgrep_buffer();
+        let original_texts: Vec<String> = rg_output
+            .results
+            .iter()
+            .map(|r| r.line_text.clone())
+            .collect();
+
+        let editable_col = prefix_lens.first().copied().unwrap_or(0);
+        let tab_size = self.config.tab_size;
+
+        {
+            let buf = self.buf_mut();
+            buf.rope = ropey::Rope::from_str(&formatted);
+            buf.wgrep_mode = true;
+            buf.wgrep_prefix_lens = prefix_lens;
+            buf.wgrep_original_texts = original_texts;
+            buf.modified = false;
+            buf.parse_syntax();
+        }
+
+        // Move cursor to first editable position
+        let line_text = self.buf().line_text(0);
+        {
+            let win = self.active_window_mut();
+            win.row = 0;
+            win.col = editable_col;
+            win.desired_col =
+                crate::ed::editing::visual_col_from_char_idx(&line_text, editable_col, tab_size);
+        }
+
+        self.set_status_msg(
+            "[wgrep] Edit mode ON — w: apply, q: exit",
+            MessageKind::Info,
+        );
+    }
+
+    /// Force-exit wgrep mode, discarding any unsaved changes.
+    pub fn wgrep_force_exit(&mut self) {
+        self.wgrep_exit();
+    }
+
+    /// Exit wgrep mode and restore the normal ripgrep display.
+    pub fn wgrep_exit(&mut self) {
+        let rg_output = match self.last_rg_output.clone() {
+            Some(o) => o,
+            None => {
+                self.ripgrep_close_buffer();
+                return;
+            }
+        };
+
+        {
+            let buf = self.buf_mut();
+            buf.rope = ropey::Rope::from_str(&rg_output.format_for_buffer());
+            buf.ripgrep_line_map = rg_output.build_line_map();
+            buf.wgrep_mode = false;
+            buf.wgrep_prefix_lens = Vec::new();
+            buf.wgrep_original_texts = Vec::new();
+            buf.modified = false;
+            buf.parse_syntax();
+        }
+
+        self.enter_normal();
+        self.set_status_msg("[wgrep] Edit mode OFF", MessageKind::Info);
+    }
+
+    /// Write wgrep changes back to the source files.
+    pub fn wgrep_apply(&mut self) {
+        if !self.buf().wgrep_mode {
+            self.set_status_msg("Not in wgrep mode", MessageKind::Error);
+            return;
+        }
+
+        // Phase 1: Collect changes from buffer
+        let mut changes: std::collections::HashMap<std::path::PathBuf, Vec<(usize, String)>> =
+            std::collections::HashMap::new();
+        let mut change_count = 0usize;
+
+        {
+            let buf = self.buf();
+            let total_lines = buf.len_lines();
+
+            for row in 0..total_lines.saturating_sub(1) {
+                let prefix_len = match buf.wgrep_prefix_lens.get(row) {
+                    Some(&l) => l,
+                    None => continue,
+                };
+
+                let line = buf.line_text(row);
+                let line_char_count = line.chars().count();
+
+                if prefix_len >= line_char_count {
+                    continue;
+                }
+
+                let new_text: String = line.chars().skip(prefix_len).collect();
+                let original_text = match buf.wgrep_original_texts.get(row) {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                if new_text == *original_text {
+                    continue;
+                }
+
+                let result = match buf.ripgrep_results.get(row) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                changes
+                    .entry(result.file_path.clone())
+                    .or_default()
+                    .push((result.line_number, new_text));
+
+                change_count += 1;
+            }
+        }
+
+        if change_count == 0 {
+            self.set_status_msg("[wgrep] No changes to apply", MessageKind::Info);
+            return;
+        }
+
+        // Phase 2: Apply changes file-by-file
+        let changed_files: Vec<std::path::PathBuf> = changes.keys().cloned().collect();
+        let mut applied = 0usize;
+        let mut errors = Vec::new();
+
+        for (file_path, mut file_changes) in changes {
+            file_changes.sort_by(|a, b| b.0.cmp(&a.0));
+
+            let content = match std::fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(format!("{}: {}", file_path.display(), e));
+                    continue;
+                }
+            };
+
+            let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+            for (line_number, new_text) in &file_changes {
+                let idx = line_number.saturating_sub(1);
+                if idx < lines.len() {
+                    lines[idx] = new_text.clone();
+                    applied += 1;
+                } else {
+                    errors.push(format!(
+                        "{}:{} line out of range (file has {} lines)",
+                        file_path.display(),
+                        line_number,
+                        lines.len()
+                    ));
+                }
+            }
+
+            let new_content = format!("{}\n", lines.join("\n"));
+            if let Err(e) = std::fs::write(&file_path, &new_content) {
+                errors.push(format!("{}: write failed: {}", file_path.display(), e));
+            }
+        }
+
+        // Phase 3: Update stored results and originals
+        {
+            let buf = self.buf_mut();
+            let total_lines = buf.len_lines();
+            for row in 0..total_lines.saturating_sub(1) {
+                let prefix_len = match buf.wgrep_prefix_lens.get(row) {
+                    Some(&l) => l,
+                    None => continue,
+                };
+                let line = buf.line_text(row);
+                let line_char_count = line.chars().count();
+                if prefix_len >= line_char_count {
+                    continue;
+                }
+                let new_text: String = line.chars().skip(prefix_len).collect();
+                if let Some(result) = buf.ripgrep_results.get_mut(row) {
+                    result.line_text = new_text.clone();
+                }
+                if let Some(orig) = buf.wgrep_original_texts.get_mut(row) {
+                    *orig = new_text;
+                }
+            }
+            buf.modified = false;
+        }
+
+        // Phase 4: Update last_rg_output
+        // Collect line data before mutable-borrowing self.last_rg_output
+        {
+            let buf = self.buf();
+            let prefix_lens = buf.wgrep_prefix_lens.clone();
+            let total_lines = buf.len_lines();
+            let line_texts: Vec<String> = (0..total_lines.saturating_sub(1))
+                .map(|row| buf.line_text(row))
+                .collect();
+
+            if let Some(ref mut output) = self.last_rg_output {
+                for (row, result) in output.results.iter_mut().enumerate() {
+                    let prefix_len = match prefix_lens.get(row) {
+                        Some(&l) => l,
+                        None => continue,
+                    };
+                    let line = match line_texts.get(row) {
+                        Some(l) => l,
+                        None => continue,
+                    };
+                    result.line_text = line.chars().skip(prefix_len).collect();
+                }
+            }
+        }
+
+        // Phase 5: Reload any open buffers that were modified
+        let mut gutter_requests: Vec<(usize, ropey::Rope, String)> = Vec::new();
+        let mut lsp_save_paths: Vec<std::path::PathBuf> = Vec::new();
+
+        for file_path in &changed_files {
+            let path_str = file_path.to_string_lossy().to_string();
+            for open_buf in &mut self.buffers {
+                if open_buf.filename.as_deref() == Some(&path_str) {
+                    let _ = open_buf.open_file(&path_str);
+                    open_buf.git_diffs.clear(); // Clear stale diffs immediately
+                    gutter_requests.push((open_buf.id, open_buf.rope.clone(), path_str.clone()));
+                }
+            }
+            lsp_save_paths.push(file_path.clone());
+        }
+
+        // Request fresh gutter diffs (separate loop to avoid borrow conflict)
+        for (bid, rope, name) in &gutter_requests {
+            self.async_gutter.request_diff(*bid, rope, Some(name));
+        }
+
+        // Notify LSP that files were saved
+        for path in lsp_save_paths {
+            self.lsp_notify_save(path);
+        }
+
+        self.invalidate_hunk_cache();
+        self.notify_ctagd_saved();
+
+        if errors.is_empty() {
+            self.set_status_msg(
+                &format!(
+                    "[wgrep] Applied {} change{} to {} file{}",
+                    applied,
+                    if applied == 1 { "" } else { "s" },
+                    changed_files.len(),
+                    if changed_files.len() == 1 { "" } else { "s" }
+                ),
+                MessageKind::Success,
+            );
+        } else {
+            self.set_status_msg(
+                &format!(
+                    "[wgrep] Applied {} changes, {} error(s): {}",
+                    applied,
+                    errors.len(),
+                    errors.join("; ")
+                ),
+                MessageKind::Error,
+            );
+        }
+    }
+
+    /// Clamp the cursor so it doesn't sit inside the protected wgrep prefix.
+    pub fn clamp_wgrep_cursor(&mut self) {
+        if self.buf().kind != BufferKind::Ripgrep || !self.buf().wgrep_mode {
+            return;
+        }
+        let row = self.active_window().row;
+        let max_row = self.buf().len_lines().saturating_sub(1);
+        let row = row.min(max_row);
+        let editable_start = self.buf().wgrep_editable_col_start(row);
+        let tab_size = self.config.tab_size;
+        let line_text = self.buf().line_text(row);
+        let win = self.active_window_mut();
+        win.row = row;
+        if win.col < editable_start {
+            win.col = editable_start;
+            win.desired_col =
+                crate::ed::editing::visual_col_from_char_idx(&line_text, editable_start, tab_size);
+        }
+    }
+
+    /// Insert-mode guard for wgrep buffers.
+    /// Returns true if the key was consumed (blocked or handled).
+    pub fn wgrep_insert_guard(&mut self, key: crate::event::KeyEvent) -> bool {
+        use crate::event::KeyCode;
+
+        if self.buf().kind != BufferKind::Ripgrep || !self.buf().wgrep_mode {
+            return false;
+        }
+
+        // Block Enter — no newlines in wgrep mode
+        if key.code == KeyCode::Enter {
+            return true;
+        }
+
+        // Clamp cursor out of prefix
+        let row = self.active_window().row;
+        let editable_start = self.buf().wgrep_editable_col_start(row);
+        if self.active_window().col < editable_start {
+            let tab_size = self.config.tab_size;
+            let line_text = self.buf().line_text(row);
+            let win = self.active_window_mut();
+            win.col = editable_start;
+            win.desired_col =
+                crate::ed::editing::visual_col_from_char_idx(&line_text, editable_start, tab_size);
+        }
+
+        // Block backspace that would delete into the prefix
+        let col = self.active_window().col;
+        if key.code == KeyCode::Backspace && col <= editable_start {
+            return true;
+        }
+
+        // Block Ctrl-W (delete word backward) at prefix boundary
+        if key.code == KeyCode::Char('w')
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+            && col <= editable_start
+        {
+            return true;
+        }
+
+        false
     }
 }
