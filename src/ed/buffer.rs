@@ -391,6 +391,7 @@ impl Buffer {
                                     e
                                 ));
                             }
+                            self.git_diffs.clear();
                         }
                     }
                 }

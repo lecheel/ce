@@ -1416,6 +1416,9 @@ impl Editor {
                 }
 
                 self.active_window_mut().set_buffer_id(existing_id);
+                if let Some(buf) = self.buf_mut_by_id(existing_id) {
+                    buf.git_diffs.clear();
+                }
 
                 let mut restored = false;
                 if let Some((row, col)) = self.get_saved_position(p) {
@@ -1500,6 +1503,13 @@ impl Editor {
                     if let Ok(canon_path) = std::fs::canonicalize(&path_buf) {
                         let win = self.active_window();
                         self.mru_manager.insert(canon_path, win.row, win.col);
+                    }
+                }
+
+                if let Some(ref p) = path {
+                    if let Some(buf) = self.buf_by_id(bid) {
+                        let rope = buf.rope.clone();
+                        self.async_gutter.request_diff(bid, &rope, Some(p));
                     }
                 }
             }
@@ -1689,10 +1699,11 @@ impl Editor {
         self.set_status(&msg, MessageKind::Info);
     }
 
+    // Replace save_active_buffer with:
     pub fn save_active_buffer(&mut self) -> anyhow::Result<Option<String>> {
         let format_on_save = self.config.format_on_save;
+        let bid = self.active_window().buffer_id();
         let result = self.buf_mut().save_file(format_on_save);
-
         match &result {
             Ok(Some(warning)) => {
                 self.show_message(warning.clone());
@@ -1702,7 +1713,16 @@ impl Editor {
             }
             Ok(None) => {}
         }
-
+        // Refresh gutter after save — critical when format-on-save reloaded the file,
+        // but also correct for normal saves (content now matches disk, signs should update).
+        if result.is_ok() {
+            if let Some(buf) = self.buf_by_id(bid) {
+                let rope = buf.rope.clone();
+                let filename = buf.filename.clone();
+                self.async_gutter
+                    .request_diff(bid, &rope, filename.as_deref());
+            }
+        }
         result
     }
 

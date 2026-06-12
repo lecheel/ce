@@ -302,6 +302,15 @@ impl Editor {
         }
     }
 
+    fn refresh_gutter_for_buffer(&mut self, buffer_id: usize) {
+        if let Some(buf) = self.buf_by_id(buffer_id) {
+            let rope = buf.rope.clone();
+            let filename = buf.filename.clone();
+            self.async_gutter
+                .request_diff(buffer_id, &rope, filename.as_deref());
+        }
+    }
+
     pub fn refresh_git_status_buffer(&mut self, repo_root: &std::path::Path) {
         let target = "*git-status*";
         let buf_id = self
@@ -583,11 +592,6 @@ impl Editor {
 
     fn refresh_active_gutter(&mut self) {
         let bid = self.active_window().buffer_id();
-        if let Some(buf) = self.buf_mut_by_id(bid) {
-            let rope = buf.rope.clone();
-            let filename = buf.filename.clone();
-            self.async_gutter
-                .request_diff(bid, &rope, filename.as_deref());
-        }
+        self.refresh_gutter_for_buffer(bid);
     }
 }

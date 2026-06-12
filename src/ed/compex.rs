@@ -1630,6 +1630,15 @@ impl Editor {
             win.col = col;
         }
 
+        // Refresh gutter after LSP formatting changed the buffer content
+        {
+            let bid = self.buffers[buffer_idx].id;
+            let rope = self.buffers[buffer_idx].rope.clone();
+            let filename = self.buffers[buffer_idx].filename.clone();
+            self.async_gutter
+                .request_diff(bid, &rope, filename.as_deref());
+        }
+
         if save_after && filename.is_some() {
             let _ = self.save_active_buffer();
         }

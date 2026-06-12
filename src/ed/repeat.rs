@@ -165,7 +165,7 @@ impl RepeatExt for Editor {
             }
             RepeatableAction::DeleteWordForward => Action::DeleteInsideWord,
             RepeatableAction::DeleteWordBack => Action::DeleteInsideWord,
-            RepeatableAction::DeleteAroundFunction => Action::DeleteInsideFunction,
+            RepeatableAction::DeleteAroundFunction => Action::DeleteAroundFunction,
             RepeatableAction::Insert(text) => {
                 // Inline insertion replay
                 if !text.is_empty() {

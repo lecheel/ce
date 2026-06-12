@@ -1581,6 +1581,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     win.clamp_cursor(buf);
                     win.desired_col = win.col;
                 }
+                editor.record_action(RepeatableAction::DeleteAroundFunction, 1);
             } else {
                 editor.set_status_msg("No function found around cursor", MessageKind::Error);
                 editor.action_failed = true;
