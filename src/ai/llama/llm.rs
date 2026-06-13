@@ -4,6 +4,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
+use crate::ai::llama::skills;
+use crate::ai::llama::skills::{Skill, ToolConversation};
 use crate::config::app_config::LlmBackend;
 use crate::ed::buffer::BufferKind;
 use crate::ed::ext::CommandResult;
@@ -118,6 +120,8 @@ pub struct LlmState {
     pub single_shot: bool,
     pub prompt: MiniInputPrompt,
     pub system_prompt: Option<String>,
+    pub active_skill: Option<Skill>,
+    pub tool_conversation: Option<ToolConversation>,
 
     /// True when the current request is for a CodeLlm single-buffer chat.
     /// The response handler checks this flag to decide whether to call
@@ -145,6 +149,8 @@ impl LlmState {
             prompt: MiniInputPrompt::new(),
             system_prompt: None,
             is_codellm: false,
+            active_skill: None,
+            tool_conversation: None,
         }
     }
 }
@@ -200,10 +206,18 @@ impl Editor {
                 let url = self.config.llm_url.clone();
                 let port = self.config.llm_port;
                 let api_key = self.config.llm_api_key.clone();
+                let skill = self.llm.active_skill.clone();
 
                 let handle = tokio::spawn(async move {
                     log::debug!("[LLM] Using llama.cpp backend ({}:{})", url, port);
-                    let res = query_llamacpp_local(messages, &url, port, api_key.as_deref()).await;
+                    let res = query_llamacpp_local(
+                        messages,
+                        &url,
+                        port,
+                        api_key.as_deref(),
+                        skill.as_ref(),
+                    )
+                    .await;
                     let _ = tx.send(res);
                 });
 
@@ -213,6 +227,7 @@ impl Editor {
                 let url = self.config.ollama_url.clone();
                 let port = self.config.ollama_port;
                 let model = self.config.ollama_model.clone();
+                let skill = self.llm.active_skill.clone();
 
                 let handle = tokio::spawn(async move {
                     log::debug!(
@@ -221,7 +236,8 @@ impl Editor {
                         port,
                         model
                     );
-                    let res = query_ollama_local(messages, &url, port, &model).await;
+                    let res =
+                        query_ollama_local(messages, &url, port, &model, skill.as_ref()).await;
                     let _ = tx.send(res);
                 });
 
@@ -851,9 +867,325 @@ impl Editor {
     }
 }
 
-/// Communicates with llama.cpp local server using raw TCP sockets, targeting
-/// the OpenAI-compatible chat completions endpoint (/v1/chat/completions).
+/// Ollama with optional tool-calling support.
+async fn query_ollama_local(
+    messages: Vec<(String, String)>,
+    url: &str,
+    port: u16,
+    model: &str,
+    skill: Option<&Skill>,
+) -> Result<String, String> {
+    let Some(skill) = skill else {
+        return query_ollama_plain(messages, url, port, model).await;
+    };
+
+    let tools_json: Vec<serde_json::Value> = skill
+        .tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
+        .collect();
+
+    let mut messages = messages;
+    if let Some(entry) = messages.iter_mut().find(|(role, _)| role == "system") {
+        entry.1 = skill.system_prompt.clone();
+    } else {
+        messages.insert(0, ("system".into(), skill.system_prompt.clone()));
+    }
+
+    let mut conversation = ToolConversation::new();
+    for (role, content) in &messages {
+        conversation
+            .messages
+            .push(serde_json::json!({"role": role, "content": content}));
+    }
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let payload = build_ollama_payload(&conversation.messages, model, Some(&tools_json));
+        let response = send_ollama_request_raw(&payload, url, port).await?;
+        let choice = &response["message"];
+
+        if let Some(tool_calls) = choice["tool_calls"].as_array() {
+            if !tool_calls.is_empty() {
+                conversation.push_assistant(choice);
+                for tc in tool_calls {
+                    let func = &tc["function"];
+                    let tool_name = func["name"].as_str().unwrap_or("unknown");
+                    let call_id = tc["id"].as_str().unwrap_or("").to_string(); // ← grab the ID
+                    let args_str = func["arguments"].as_str().unwrap_or("{}");
+                    let args: serde_json::Value =
+                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                    log::info!("[Tool] Calling {} with args: {}", tool_name, args_str);
+                    let result = skills::execute_tool(
+                        &skill
+                            .tools
+                            .iter()
+                            .find(|t| t.name == tool_name)
+                            .ok_or_else(|| format!("Unknown tool: {}", tool_name))?
+                            .clone(),
+                        &args,
+                        &skill.config_defaults,
+                    )
+                    .unwrap_or_else(|e| format!("Error: {}", e));
+                    log::info!("[Tool] Result ({} chars)", result.len());
+                    conversation.push_tool_result(&call_id, tool_name, &result);
+                    // ← pass ID
+                }
+                continue;
+            }
+        }
+
+        if let Some(content) = choice["content"].as_str() {
+            return Ok(content.to_string());
+        }
+        return Err("Ollama returned empty response with no tool calls".into());
+    }
+
+    let payload = build_ollama_payload(&conversation.messages, model, None);
+    let response = send_ollama_request_raw(&payload, url, port).await?;
+    if let Some(content) = response["message"]["content"].as_str() {
+        return Ok(content.to_string());
+    }
+    Err("Ollama did not produce a final answer after max tool rounds".into())
+}
+
+/// Plain Ollama chat (no tools) — original logic.
+async fn query_ollama_plain(
+    messages: Vec<(String, String)>,
+    url: &str,
+    port: u16,
+    model: &str,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let path = "/api/chat";
+    let json_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
+        .collect();
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": json_messages,
+        "stream": false
+    });
+    let body =
+        serde_json::to_string(&payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
+    let clean_host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let addr = format!("{}:{}", clean_host, port);
+    let request = format!(
+        "POST {} HTTP/1.0\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        path,
+        addr,
+        body.len(),
+        body
+    );
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("Failed to connect to Ollama at {}: {}", addr, e))?;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write payload to Ollama: {}", e))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("Failed to read stream contents: {}", e))?;
+    let response_str = String::from_utf8_lossy(&response);
+    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+    if parts.len() < 2 {
+        return Err("Malformed HTTP response from Ollama".to_string());
+    }
+    let http_body = parts[1];
+    #[derive(serde::Deserialize)]
+    struct OllamaMessage {
+        content: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct OllamaChatResponse {
+        message: OllamaMessage,
+    }
+    let parsed: OllamaChatResponse = serde_json::from_str(http_body).map_err(|e| {
+        format!(
+            "Failed to parse Ollama response: {}. Body: {}",
+            e, http_body
+        )
+    })?;
+    Ok(parsed.message.content)
+}
+
+fn build_ollama_payload(
+    messages: &[serde_json::Value],
+    model: &str,
+    tools: Option<&[serde_json::Value]>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "stream": false
+    });
+    if let Some(tools_arr) = tools {
+        payload["tools"] = serde_json::json!(tools_arr);
+    }
+    payload
+}
+
+async fn send_ollama_request_raw(
+    payload: &serde_json::Value,
+    url: &str,
+    port: u16,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let body =
+        serde_json::to_string(payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
+    let clean_host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let addr = format!("{}:{}", clean_host, port);
+    let request = format!(
+        "POST /api/chat HTTP/1.0\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{}",
+        addr,
+        body.len(),
+        body
+    );
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("Connect failed: {}", e))?;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("Read failed: {}", e))?;
+    let response_str = String::from_utf8_lossy(&response);
+    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+    if parts.len() < 2 {
+        return Err("Malformed HTTP response".into());
+    }
+    serde_json::from_str(parts[1]).map_err(|e| format!("JSON parse error: {}", e))
+}
+
+/// Communicates with a local Ollama server via its native `/api/chat` endpoint.
+/// llama.cpp with optional tool-calling support.
+/// When `skill` is None, falls back to plain chat.
 async fn query_llamacpp_local(
+    messages: Vec<(String, String)>,
+    url: &str,
+    port: u16,
+    api_key: Option<&str>,
+    skill: Option<&Skill>,
+) -> Result<String, String> {
+    let Some(skill) = skill else {
+        return query_llamacpp_plain(messages, url, port, api_key).await;
+    };
+
+    let tools_json: Vec<serde_json::Value> = skill
+        .tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
+        .collect();
+
+    let mut messages = messages;
+    if let Some(entry) = messages.iter_mut().find(|(role, _)| role == "system") {
+        entry.1 = skill.system_prompt.clone();
+    } else {
+        messages.insert(0, ("system".into(), skill.system_prompt.clone()));
+    }
+
+    let mut conversation = ToolConversation::new();
+    for (role, content) in &messages {
+        conversation
+            .messages
+            .push(serde_json::json!({"role": role, "content": content}));
+    }
+
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let payload = build_llm_payload(&conversation.messages, Some(&tools_json));
+        let response = send_llm_request_raw(&payload, url, port, api_key).await?;
+        let choice = &response["choices"][0]["message"];
+
+        if let Some(tool_calls) = choice["tool_calls"].as_array() {
+            if !tool_calls.is_empty() {
+                conversation.push_assistant(choice);
+
+                for tc in tool_calls {
+                    let func = &tc["function"];
+                    let tool_name = func["name"].as_str().unwrap_or("unknown");
+                    let call_id = tc["id"].as_str().unwrap_or("").to_string(); // ← grab the ID
+                    let args_str = func["arguments"].as_str().unwrap_or("{}");
+                    let args: serde_json::Value =
+                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                    log::info!("[Tool] Calling {} with args: {}", tool_name, args_str);
+                    let result = skills::execute_tool(
+                        &skill
+                            .tools
+                            .iter()
+                            .find(|t| t.name == tool_name)
+                            .ok_or_else(|| format!("Unknown tool: {}", tool_name))?
+                            .clone(),
+                        &args,
+                        &skill.config_defaults,
+                    )
+                    .unwrap_or_else(|e| format!("Error: {}", e));
+                    log::info!("[Tool] Result ({} chars)", result.len());
+                    conversation.push_tool_result(&call_id, tool_name, &result);
+                    // ← pass ID
+                }
+
+                continue;
+            }
+        }
+
+        if let Some(content) = choice["content"].as_str() {
+            return Ok(content.to_string());
+        }
+        return Err("LLM returned empty response with no tool calls".into());
+    }
+
+    // Fallback: force final answer without tools
+    let payload = build_llm_payload(&conversation.messages, None);
+    let response = send_llm_request_raw(&payload, url, port, api_key).await?;
+    if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
+        return Ok(content.to_string());
+    }
+    Err("LLM did not produce a final answer after max tool rounds".into())
+}
+
+/// Plain llama.cpp chat (no tools) — original logic.
+async fn query_llamacpp_plain(
     messages: Vec<(String, String)>,
     url: &str,
     port: u16,
@@ -863,41 +1195,29 @@ async fn query_llamacpp_local(
     use tokio::net::TcpStream;
 
     let path = "/v1/chat/completions";
-
     let json_messages: Vec<serde_json::Value> = messages
         .iter()
-        .map(|(role, content)| {
-            serde_json::json!({
-                "role": role,
-                "content": content
-            })
-        })
+        .map(|(role, content)| serde_json::json!({"role": role, "content": content}))
         .collect();
-
     let payload = serde_json::json!({
         "messages": json_messages,
         "max_tokens": 4096,
         "temperature": 0.7,
         "stream": false
     });
-
     let body =
         serde_json::to_string(&payload).map_err(|e| format!("JSON Serialization failed: {}", e))?;
-
     let clean_host = url
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .trim_end_matches('/');
-
     let addr = format!("{}:{}", clean_host, port);
-
     let mut auth_header = String::new();
     if let Some(key) = api_key {
         if !key.trim().is_empty() {
             auth_header = format!("Authorization: Bearer {}\r\n", key.trim());
         }
     }
-
     let request = if auth_header.is_empty() {
         format!(
             "POST {} HTTP/1.0\r\n\
@@ -915,156 +1235,73 @@ async fn query_llamacpp_local(
              Host: {}\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
-             {}{}\
+             {}\
              \r\n{}",
             path,
             addr,
             body.len(),
             auth_header,
-            "",
             body
         )
     };
-
     let mut stream = TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("Failed to connect to LLM server at {}: {}", addr, e))?;
-
     stream
         .write_all(request.as_bytes())
         .await
         .map_err(|e| format!("Failed to write payload to LLM server: {}", e))?;
-
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
         .await
         .map_err(|e| format!("Failed to read stream contents: {}", e))?;
-
     let response_str = String::from_utf8_lossy(&response);
-
     let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
     if parts.len() < 2 {
         return Err("Malformed HTTP response received from LLM server".to_string());
     }
-
     let http_body = parts[1];
-
     #[derive(serde::Deserialize)]
     struct ChatMessage {
         content: String,
     }
-
     #[derive(serde::Deserialize)]
     struct ChatChoice {
         message: ChatMessage,
     }
-
     #[derive(serde::Deserialize)]
     struct ChatResponse {
         choices: Vec<ChatChoice>,
     }
-
     let parsed: ChatResponse = serde_json::from_str(http_body).map_err(|e| {
         format!(
             "Failed to parse response payload: {}. Response: {}",
             e, http_body
         )
     })?;
-
     if parsed.choices.is_empty() {
         return Err("No choices returned from LLM chat completions server".to_string());
     }
-
     Ok(parsed.choices[0].message.content.clone())
 }
 
-/// Communicates with a local Ollama server via its native `/api/chat` endpoint.
-async fn query_ollama_local(
-    messages: Vec<(String, String)>,
-    url: &str,
-    port: u16,
-    model: &str,
-) -> Result<String, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
-    let path = "/api/chat";
-
-    let json_messages: Vec<serde_json::Value> = messages
-        .iter()
-        .map(|(role, content)| serde_json::json!({ "role": role, "content": content }))
-        .collect();
-
-    let payload = serde_json::json!({
-        "model": model,
-        "messages": json_messages,
+/// Build the JSON payload for a llama.cpp request.
+fn build_llm_payload(
+    messages: &[serde_json::Value],
+    tools: Option<&[serde_json::Value]>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "messages": messages,
+        "max_tokens": 4096,
+        "temperature": 0.7,
         "stream": false
     });
-
-    let body =
-        serde_json::to_string(&payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
-
-    let clean_host = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/');
-
-    let addr = format!("{}:{}", clean_host, port);
-
-    let request = format!(
-        "POST {} HTTP/1.0\r\n\
-         Host: {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\r\n{}",
-        path,
-        addr,
-        body.len(),
-        body
-    );
-
-    let mut stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| format!("Failed to connect to Ollama at {}: {}", addr, e))?;
-
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| format!("Failed to write payload to Ollama: {}", e))?;
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| format!("Failed to read stream contents: {}", e))?;
-
-    let response_str = String::from_utf8_lossy(&response);
-
-    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
-    if parts.len() < 2 {
-        return Err("Malformed HTTP response from Ollama".to_string());
+    if let Some(tools_arr) = tools {
+        payload["tools"] = serde_json::json!(tools_arr);
+        payload["tool_choice"] = serde_json::json!("auto");
     }
-
-    let http_body = parts[1];
-
-    #[derive(serde::Deserialize)]
-    struct OllamaMessage {
-        content: String,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct OllamaChatResponse {
-        message: OllamaMessage,
-    }
-
-    let parsed: OllamaChatResponse = serde_json::from_str(http_body).map_err(|e| {
-        format!(
-            "Failed to parse Ollama response: {}. Body: {}",
-            e, http_body
-        )
-    })?;
-
-    Ok(parsed.message.content)
+    payload
 }
 
 impl Editor {
@@ -1236,4 +1473,70 @@ pub fn word_wrap(text: &str, max_width: usize) -> String {
     }
     out.pop(); // trailing newline
     out
+}
+
+/// Maximum tool-calling rounds before forcing a final answer
+const MAX_TOOL_ROUNDS: usize = 15;
+
+/// Send the raw request and return the parsed JSON response.
+async fn send_llm_request_raw(
+    payload: &serde_json::Value,
+    url: &str,
+    port: u16,
+    api_key: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let body =
+        serde_json::to_string(payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
+
+    let clean_host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let addr = format!("{}:{}", clean_host, port);
+
+    let mut auth_header = String::new();
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            auth_header = format!("Authorization: Bearer {}\r\n", key.trim());
+        }
+    }
+
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.0\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         {}\
+         \r\n{}",
+        addr,
+        body.len(),
+        auth_header,
+        body
+    );
+
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("Connect failed: {}", e))?;
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("Read failed: {}", e))?;
+
+    let response_str = String::from_utf8_lossy(&response);
+    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+    if parts.len() < 2 {
+        return Err("Malformed HTTP response".into());
+    }
+
+    serde_json::from_str(parts[1]).map_err(|e| format!("JSON parse error: {}", e))
 }

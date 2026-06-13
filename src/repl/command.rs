@@ -748,6 +748,52 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             let comment = s.strip_prefix("stash ").unwrap().trim();
             editor.handle_stash_command(comment);
         }
+        s if s.starts_with("skill ") => {
+            let arg = s.strip_prefix("skill ").unwrap().trim();
+            match arg {
+                "file" | "file-explorer" => {
+                    editor.llm.active_skill = Some(crate::ai::llama::skills::file_skill());
+                    editor.set_status_msg("Skill: file-explorer active", MessageKind::Success);
+                }
+                "off" | "none" => {
+                    editor.llm.active_skill = None;
+                    editor.set_status_msg("Skill deactivated", MessageKind::Info);
+                }
+                "list" | "ls" => {
+                    let available = crate::ai::llama::skills::load_all_skills();
+                    let names: Vec<String> = available
+                        .iter()
+                        .map(|s| format!("  {} — {}", s.name, s.description))
+                        .collect();
+                    editor.set_status_msg(
+                        &format!("Available skills:\n{}", names.join("\n")),
+                        MessageKind::Info,
+                    );
+                }
+                // Load by name from installed skills
+                name => {
+                    let all = crate::ai::llama::skills::load_all_skills();
+                    match all.into_iter().find(|s| s.name == name) {
+                        Some(skill) => {
+                            editor.llm.active_skill = Some(skill);
+                            editor.set_status_msg(
+                                &format!("Skill: {} active", name),
+                                MessageKind::Success,
+                            );
+                        }
+                        None => {
+                            editor.set_status_msg(
+                                &format!(
+                                    "Unknown skill '{}'. Use :skill list to see available",
+                                    name
+                                ),
+                                MessageKind::Error,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // ---- LLM Commands ----
         "llm" => {
             let selection_text = if had_visual_range {
@@ -899,7 +945,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
-        "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep",
+        "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep", "skill ",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();
