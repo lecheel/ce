@@ -27,6 +27,20 @@ impl Editor {
         }
 
         match key.code {
+            KeyCode::Char('l') if key.modifiers.is_empty() && !is_input_buf => {
+                // Jump to next "User:" input in LLM history
+                self.llm_jump_to_marker("User:", true);
+                true
+            }
+            KeyCode::Char('L') => {
+                // Jump to previous "User:" input in LLM history (Shift+L)
+                if !is_input_buf {
+                    self.llm_jump_to_marker("User:", false);
+                    true
+                } else {
+                    false
+                }
+            }
             KeyCode::Char('q') if key.modifiers.is_empty() => {
                 // 1. Close the current split pane if we are in a split layout
                 if self.windows.len() > 1 {
@@ -57,6 +71,40 @@ impl Editor {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Jump to the next (or previous) line starting with `pattern` in the
+    /// active LLM / CodeLlm buffer. Used by `l` / `L` navigation.
+    fn llm_jump_to_marker(&mut self, pattern: &str, forward: bool) {
+        let current_row = self.active_window().row;
+        let target_row = {
+            let buf = self.buf();
+            let total = buf.len_lines();
+            if forward {
+                (current_row + 1..total)
+                    .find(|&row| buf.line_text(row).trim_start().starts_with(pattern))
+            } else {
+                (0..current_row)
+                    .rev()
+                    .find(|&row| buf.line_text(row).trim_start().starts_with(pattern))
+            }
+        };
+        match target_row {
+            Some(row) => {
+                self.active_window_mut().row = row;
+                self.active_window_mut().col = 0;
+                self.active_window_mut().desired_col = 0;
+                self.center_viewport_on_cursor();
+            }
+            None => {
+                let msg = if forward {
+                    "No next user input"
+                } else {
+                    "No previous user input"
+                };
+                self.set_status_msg(msg, MessageKind::Info);
+            }
         }
     }
 
@@ -145,6 +193,15 @@ impl Editor {
             // Enter in Normal mode → send prompt
             KeyCode::Enter if key.modifiers.is_empty() => {
                 self.codellm_send();
+                true
+            }
+
+            KeyCode::Char('l') if key.modifiers.is_empty() => {
+                self.llm_jump_to_marker("## You", true);
+                true
+            }
+            KeyCode::Char('L') => {
+                self.llm_jump_to_marker("## You", false);
                 true
             }
 

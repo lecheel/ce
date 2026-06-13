@@ -169,7 +169,7 @@ impl Editor {
         let mut buf = Buffer::new(id, Some("*llm-chat*".to_string())).unwrap();
         buf.kind = BufferKind::Llm;
         buf.rope = ropey::Rope::from_str(&format!(
-            "=== LLM Chat History ({}) ===\n",
+            "=== LLM Chat History ({}) '>' for input in prompt  ===\n",
             self.config.llm_backend
         ));
 

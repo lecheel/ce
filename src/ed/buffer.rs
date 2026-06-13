@@ -134,6 +134,7 @@ impl Buffer {
     /// Way 1: Fallback/Full parse trigger
     pub fn parse_syntax(&mut self) {
         let lang = match self.kind {
+            BufferKind::Llm => "llm".to_string(),
             BufferKind::GitStatus => "gitstatus".to_string(),
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
@@ -145,7 +146,7 @@ impl Buffer {
                 }
             }
             BufferKind::CheckHealth => "checkhealth".to_string(),
-            BufferKind::CodeLlm => "markdown".to_string(),
+            BufferKind::CodeLlm => "llm".to_string(),
             BufferKind::GitDiffHead => detect_language(self.filename.as_deref()),
             _ => detect_language(self.filename.as_deref()),
         };
@@ -155,6 +156,7 @@ impl Buffer {
     /// Way 2: Incremental parse trigger
     pub fn parse_syntax_incremental(&mut self, edit: tree_sitter::InputEdit) {
         let lang = match self.kind {
+            BufferKind::Llm => "llm".to_string(),
             BufferKind::GitStatus => "gitstatus".to_string(),
             BufferKind::GitDiff => "diff".to_string(),
             BufferKind::GitLog => "gitlog".to_string(),
@@ -165,7 +167,7 @@ impl Buffer {
                     "rg".to_string()
                 }
             }
-            BufferKind::CodeLlm => "markdown".to_string(),
+            BufferKind::CodeLlm => "llm".to_string(),
             BufferKind::CheckHealth => "checkhealth".to_string(),
             _ => detect_language(self.filename.as_deref()),
         };

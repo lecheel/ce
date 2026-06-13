@@ -47,7 +47,7 @@ impl SyntaxState {
         let lang_id = language_id.unwrap_or("unknown");
         self.language_id = Some(lang_id.to_string());
         self.cache_valid = false;
-        if matches!(lang_id, "gitlog" | "gitstatus") {
+        if matches!(lang_id, "gitlog" | "gitstatus" | "llm") {
             self.tree = None;
             return;
         }
@@ -142,6 +142,11 @@ impl SyntaxState {
         let line_len = line_text.chars().count();
         let mut char_styles = vec![None; line_len];
         match self.language_id.as_deref() {
+            Some("llm") => {
+                char_styles = style_for_llm_line(line_text);
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
+            }
             Some("gitlog") => {
                 if let Some(style) = style_for_git_log_line(line_text) {
                     char_styles.fill(Some(style));
@@ -776,6 +781,86 @@ fn style_for_kind(kind: &str) -> Option<Style> {
         _ => None,
     }
 }
+
+fn style_for_llm_line(line: &str) -> Vec<Option<Style>> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut styles = vec![None; chars.len()];
+    let trimmed = line.trim_start();
+
+    // ── Llm buffer: "User:" lines (dark green) ──────────────────
+    if trimmed.starts_with("User:") {
+        let label_style = Style::default()
+            .fg(Color::Rgb(45, 150, 80))
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(Color::Rgb(45, 150, 80));
+        let prefix_end = line.find("User:").map(|i| i + 5).unwrap_or(0);
+        for i in 0..chars.len().min(prefix_end) {
+            styles[i] = Some(label_style);
+        }
+        for i in prefix_end..chars.len() {
+            styles[i] = Some(text_style);
+        }
+    // ── Llm buffer: "LLM:" lines (blue) ────────────────────────
+    } else if trimmed.starts_with("LLM:") {
+        let label_style = Style::default()
+            .fg(Color::Rgb(137, 180, 250))
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(Color::Rgb(137, 180, 250));
+        let prefix_end = line.find("LLM:").map(|i| i + 4).unwrap_or(0);
+        for i in 0..chars.len().min(prefix_end) {
+            styles[i] = Some(label_style);
+        }
+        for i in prefix_end..chars.len() {
+            styles[i] = Some(text_style);
+        }
+    // ── CodeLlm buffer: "## You" sections (dark green) ─────────
+    } else if trimmed.starts_with("## You") {
+        let label_style = Style::default()
+            .fg(Color::Rgb(45, 150, 80))
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(Color::Rgb(45, 150, 80));
+        let hash_end = line.find("## You").map(|i| i + 6).unwrap_or(0);
+        for i in 0..chars.len().min(hash_end) {
+            styles[i] = Some(label_style);
+        }
+        for i in hash_end..chars.len() {
+            styles[i] = Some(text_style);
+        }
+    // ── CodeLlm buffer: "## Assistant" sections (blue) ──────────
+    } else if trimmed.starts_with("## Assistant") {
+        let label_style = Style::default()
+            .fg(Color::Rgb(137, 180, 250))
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(Color::Rgb(137, 180, 250));
+        let hash_end = line.find("## Assistant").map(|i| i + 12).unwrap_or(0);
+        for i in 0..chars.len().min(hash_end) {
+            styles[i] = Some(label_style);
+        }
+        for i in hash_end..chars.len() {
+            styles[i] = Some(text_style);
+        }
+    // ── CodeLlm buffer: "# Code LLM Chat" header (mauve bold) ──
+    } else if trimmed.starts_with("# Code LLM Chat") {
+        let header_style = Style::default()
+            .fg(Color::Rgb(203, 166, 247))
+            .add_modifier(Modifier::BOLD);
+        styles.fill(Some(header_style));
+    // ── Llm buffer: "=== ... ===" header (mauve bold) ───────────
+    } else if trimmed.starts_with("===") {
+        let header_style = Style::default()
+            .fg(Color::Rgb(203, 166, 247))
+            .add_modifier(Modifier::BOLD);
+        styles.fill(Some(header_style));
+    // ── Error lines (red) ───────────────────────────────────────
+    } else if trimmed.starts_with("System Error:") || trimmed.starts_with("**Error:**") {
+        let error_style = Style::default().fg(Color::Rgb(243, 139, 168));
+        styles.fill(Some(error_style));
+    }
+    // Continuation / wrapped lines remain unstyled
+
+    styles
+}
+
 fn style_for_git_log_line(line: &str) -> Option<Style> {
     let trimmed = line.trim_start();
     if trimmed.starts_with("commit ") {

@@ -989,6 +989,11 @@ impl Editor {
             return;
         }
 
+        if self.pending_git_action != PendingGitAction::None {
+            self.handle_git_action_prompt_key(key);
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('Q') {
             self.save_all_window_positions();
             self.should_quit = true;
