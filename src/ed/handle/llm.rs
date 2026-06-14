@@ -196,6 +196,14 @@ impl Editor {
                 true
             }
 
+            KeyCode::Char('>') if key.modifiers.is_empty() => {
+                self.enter_command();
+                for ch in "> ".chars() {
+                    self.push_command(ch);
+                }
+                true
+            }
+
             KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.llm_jump_to_marker("## You", true);
                 true
@@ -310,5 +318,37 @@ impl Editor {
         self.spawn_llm_request_with_backend(messages, backend);
 
         self.set_status_msg("Translating…", MessageKind::Info);
+    }
+
+    pub fn codellm_send_prompt(&mut self, prompt: String) {
+        let codellm_id = self
+            .buffers
+            .iter()
+            .find(|b| b.kind == BufferKind::CodeLlm)
+            .map(|b| b.id);
+
+        let Some(id) = codellm_id else {
+            // No CodeLlm buffer — fall back to regular LLM send
+            self.llm_send_from_prompt(prompt);
+            return;
+        };
+
+        // Switch to the CodeLlm buffer if we aren't already there
+        if self.active_window().buffer_id() != id {
+            self.switch_window_to_buffer(id);
+        }
+
+        // Inject the prompt text into the buffer (appears under ## You)
+        if let Some(buf) = self.buf_mut_by_id(id) {
+            let current_len = buf.rope.len_chars();
+            buf.rope.insert(current_len, &format!("{}\n", prompt));
+            buf.mark_modified();
+            buf.parse_syntax();
+        }
+
+        // codellm_send() reads everything after llm_lock_line
+        // (including what we just inserted), appends ## Assistant,
+        // and sends — also picks up llm.active_context
+        self.codellm_send();
     }
 }

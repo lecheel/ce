@@ -42,6 +42,8 @@ default_string!(default_cursor_text_color, "Black");
 default_string!(default_cursor_line_highlight_color, "Rgb(40, 40, 55)");
 default_string!(default_mqtt_host, "localhost");
 default_string!(default_mqtt_topic, "/translate");
+default_string!(default_deepseek_url, "https://api.deepseek.com");
+default_string!(default_deepseek_model, "deepseek-v4-flash");
 
 default_string!(
     default_llm_system_prompt,
@@ -157,6 +159,7 @@ pub struct LlmActionConfig {
 pub enum LlmBackend {
     Llamacpp,
     Ollama,
+    Deepseek,
 }
 
 impl Default for LlmBackend {
@@ -170,6 +173,7 @@ impl std::fmt::Display for LlmBackend {
         match self {
             LlmBackend::Llamacpp => write!(f, "llamacpp"),
             LlmBackend::Ollama => write!(f, "ollama"),
+            LlmBackend::Deepseek => write!(f, "deepseek"),
         }
     }
 }
@@ -180,6 +184,7 @@ impl std::str::FromStr for LlmBackend {
         match s.to_lowercase().as_str() {
             "llamacpp" | "llama_cpp" | "llama.cpp" => Ok(LlmBackend::Llamacpp),
             "ollama" => Ok(LlmBackend::Ollama),
+            "deepseek" | "deep_seek" | "deep-seek" => Ok(LlmBackend::Deepseek),
             other => Err(format!(
                 "Unknown LLM backend '{}'. Expected 'llamacpp' or 'ollama'",
                 other
@@ -253,6 +258,12 @@ impl Default for KeybindingsConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default = "default_deepseek_url")]
+    pub deepseek_url: String,
+    #[serde(default)]
+    pub deepseek_api_key: Option<String>,
+    #[serde(default = "default_deepseek_model")]
+    pub deepseek_model: String,
     // ── External Service Keys ──────────────────────────────────────
     pub api_key: Option<String>,
     #[serde(default = "default_llm_url")]
@@ -456,6 +467,10 @@ impl Default for Config {
             api_url: "https://server.codeium.com".to_string(),
             portal_url: "https://codeium.com".to_string(),
             max_tokens: 256,
+
+            deepseek_url: default_deepseek_url(),
+            deepseek_api_key: None,
+            deepseek_model: default_deepseek_model(),
 
             editor_language: default_editor_language(),
             init_mode: default_init_mode(),
@@ -676,6 +691,53 @@ impl Config {
                 }
             }
             _ => ratatui::style::Color::Cyan,
+        }
+    }
+
+    /// Return a human-readable label for the active LLM backend, including
+    /// model name or endpoint details so the user can tell *which* model or
+    /// server they are talking to at a glance.
+    pub fn llm_backend_label(&self) -> String {
+        match self.llm_backend {
+            LlmBackend::Llamacpp => {
+                format!("llamacpp ({}:{})", self.llm_url, self.llm_port)
+            }
+            LlmBackend::Ollama => {
+                format!(
+                    "ollama {} ({}:{})",
+                    self.ollama_model, self.ollama_url, self.ollama_port
+                )
+            }
+            LlmBackend::Deepseek => {
+                let host = self
+                    .deepseek_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                format!("deepseek {} ({})", self.deepseek_model, host)
+            }
+        }
+    }
+
+    pub fn commit_backend_label(&self) -> String {
+        match self.commit_backend {
+            LlmBackend::Llamacpp => {
+                format!("llamacpp ({}:{})", self.llm_url, self.llm_port)
+            }
+            LlmBackend::Ollama => {
+                format!(
+                    "ollama {} ({}:{})",
+                    self.ollama_model, self.ollama_url, self.ollama_port
+                )
+            }
+            LlmBackend::Deepseek => {
+                let host = self
+                    .deepseek_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                format!("deepseek {} ({})", self.deepseek_model, host)
+            }
         }
     }
 }

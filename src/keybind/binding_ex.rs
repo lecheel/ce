@@ -1,14 +1,20 @@
 use crate::config::app_config::Config;
+use crate::ed::editing;
+use crate::ed::repeat::RepeatExt;
+use crate::ed::repeat::RepeatableAction;
 use crate::ed::Mode;
 use crate::event::KeyEvent;
 use crate::keybind::actions::Action;
 use crate::keybind::bindings::get_active_bindings;
+use crate::keybind::block_ops::delete_block;
+use crate::keybind::block_ops::yank_block;
 use crate::keybind::config_keys::{
     find_custom_action, find_custom_prefix_actions, normalize_config_key,
 };
 use crate::keybind::defaults::get_default_actions;
 use crate::keybind::display::action_display_name;
 use crate::keybind::resolve_single_key;
+use crate::Editor;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyModifiers;
 use std::collections::HashSet;
@@ -323,4 +329,164 @@ pub fn lookup_key_action(config: &Config, key_str: &str, mode: Mode, raw_key: Ke
         }
         ResolveResult::None => "No binding".to_string(),
     }
+}
+
+// Add this helper function:
+pub fn execute_visual_block_edit(editor: &mut Editor, is_append: bool) {
+    let anchor_opt = editor.active_window().visual_anchor;
+    if let Some(anchor) = anchor_opt {
+        let win_row = editor.active_window().row;
+        let win_col = editor.active_window().col;
+
+        let r1 = anchor.0.min(win_row);
+        let r2 = anchor.0.max(win_row);
+        let c1 = anchor.1.min(win_col);
+        let c2 = anchor.1.max(win_col);
+
+        let rows: Vec<usize> = (r1..=r2).collect();
+        let target_col = if is_append { c2 + 1 } else { c1 };
+
+        editor.visual_block_insert_state = Some(crate::ed::editor::VisualBlockInsertState {
+            rows,
+            col: target_col,
+        });
+
+        let (win, buf) = editor.active_window_and_buf_mut();
+        win.row = r1;
+
+        let line_len = buf.line_char_len(r1);
+        if target_col > line_len {
+            let pad = " ".repeat(target_col - line_len);
+            let off = buf.rope.line_to_char(r1) + line_len;
+            buf.rope.insert(off, &pad);
+            buf.mark_modified();
+        }
+        win.col = target_col;
+
+        win.visual_anchor = Some((r2, anchor.1));
+        editor.insert_buffer = Some(String::new());
+
+        let target_mode = if editor.prev_mode == Mode::Brief {
+            Mode::Brief
+        } else {
+            Mode::Insert
+        };
+        editor.change_mode(target_mode);
+    }
+}
+
+#[derive(PartialEq)]
+pub enum SelectionOp {
+    Yank,
+    Delete,
+    Change,
+}
+
+pub fn execute_selection_op(editor: &mut Editor, register: Option<char>, op: SelectionOp) {
+    let mode = editor.mode();
+
+    if mode == Mode::VisualBlock {
+        if let Some(text) = yank_block(editor) {
+            // Preserve exact original logic: Change uses clipboard directly, others use yank_to_register
+            if op == SelectionOp::Change {
+                editor.clipboard = Some(text);
+                editor.clipboard_is_block = true;
+            } else {
+                editor.yank_to_register(text, register);
+                editor.clipboard_is_block = true;
+            }
+        }
+        if op != SelectionOp::Yank {
+            delete_block(editor);
+        }
+    } else {
+        let range = {
+            let (win, buf) = editor.active_window_and_buf_mut();
+            win.get_selection_range(buf, mode)
+        };
+        if let Some((start_char, end_char)) = range {
+            let text = editor.buf().rope.slice(start_char..end_char).to_string();
+            editor.yank_to_register(text, register);
+            editor.clipboard_is_block = false;
+
+            if op != SelectionOp::Yank {
+                let (win, buf) = editor.active_window_and_buf_mut();
+                buf.rope.remove(start_char..end_char);
+                buf.mark_modified();
+                let new_line = buf.rope.char_to_line(start_char);
+                win.row = new_line;
+                win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
+                win.clamp_cursor(buf);
+                buf.parse_syntax();
+            }
+        }
+    }
+
+    let next_mode = if op == SelectionOp::Change {
+        if editor.prev_mode == Mode::Brief {
+            Mode::Brief
+        } else {
+            Mode::Insert
+        }
+    } else {
+        if editor.prev_mode == Mode::Brief {
+            Mode::Brief
+        } else {
+            Mode::Normal
+        }
+    };
+    editor.change_mode(next_mode);
+}
+
+pub fn execute_indent_outdent(editor: &mut Editor, count: usize, is_outdent: bool) {
+    let (r1, r2) = if let Some(anchor) = editor.active_window().visual_anchor {
+        let row = editor.active_window().row;
+        (anchor.0.min(row), anchor.0.max(row))
+    } else {
+        let row = editor.active_window().row;
+        let end = (row + count.saturating_sub(1)).min(editor.buf().len_lines().saturating_sub(1));
+        (row, end)
+    };
+    let line_count = r2.saturating_sub(r1) + 1;
+
+    {
+        let (win, buf) = editor.active_window_and_buf_mut();
+        for r in r1..=r2 {
+            let mut temp_win = win.clone();
+            temp_win.row = r;
+            if is_outdent {
+                editing::outdent_line(&mut temp_win, buf);
+            } else {
+                editing::indent_line(&mut temp_win, buf);
+            }
+        }
+        win.row = r1;
+        win.col = 0;
+        win.clamp_cursor(buf);
+        win.desired_col = win.col;
+    }
+
+    editor.buf_mut().parse_syntax();
+    editor.comp.on_edit();
+
+    if matches!(
+        editor.mode(),
+        Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+    ) {
+        let target_mode = if editor.prev_mode == Mode::Brief {
+            Mode::Brief
+        } else {
+            Mode::Normal
+        };
+        editor.change_mode(target_mode);
+        editor.clear_status_msg();
+    }
+
+    editor.record_action(
+        RepeatableAction::Indent {
+            count: line_count,
+            outdent: is_outdent,
+        },
+        1,
+    );
 }

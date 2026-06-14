@@ -11,7 +11,11 @@ use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::repeat::{DeleteDirection, RepeatExt, RepeatableAction};
 use crate::ed::{editing, movement};
 pub use crate::keybind::actions::Action;
-use crate::keybind::block_ops::{delete_block, paste_block, yank_block};
+use crate::keybind::binding_ex::execute_indent_outdent;
+use crate::keybind::binding_ex::execute_selection_op;
+use crate::keybind::binding_ex::execute_visual_block_edit;
+use crate::keybind::binding_ex::SelectionOp;
+use crate::keybind::block_ops::paste_block;
 use crate::keybind::config_keys::find_custom_action;
 use crate::keybind::defaults::get_default_actions;
 use crate::keybind::display::action_display_name;
@@ -19,7 +23,6 @@ use crate::keybind::safetynet::check_around_function_safetynet;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::sync::Mutex;
 use std::time::Instant;
 
 // ========== BRIEF MODE HOME/END TRACKERS ==========
@@ -31,28 +34,6 @@ struct BriefHomeTracker {
 struct BriefEndTracker {
     last_press: Option<Instant>,
     count: usize,
-}
-
-static BRIEF_HOME_TRACKER: Mutex<BriefHomeTracker> = Mutex::new(BriefHomeTracker {
-    last_press: None,
-    count: 0,
-});
-
-static BRIEF_END_TRACKER: Mutex<BriefEndTracker> = Mutex::new(BriefEndTracker {
-    last_press: None,
-    count: 0,
-});
-
-/// Reset both trackers when any key other than Home/End is pressed or timeout occurs.
-fn reset_brief_trackers() {
-    if let Ok(mut tracker) = BRIEF_HOME_TRACKER.lock() {
-        tracker.last_press = None;
-        tracker.count = 0;
-    }
-    if let Ok(mut tracker) = BRIEF_END_TRACKER.lock() {
-        tracker.last_press = None;
-        tracker.count = 0;
-    }
 }
 
 // ========== AROUND-FUNCTION SAFETYNET ==========
@@ -451,38 +432,6 @@ fn exits_insert_mode(action: &Action) -> bool {
 pub fn execute_action(editor: &mut Editor, action: Action) {
     log::debug!("execute_action: {:?}", action);
 
-    /*
-    // ── CodeLlm Dynamic Readonly Guard ──────────────────────────
-    // Prevent destructive Normal-mode edits (x, dd, cw, etc.) if
-    // the cursor is sitting in the locked history above the prompt.
-    if editor.buf().kind == BufferKind::CodeLlm {
-        let lock_line = editor.buf().llm_lock_line;
-        let cursor_row = editor.active_window().row;
-
-        if cursor_row < lock_line {
-            match action {
-                // Block all mutating actions
-                Action::DeleteChar
-                | Action::DeleteLine
-                | Action::DeleteWord
-                | Action::ChangeWord
-                | Action::ChangeLine
-                | Action::ReplaceChar(_)
-                | Action::SubstituteLine
-                | Action::JoinLines
-                | Action::Indent
-                | Action::Outdent
-                | Action::Paste => {
-                    editor.set_status_msg("Cannot edit history above prompt", MessageKind::Error);
-                    return; // Abort the action!
-                }
-                // Allow everything else (movements, yanks, searches)
-                _ => {}
-            }
-        }
-    }
-    */
-
     // Reset failure flag for this action
     editor.action_failed = false;
 
@@ -507,13 +456,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         } else {
             None
         };
-
-    if action != Action::RepeatLastChange {
-        reset_brief_trackers();
-    }
-    if action != Action::MoveLineStart && action != Action::MoveLineEnd {
-        reset_brief_trackers();
-    }
 
     // ── MASTER UNDO GUARD (FIXED) ─────────────────────────────────────
     let is_typing_mode = matches!(editor.mode(), Mode::Insert);
@@ -571,14 +513,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
     }
 
     // ─────────────────────────────────────────────────────────────────
-
-    // ── Brief trackers reset ───────────────────────────────────────────────
-    if action != Action::RepeatLastChange {
-        reset_brief_trackers();
-    }
-    if action != Action::MoveLineStart && action != Action::MoveLineEnd {
-        reset_brief_trackers();
-    }
 
     // ── Brief Mode: Cancel selection on non-navigation actions ────────────
     if editor.mode() == Mode::Brief
@@ -871,286 +805,13 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 );
             }
         }
-        Action::VisualBlockInsert => {
-            let anchor_opt = editor.active_window().visual_anchor;
-            if let Some(anchor) = anchor_opt {
-                let win_row = editor.active_window().row;
-                let win_col = editor.active_window().col;
-
-                let r1 = anchor.0.min(win_row);
-                let r2 = anchor.0.max(win_row);
-                let c1 = anchor.1.min(win_col);
-                let rows: Vec<usize> = (r1..=r2).collect();
-
-                editor.visual_block_insert_state =
-                    Some(crate::ed::editor::VisualBlockInsertState { rows, col: c1 });
-
-                let (win, buf) = editor.active_window_and_buf_mut();
-                win.row = r1;
-
-                // Pad active line if it is shorter than target column so alignment is correct
-                let line_len = buf.line_char_len(r1);
-                if c1 > line_len {
-                    let pad = " ".repeat(c1 - line_len);
-                    let off = buf.rope.line_to_char(r1) + line_len;
-                    buf.rope.insert(off, &pad);
-                    buf.mark_modified();
-                }
-                win.col = c1;
-
-                // Re-anchor to BOTTOM of block to keep highlights spanning correctly
-                win.visual_anchor = Some((r2, anchor.1));
-
-                editor.insert_buffer = Some(String::new());
-                let target_mode = if editor.prev_mode == Mode::Brief {
-                    Mode::Brief
-                } else {
-                    Mode::Insert
-                };
-                editor.change_mode(target_mode);
-            }
-        }
-
-        Action::VisualBlockAppend => {
-            let anchor_opt = editor.active_window().visual_anchor;
-            if let Some(anchor) = anchor_opt {
-                let win_row = editor.active_window().row;
-                let win_col = editor.active_window().col;
-
-                let r1 = anchor.0.min(win_row);
-                let r2 = anchor.0.max(win_row);
-                let c2 = anchor.1.max(win_col);
-
-                let rows: Vec<usize> = (r1..=r2).collect();
-                let insert_col = c2 + 1;
-
-                editor.visual_block_insert_state =
-                    Some(crate::ed::editor::VisualBlockInsertState {
-                        rows,
-                        col: insert_col,
-                    });
-
-                let (win, buf) = editor.active_window_and_buf_mut();
-                win.row = r1;
-
-                // Pad active line if it is shorter than target column so alignment is correct
-                let line_len = buf.line_char_len(r1);
-                if insert_col > line_len {
-                    let pad = " ".repeat(insert_col - line_len);
-                    let off = buf.rope.line_to_char(r1) + line_len;
-                    buf.rope.insert(off, &pad);
-                    buf.mark_modified();
-                }
-                win.col = insert_col;
-
-                // Re-anchor to BOTTOM of block to keep highlights spanning correctly
-                win.visual_anchor = Some((r2, anchor.1));
-
-                editor.insert_buffer = Some(String::new());
-                let target_mode = if editor.prev_mode == Mode::Brief {
-                    Mode::Brief
-                } else {
-                    Mode::Insert
-                };
-                editor.change_mode(target_mode);
-            }
-        }
-        Action::YankSelection => {
-            let mode = editor.mode();
-            if mode == Mode::VisualBlock {
-                if let Some(text) = yank_block(editor) {
-                    editor.yank_to_register(text, register);
-                    editor.clipboard_is_block = true;
-                    editor.set_status_msg("Yanked rectangular block", MessageKind::Info);
-                }
-            } else {
-                let range = {
-                    let (win, buf) = editor.active_window_and_buf_mut();
-                    win.get_selection_range(buf, mode)
-                };
-                if let Some((start_char, end_char)) = range {
-                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.yank_to_register(text, register);
-                    editor.clipboard_is_block = false;
-                    editor.set_status_msg("Yanked selection", MessageKind::Info);
-                }
-            }
-            let target_mode = if editor.prev_mode == Mode::Brief {
-                Mode::Brief
-            } else {
-                Mode::Normal
-            };
-            editor.change_mode(target_mode); // Anchor is automatically cleared
-        }
-        Action::DeleteSelection => {
-            let mode = editor.mode();
-            if mode == Mode::VisualBlock {
-                if let Some(text) = yank_block(editor) {
-                    editor.yank_to_register(text, register);
-                    editor.clipboard_is_block = true;
-                }
-                delete_block(editor);
-            } else {
-                let range = {
-                    let (win, buf) = editor.active_window_and_buf_mut();
-                    win.get_selection_range(buf, mode)
-                };
-                if let Some((start_char, end_char)) = range {
-                    let text = editor.buf().rope.slice(start_char..end_char).to_string();
-                    editor.yank_to_register(text, register);
-                    editor.clipboard_is_block = false;
-                    let (win, buf) = editor.active_window_and_buf_mut();
-                    buf.rope.remove(start_char..end_char);
-                    buf.mark_modified();
-                    let new_line = buf.rope.char_to_line(start_char);
-                    win.row = new_line;
-                    win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
-                    win.clamp_cursor(buf);
-                    buf.parse_syntax();
-                }
-            }
-            let target_mode = if editor.prev_mode == Mode::Brief {
-                Mode::Brief
-            } else {
-                Mode::Normal
-            };
-            editor.change_mode(target_mode); // Anchor is automatically cleared
-        }
-        Action::ChangeSelection => {
-            let mode = editor.mode();
-            if mode == Mode::VisualBlock {
-                if let Some(text) = yank_block(editor) {
-                    editor.clipboard = Some(text);
-                    editor.clipboard_is_block = true;
-                }
-                delete_block(editor);
-            } else {
-                let range = {
-                    let (win, buf) = editor.active_window_and_buf_mut();
-                    win.get_selection_range(buf, mode)
-                };
-                if let Some((start_char, end_char)) = range {
-                    let (win, buf) = editor.active_window_and_buf_mut();
-                    buf.rope.remove(start_char..end_char);
-                    buf.mark_modified();
-                    let new_line = buf.rope.char_to_line(start_char);
-                    win.row = new_line;
-                    win.col = start_char.saturating_sub(buf.rope.line_to_char(new_line));
-                    win.clamp_cursor(buf);
-                    buf.parse_syntax();
-                }
-            }
-            if editor.prev_mode == Mode::Brief {
-                editor.change_mode(Mode::Brief);
-            } else {
-                editor.change_mode(Mode::Insert);
-            }
-        }
-
-        Action::IndentSelection => {
-            let (r1, r2) = if let Some(anchor) = editor.active_window().visual_anchor {
-                let row = editor.active_window().row;
-                (anchor.0.min(row), anchor.0.max(row))
-            } else {
-                // No selection — Normal mode: use count as line count from cursor
-                let row = editor.active_window().row;
-                let end =
-                    (row + count.saturating_sub(1)).min(editor.buf().len_lines().saturating_sub(1));
-                (row, end)
-            };
-            let line_count = r2.saturating_sub(r1) + 1;
-
-            {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for r in r1..=r2 {
-                    let mut temp_win = win.clone();
-                    temp_win.row = r;
-                    editing::indent_line(&mut temp_win, buf);
-                }
-                // Move cursor to the FIRST line of the selection (Vim behavior).
-                win.row = r1;
-                win.col = 0;
-                win.clamp_cursor(buf);
-                win.desired_col = win.col;
-            }
-            editor.buf_mut().parse_syntax();
-            editor.comp.on_edit();
-
-            // If we were in visual mode, exit to the previous mode
-            if matches!(
-                editor.mode(),
-                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-            ) {
-                let target_mode = if editor.prev_mode == Mode::Brief {
-                    Mode::Brief
-                } else {
-                    Mode::Normal
-                };
-                editor.change_mode(target_mode);
-                editor.clear_status_msg();
-            }
-
-            // Self-record for dot-repeat
-            editor.record_action(
-                RepeatableAction::Indent {
-                    count: line_count,
-                    outdent: false,
-                },
-                1,
-            );
-        }
-
-        Action::OutdentSelection => {
-            let (r1, r2) = if let Some(anchor) = editor.active_window().visual_anchor {
-                let row = editor.active_window().row;
-                (anchor.0.min(row), anchor.0.max(row))
-            } else {
-                // No selection — Normal mode: use count as line count from cursor
-                let row = editor.active_window().row;
-                let end =
-                    (row + count.saturating_sub(1)).min(editor.buf().len_lines().saturating_sub(1));
-                (row, end)
-            };
-            let line_count = r2.saturating_sub(r1) + 1;
-
-            {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for r in r1..=r2 {
-                    let mut temp_win = win.clone();
-                    temp_win.row = r;
-                    editing::outdent_line(&mut temp_win, buf);
-                }
-                // Move cursor to the FIRST line of the selection (Vim behavior).
-                win.row = r1;
-                win.col = 0;
-                win.clamp_cursor(buf);
-                win.desired_col = win.col;
-            }
-            editor.buf_mut().parse_syntax();
-            editor.comp.on_edit();
-
-            if matches!(
-                editor.mode(),
-                Mode::Visual | Mode::VisualLine | Mode::VisualBlock
-            ) {
-                let target_mode = if editor.prev_mode == Mode::Brief {
-                    Mode::Brief
-                } else {
-                    Mode::Normal
-                };
-                editor.change_mode(target_mode);
-                editor.clear_status_msg();
-            }
-
-            // Self-record for dot-repeat
-            editor.record_action(
-                RepeatableAction::Indent {
-                    count: line_count,
-                    outdent: true,
-                },
-                1,
-            );
-        }
+        Action::VisualBlockInsert => execute_visual_block_edit(editor, false),
+        Action::VisualBlockAppend => execute_visual_block_edit(editor, true),
+        Action::YankSelection => execute_selection_op(editor, register, SelectionOp::Yank),
+        Action::DeleteSelection => execute_selection_op(editor, register, SelectionOp::Delete),
+        Action::ChangeSelection => execute_selection_op(editor, register, SelectionOp::Change),
+        Action::IndentSelection => execute_indent_outdent(editor, count, false),
+        Action::OutdentSelection => execute_indent_outdent(editor, count, true),
 
         // ---------------------------------------------------------------
         // Movement

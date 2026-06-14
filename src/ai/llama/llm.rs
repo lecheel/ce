@@ -13,7 +13,23 @@ use crate::ed::Buffer;
 use crate::ed::MessageKind;
 use crate::ed::Mode;
 use crate::Editor;
+
 // ── Supporting LLM structures ─────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ToolCallSummary {
+    pub tool_name: String,
+    pub args_brief: String,    // truncated args for display
+    pub result_chars: usize,   // length of result for summary
+    pub error: Option<String>, // if tool execution failed
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmResponse {
+    pub text: String,
+    pub tool_summaries: Vec<ToolCallSummary>,
+    pub total_rounds: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmPreset {
@@ -109,8 +125,8 @@ pub struct LlmState {
     pub buffer: LlmBuffer,
     pub todo_prefix: bool,
     pub buffer_id: Option<usize>,
-    pub response_tx: mpsc::UnboundedSender<Result<String, String>>,
-    pub response_rx: mpsc::UnboundedReceiver<Result<String, String>>,
+    pub response_tx: mpsc::UnboundedSender<Result<LlmResponse, String>>,
+    pub response_rx: mpsc::UnboundedReceiver<Result<LlmResponse, String>>,
     pub task_handle: Option<tokio::task::JoinHandle<()>>,
     pub active_preset: Option<LlmPreset>,
     pub active_context: Option<String>,
@@ -122,16 +138,15 @@ pub struct LlmState {
     pub system_prompt: Option<String>,
     pub active_skill: Option<Skill>,
     pub tool_conversation: Option<ToolConversation>,
-
     /// True when the current request is for a CodeLlm single-buffer chat.
-    /// The response handler checks this flag to decide whether to call
-    /// codellm_finalize_response() or update the 2-panel Llm buffers.
     pub is_codellm: bool,
+    pub llm_request_start: Option<std::time::Instant>,
+    pub prompt_active: bool,
 }
 
 impl LlmState {
     pub fn new() -> Self {
-        let (response_tx, response_rx) = mpsc::unbounded_channel::<Result<String, String>>();
+        let (response_tx, response_rx) = mpsc::unbounded_channel::<Result<LlmResponse, String>>();
 
         Self {
             buffer: LlmBuffer::new(),
@@ -151,8 +166,52 @@ impl LlmState {
             is_codellm: false,
             active_skill: None,
             tool_conversation: None,
+            llm_request_start: None,
+            prompt_active: false,
         }
     }
+}
+
+/// Truncate a JSON args string for display purposes.
+fn truncate_args(args_str: &str, max_len: usize) -> String {
+    if args_str.len() <= max_len {
+        args_str.to_string()
+    } else {
+        format!("{}…", &args_str[..max_len])
+    }
+}
+
+/// Build a human-readable summary block from tool call summaries.
+fn format_tool_summary_block(tool_summaries: &[ToolCallSummary], total_rounds: usize) -> String {
+    if tool_summaries.is_empty() {
+        return String::new();
+    }
+    let mut block = format!(
+        "\n📋 Tool calls ({} round(s), {} call(s)):\n",
+        total_rounds,
+        tool_summaries.len()
+    );
+    for (i, tc) in tool_summaries.iter().enumerate() {
+        if let Some(ref err) = tc.error {
+            block.push_str(&format!(
+                "  {}. ❌ {}({}) → ERROR: {}\n",
+                i + 1,
+                tc.tool_name,
+                tc.args_brief,
+                err
+            ));
+        } else {
+            block.push_str(&format!(
+                "  {}. ✅ {}({}) → {} chars\n",
+                i + 1,
+                tc.tool_name,
+                tc.args_brief,
+                tc.result_chars
+            ));
+        }
+    }
+    block.push('\n');
+    block
 }
 
 // ── Editor Struct Implementation ──────────────────────────────────
@@ -160,7 +219,6 @@ const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦'
 
 impl Editor {
     /// Ensures the background LLM conversation buffer exists and returns its ID.
-    /// Does not open windows, perform splits, or alter focus.
     pub fn ensure_llm_buffer_exists(&mut self) -> usize {
         if let Some(buf) = self.buffers.iter().find(|b| b.kind == BufferKind::Llm) {
             let id = buf.id;
@@ -168,7 +226,6 @@ impl Editor {
             return id;
         }
 
-        // Create the background history buffer if it doesn't exist
         let id = self.next_buf_id;
         self.next_buf_id += 1;
 
@@ -184,12 +241,10 @@ impl Editor {
         id
     }
 
-    /// Spawns the async LLM request, dispatching to the correct backend.
     pub fn spawn_llm_request(&mut self, messages: Vec<(String, String)>) {
         self.spawn_llm_request_with_backend(messages, self.config.llm_backend);
     }
 
-    /// Spawns the async LLM request with an explicit backend override.
     pub fn spawn_llm_request_with_backend(
         &mut self,
         messages: Vec<(String, String)>,
@@ -198,16 +253,14 @@ impl Editor {
         if let Some(handle) = self.llm.task_handle.take() {
             handle.abort();
         }
-
+        self.llm.llm_request_start = Some(std::time::Instant::now());
         let tx = self.llm.response_tx.clone();
-
         match backend {
             LlmBackend::Llamacpp => {
                 let url = self.config.llm_url.clone();
                 let port = self.config.llm_port;
                 let api_key = self.config.llm_api_key.clone();
                 let skill = self.llm.active_skill.clone();
-
                 let handle = tokio::spawn(async move {
                     log::debug!("[LLM] Using llama.cpp backend ({}:{})", url, port);
                     let res = query_llamacpp_local(
@@ -220,7 +273,6 @@ impl Editor {
                     .await;
                     let _ = tx.send(res);
                 });
-
                 self.llm.task_handle = Some(handle);
             }
             LlmBackend::Ollama => {
@@ -228,7 +280,6 @@ impl Editor {
                 let port = self.config.ollama_port;
                 let model = self.config.ollama_model.clone();
                 let skill = self.llm.active_skill.clone();
-
                 let handle = tokio::spawn(async move {
                     log::debug!(
                         "[LLM] Using Ollama backend ({}:{}, model={})",
@@ -240,21 +291,38 @@ impl Editor {
                         query_ollama_local(messages, &url, port, &model, skill.as_ref()).await;
                     let _ = tx.send(res);
                 });
-
+                self.llm.task_handle = Some(handle);
+            }
+            LlmBackend::Deepseek => {
+                let url = self.config.deepseek_url.clone();
+                let api_key = self.config.deepseek_api_key.clone();
+                let model = self.config.deepseek_model.clone();
+                let skill = self.llm.active_skill.clone();
+                let handle = tokio::spawn(async move {
+                    log::debug!("[LLM] Using DeepSeek backend ({} model={})", url, model);
+                    let res =
+                        query_deepseek(messages, &url, api_key.as_deref(), &model, skill.as_ref())
+                            .await;
+                    let _ = tx.send(res);
+                });
                 self.llm.task_handle = Some(handle);
             }
         }
     }
 
-    /// Animates the status infobar with a spinner while a general LLM request is processing.
     pub fn tick_llm_prompt(&mut self) {
         if self.llm.task_handle.is_some() && self.git_commit_buffer_id.is_none() {
             self.tick_spinner();
             let spinner = SPINNER_CHARS[self.spinner_frame() % SPINNER_CHARS.len()];
+            let elapsed = self
+                .llm
+                .llm_request_start
+                .map(|t| t.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
             self.set_status_msg(
                 &format!(
-                    "{} LLM is thinking ({})...",
-                    spinner, self.config.llm_backend
+                    "{} LLM is thinking ({}) {:.1}s...",
+                    spinner, self.config.llm_backend, elapsed
                 ),
                 crate::ed::mode::MessageKind::Info,
             );
@@ -265,9 +333,24 @@ impl Editor {
     pub fn poll_llm_responses(&mut self) {
         while let Ok(res) = self.llm.response_rx.try_recv() {
             let _ = self.llm.task_handle.take();
+            self.llm.llm_request_start = None;
 
             match res {
-                Ok(response_text) => {
+                Ok(llm_response) => {
+                    let LlmResponse {
+                        text: response_text,
+                        tool_summaries,
+                        total_rounds,
+                    } = llm_response;
+
+                    let tool_summary_block =
+                        format_tool_summary_block(&tool_summaries, total_rounds);
+                    let tool_info = if tool_summaries.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{} tool call(s)]", tool_summaries.len())
+                    };
+
                     // ── Infobar response (translation, etc.) ──────────────
                     if self.llm.infobar_response {
                         self.llm.infobar_response = false;
@@ -285,9 +368,9 @@ impl Editor {
                                     .nth(MAX_INFOBAR)
                                     .map(|(i, _)| i)
                                     .unwrap_or(trimmed.len());
-                                format!("{}…  [reg z]", &trimmed[..end])
+                                format!("{}…  [reg z]{}", &trimmed[..end], tool_info)
                             } else {
-                                format!("{}  [reg z]", trimmed)
+                                format!("{}  [reg z]{}", trimmed, tool_info)
                             };
                             self.set_status_msg(&display, MessageKind::Success);
                         }
@@ -307,7 +390,10 @@ impl Editor {
                             if let Some(buf) = self.buf_mut_by_id(id) {
                                 let wrapped = word_wrap(&response_text, 100);
                                 let current_len = buf.rope.len_chars();
-                                buf.rope.insert(current_len, &wrapped);
+                                buf.rope.insert(
+                                    current_len,
+                                    &format!("{}{}", tool_summary_block, wrapped),
+                                );
                                 buf.parse_syntax();
                             }
                             self.codellm_finalize_response();
@@ -326,8 +412,10 @@ impl Editor {
                         let history_id = self.ensure_llm_buffer_exists();
                         if let Some(buf) = self.buf_mut_by_id(history_id) {
                             let current_len = buf.rope.len_chars();
-                            buf.rope
-                                .insert(current_len, &format!("\nLLM: {}\n", wrapped));
+                            buf.rope.insert(
+                                current_len,
+                                &format!("\nLLM: {}{}\n", tool_summary_block, wrapped),
+                            );
                             buf.mark_modified();
                             buf.parse_syntax();
                         }
@@ -350,7 +438,10 @@ impl Editor {
                             win.desired_col = 0;
                         }
 
-                        self.set_status_msg("Response is ready", MessageKind::Success);
+                        self.set_status_msg(
+                            &format!("Response is ready{}", tool_info),
+                            MessageKind::Success,
+                        );
                     }
                 }
                 Err(err) => {
@@ -398,7 +489,6 @@ impl Editor {
         }
     }
 
-    /// Horizontally splits the window and establishes an interactive LLM chat session.
     pub fn open_llm_chat_session(&mut self) {
         let history_id = self.ensure_llm_buffer_exists();
 
@@ -421,22 +511,18 @@ impl Editor {
 
         self.split_horizontal();
 
-        // Bottom (active after split) → input
         self.active_window_mut().set_buffer_id(input_id);
 
-        // Top → history
         self.focus_prev_window();
         self.active_window_mut().set_buffer_id(history_id);
 
         let prev_idx = self.active_window_idx;
         self.clamp_window_row_to_buf(prev_idx);
 
-        // Back to input pane
         self.focus_next_window();
 
         debug_assert_eq!(self.active_window().buffer_id(), input_id);
 
-        // ── Pre-populate input buffer with selection context ──────
         if let Some(context) = self.llm.active_context.clone() {
             let template = format!("\n{}\n\n", context);
             if let Some(buf) = self.buf_mut_by_id(input_id) {
@@ -479,7 +565,6 @@ impl Editor {
         );
     }
 
-    /// Send the current content of the LlmInput buffer as a chat message.
     pub fn llm_send_input_buffer(&mut self) -> CommandResult {
         let input_bid = self.active_window().buffer_id();
         let input = self.buf().rope.to_string();
@@ -489,14 +574,12 @@ impl Editor {
             return CommandResult::Handled;
         }
 
-        // Clear the input buffer
         if let Some(buf) = self.buf_mut_by_id(input_bid) {
             buf.rope = ropey::Rope::from_str("");
             buf.mark_modified();
             buf.parse_syntax();
         }
 
-        // Reset cursor
         {
             let win = self.active_window_mut();
             win.row = 0;
@@ -519,7 +602,6 @@ impl Editor {
         CommandResult::Handled
     }
 
-    /// Close the LLM buffer view by switching to a normal buffer.
     pub fn llm_close_buffer(&mut self) {
         if !matches!(self.buf().kind, BufferKind::Llm | BufferKind::LlmInput) {
             return;
@@ -542,9 +624,7 @@ impl Editor {
         }
     }
 
-    /// Handles sending data from the general interactive prompt
     pub fn llm_send_from_prompt(&mut self, input: String) -> CommandResult {
-        // ── Append to history buffer (unchanged) ──
         let history_id = self.ensure_llm_buffer_exists();
         let mut total_lines = 0;
         if let Some(buf) = self.buf_mut_by_id(history_id) {
@@ -580,7 +660,6 @@ impl Editor {
             .clone()
             .unwrap_or_else(|| self.config.llm_system_prompt.clone());
 
-        // ── Include active_context (visual selection) if set ──────
         let user_msg = if let Some(context) = &self.llm.active_context {
             format!(
                 "Selected code for reference:\n```\n{}\n```\n\n{}",
@@ -600,6 +679,7 @@ impl Editor {
     }
 
     pub fn process_llm_prompt_key(&mut self, key: KeyEvent) -> CommandResult {
+        self.llm.prompt_active = true;
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.cmd_waiting_register = true;
             return CommandResult::Handled;
@@ -644,7 +724,7 @@ impl Editor {
                 self.llm.prompt.push_history(input.clone());
                 self.clear_status_msg();
                 self.mode = Mode::Normal;
-
+                self.llm.prompt_active = false;
                 self.llm_send_from_prompt(input)
             }
             PromptAction::Cancel => {
@@ -653,13 +733,13 @@ impl Editor {
                 self.llm.active_context = None;
                 self.llm.todo_prefix = false;
                 self.mode = Mode::Normal;
+                self.llm.prompt_active = false;
                 CommandResult::Handled
             }
             PromptAction::None => CommandResult::Handled,
         }
     }
 
-    /// True when the active window is viewing the LLM chat input buffer.
     pub fn is_in_llm_input(&self) -> bool {
         let bid = self.active_window().buffer_id();
         self.buffers
@@ -667,7 +747,6 @@ impl Editor {
             .any(|b| b.id == bid && b.kind == BufferKind::LlmInput)
     }
 
-    /// True when the active window is viewing the LLM chat history buffer.
     pub fn is_in_llm_history(&self) -> bool {
         let bid = self.active_window().buffer_id();
         self.buffers
@@ -679,13 +758,11 @@ impl Editor {
     // CodeLlm (single-buffer chat) methods
     // ═══════════════════════════════════════════════════════════════
 
-    /// Send the current prompt in a CodeLlm buffer.
     pub fn codellm_send(&mut self) {
         if self.buf().kind != BufferKind::CodeLlm {
             return;
         }
 
-        // Don't allow sending while a response is streaming
         if self.llm.task_handle.is_some() {
             self.set_status_msg("LLM is still responding…", MessageKind::Info);
             return;
@@ -693,7 +770,6 @@ impl Editor {
 
         let lock_line = self.buf().llm_lock_line;
 
-        // ── Extract prompt text ───────────────────────────────
         let mut prompt = String::new();
         let total = self.buf().len_lines();
         for i in lock_line..total {
@@ -709,7 +785,6 @@ impl Editor {
             return;
         }
 
-        // ── Lock the prompt area (it's now history) ──────────
         {
             let buf = self.buf_mut();
             buf.llm_lock_line = buf.len_lines();
@@ -717,7 +792,6 @@ impl Editor {
             buf.parse_syntax();
         }
 
-        // ── Move cursor to the end (watching the response) ──
         {
             let total = self.buf().len_lines().saturating_sub(1);
             let win = self.active_window_mut();
@@ -726,10 +800,8 @@ impl Editor {
             win.desired_col = 0;
         }
 
-        // ── Switch to Normal mode while waiting ──────────────
         self.enter_normal();
 
-        // ── Send to LLM ──────────────────────────────────────
         let full_prompt = if let Some(ctx) = &self.llm.active_context {
             format!("Selected code:\n```\n{}\n```\n\n{}", ctx, prompt)
         } else {
@@ -739,7 +811,6 @@ impl Editor {
         self.llm_send_codellm(full_prompt);
     }
 
-    /// Wrapper that wires into the existing LLM backend for CodeLlm buffers.
     fn llm_send_codellm(&mut self, prompt: String) {
         self.llm.is_codellm = true;
 
@@ -763,7 +834,6 @@ impl Editor {
         self.spawn_llm_request_with_backend(messages, backend);
     }
 
-    /// Finalize a CodeLlm response: lock it and prepare the next prompt area.
     pub fn codellm_finalize_response(&mut self) {
         let codellm_id = self
             .buffers
@@ -772,12 +842,11 @@ impl Editor {
             .map(|b| b.id);
 
         if let Some(id) = codellm_id {
-            // Ensure we are viewing this buffer
             if self.active_window().buffer_id() != id {
                 self.switch_window_to_buffer(id);
             }
 
-            let (last_line, total_lines) = {
+            let (last_line, _total_lines) = {
                 let buf = self.buf_mut_by_id(id).unwrap();
                 let len = buf.rope.len_chars();
                 if len == 0 || buf.rope.char(len - 1) != '\n' {
@@ -795,7 +864,6 @@ impl Editor {
             win.col = 0;
             win.desired_col = 0;
 
-            // Auto-scroll to follow the response if needed
             let h = win.position.height;
             win.scroll_line = last_line.saturating_sub(h.saturating_sub(1));
 
@@ -812,10 +880,7 @@ impl Editor {
         }
     }
 
-    /// Extracts the function around the cursor and opens a CodeLlm
-    /// session to explain it, including the function signature/head.
     pub fn llm_explain_function(&mut self) {
-        // 1. Find the function span using Tree-sitter
         let span_info = self.function_around_span_info();
 
         let Some(info) = span_info else {
@@ -823,7 +888,6 @@ impl Editor {
             return;
         };
 
-        // 2. Extract the text from start_row to end_row (inclusive)
         let func_text = self.extract_line_range_text(info.start_row, info.end_row);
 
         let Some(func_text) = func_text else {
@@ -836,10 +900,8 @@ impl Editor {
             return;
         }
 
-        // 3. Open the CodeLlm session
         self.open_codellm_chat_session();
 
-        // 4. Inject the function text and a prompt directly into the buffer
         let prompt = format!(
             "Explain this function:\n```\n{}\n```\n\nPlease explain what this function does, its parameters, and its return value.",
             func_text.trim_end()
@@ -847,12 +909,10 @@ impl Editor {
 
         let buf = self.buf_mut();
         if buf.kind == BufferKind::CodeLlm {
-            // Append to the "## You" section
             let current_len = buf.rope.len_chars();
             buf.rope.insert(current_len, &prompt);
             buf.parse_syntax();
 
-            // Move cursor to the very end of the injected prompt
             let last_line = buf.len_lines().saturating_sub(1);
             let last_col = buf.line_char_len(last_line);
 
@@ -862,9 +922,225 @@ impl Editor {
             win.desired_col = last_col;
         }
 
-        // 5. Auto-send the prompt
         self.codellm_send();
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Async query functions
+// ═══════════════════════════════════════════════════════════════════
+
+const MAX_TOOL_ROUNDS: usize = 15;
+
+/// Query DeepSeek's OpenAI-compatible chat completions API.
+/// Uses `reqwest` because DeepSeek requires HTTPS (api.deepseek.com).
+async fn query_deepseek(
+    messages: Vec<(String, String)>,
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+    skill: Option<&Skill>,
+) -> Result<LlmResponse, String> {
+    let Some(skill) = skill else {
+        return query_deepseek_plain(messages, base_url, api_key, model).await;
+    };
+
+    let tools_json: Vec<serde_json::Value> = skill
+        .tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
+        .collect();
+
+    let mut messages = messages;
+    if let Some(entry) = messages.iter_mut().find(|(role, _)| role == "system") {
+        entry.1 = skill.system_prompt.clone();
+    } else {
+        messages.insert(0, ("system".into(), skill.system_prompt.clone()));
+    }
+
+    let mut conversation = ToolConversation::new();
+    for (role, content) in &messages {
+        conversation
+            .messages
+            .push(serde_json::json!({"role": role, "content": content}));
+    }
+
+    let mut tool_summaries: Vec<ToolCallSummary> = Vec::new();
+
+    for round in 0..MAX_TOOL_ROUNDS {
+        let payload = build_deepseek_payload(&conversation.messages, model, Some(&tools_json));
+        let response = send_deepseek_request(&payload, base_url, api_key).await?;
+        let choice = &response["choices"][0]["message"];
+
+        if let Some(tool_calls) = choice["tool_calls"].as_array() {
+            if !tool_calls.is_empty() {
+                conversation.push_assistant(choice);
+                for tc in tool_calls {
+                    let func = &tc["function"];
+                    let tool_name = func["name"].as_str().unwrap_or("unknown").to_string();
+                    let call_id = tc["id"].as_str().unwrap_or("").to_string();
+                    let args_str = func["arguments"].as_str().unwrap_or("{}").to_string();
+                    let args: serde_json::Value =
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
+                    log::info!("[Tool] Calling {} with args: {}", tool_name, args_str);
+                    let result = match skills::execute_tool(
+                        &skill
+                            .tools
+                            .iter()
+                            .find(|t| t.name == tool_name)
+                            .ok_or_else(|| format!("Unknown tool: {}", tool_name))?
+                            .clone(),
+                        &args,
+                        &skill.config_defaults,
+                    ) {
+                        Ok(r) => {
+                            tool_summaries.push(ToolCallSummary {
+                                tool_name: tool_name.clone(),
+                                args_brief: truncate_args(&args_str, 80),
+                                result_chars: r.len(),
+                                error: None,
+                            });
+                            log::info!("[Tool] Result ({} chars)", r.len());
+                            r
+                        }
+                        Err(e) => {
+                            tool_summaries.push(ToolCallSummary {
+                                tool_name: tool_name.clone(),
+                                args_brief: truncate_args(&args_str, 80),
+                                result_chars: 0,
+                                error: Some(e.clone()),
+                            });
+                            log::info!("[Tool] Error: {}", e);
+                            format!("Error: {}", e)
+                        }
+                    };
+                    conversation.push_tool_result(&call_id, &tool_name, &result);
+                }
+                continue;
+            }
+        }
+
+        if let Some(content) = choice["content"].as_str() {
+            return Ok(LlmResponse {
+                text: content.to_string(),
+                tool_summaries,
+                total_rounds: round + 1,
+            });
+        }
+        return Err("DeepSeek returned empty response with no tool calls".into());
+    }
+
+    // Exhausted tool rounds — ask once more without tools
+    let payload = build_deepseek_payload(&conversation.messages, model, None);
+    let response = send_deepseek_request(&payload, base_url, api_key).await?;
+    if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
+        return Ok(LlmResponse {
+            text: content.to_string(),
+            tool_summaries,
+            total_rounds: MAX_TOOL_ROUNDS,
+        });
+    }
+    Err("DeepSeek did not produce a final answer after max tool rounds".into())
+}
+
+/// Plain (no tool-calling) DeepSeek query.
+async fn query_deepseek_plain(
+    messages: Vec<(String, String)>,
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+) -> Result<LlmResponse, String> {
+    let json_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(role, content)| serde_json::json!({"role": role, "content": content}))
+        .collect();
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": json_messages,
+        "max_tokens": 4096,
+        "temperature": 0.7,
+        "stream": false
+    });
+
+    let response = send_deepseek_request(&payload, base_url, api_key).await?;
+
+    let content = response["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| {
+            let body = serde_json::to_string(&response).unwrap_or_default();
+            format!("No content in DeepSeek response. Body: {}", body)
+        })?;
+
+    Ok(LlmResponse {
+        text: content.to_string(),
+        tool_summaries: Vec::new(),
+        total_rounds: 1,
+    })
+}
+
+/// Build a DeepSeek-compatible payload (OpenAI chat completions format with model).
+fn build_deepseek_payload(
+    messages: &[serde_json::Value],
+    model: &str,
+    tools: Option<&[serde_json::Value]>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": 4096,
+        "temperature": 0.7,
+        "stream": false
+    });
+    if let Some(tools_arr) = tools {
+        payload["tools"] = serde_json::json!(tools_arr);
+        payload["tool_choice"] = serde_json::json!("auto");
+    }
+    payload
+}
+
+/// Send a request to DeepSeek's API via `reqwest` (supports HTTPS + TLS).
+async fn send_deepseek_request(
+    payload: &serde_json::Value,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+    let mut req = client.post(&url).header("Content-Type", "application/json");
+
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", key.trim()));
+        }
+    }
+
+    let response = req
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| format!("DeepSeek request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("DeepSeek API error ({}): {}", status, body));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse DeepSeek response: {}", e))
 }
 
 /// Ollama with optional tool-calling support.
@@ -874,7 +1150,7 @@ async fn query_ollama_local(
     port: u16,
     model: &str,
     skill: Option<&Skill>,
-) -> Result<String, String> {
+) -> Result<LlmResponse, String> {
     let Some(skill) = skill else {
         return query_ollama_plain(messages, url, port, model).await;
     };
@@ -908,7 +1184,9 @@ async fn query_ollama_local(
             .push(serde_json::json!({"role": role, "content": content}));
     }
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    let mut tool_summaries: Vec<ToolCallSummary> = Vec::new();
+
+    for round in 0..MAX_TOOL_ROUNDS {
         let payload = build_ollama_payload(&conversation.messages, model, Some(&tools_json));
         let response = send_ollama_request_raw(&payload, url, port).await?;
         let choice = &response["message"];
@@ -918,13 +1196,15 @@ async fn query_ollama_local(
                 conversation.push_assistant(choice);
                 for tc in tool_calls {
                     let func = &tc["function"];
-                    let tool_name = func["name"].as_str().unwrap_or("unknown");
-                    let call_id = tc["id"].as_str().unwrap_or("").to_string(); // ← grab the ID
-                    let args_str = func["arguments"].as_str().unwrap_or("{}");
+                    let tool_name = func["name"].as_str().unwrap_or("unknown").to_string();
+                    let call_id = tc["id"].as_str().unwrap_or("").to_string();
+                    let args_str = func["arguments"].as_str().unwrap_or("{}").to_string();
                     let args: serde_json::Value =
-                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
+
                     log::info!("[Tool] Calling {} with args: {}", tool_name, args_str);
-                    let result = skills::execute_tool(
+
+                    let result = match skills::execute_tool(
                         &skill
                             .tools
                             .iter()
@@ -933,37 +1213,66 @@ async fn query_ollama_local(
                             .clone(),
                         &args,
                         &skill.config_defaults,
-                    )
-                    .unwrap_or_else(|e| format!("Error: {}", e));
-                    log::info!("[Tool] Result ({} chars)", result.len());
-                    conversation.push_tool_result(&call_id, tool_name, &result);
-                    // ← pass ID
+                    ) {
+                        Ok(r) => {
+                            tool_summaries.push(ToolCallSummary {
+                                tool_name: tool_name.clone(),
+                                args_brief: truncate_args(&args_str, 80),
+                                result_chars: r.len(),
+                                error: None,
+                            });
+                            log::info!("[Tool] Result ({} chars)", r.len());
+                            r
+                        }
+                        Err(e) => {
+                            tool_summaries.push(ToolCallSummary {
+                                tool_name: tool_name.clone(),
+                                args_brief: truncate_args(&args_str, 80),
+                                result_chars: 0,
+                                error: Some(e.clone()),
+                            });
+                            log::info!("[Tool] Error: {}", e);
+                            format!("Error: {}", e)
+                        }
+                    };
+
+                    conversation.push_tool_result(&call_id, &tool_name, &result);
                 }
                 continue;
             }
         }
 
         if let Some(content) = choice["content"].as_str() {
-            return Ok(content.to_string());
+            return Ok(LlmResponse {
+                text: content.to_string(),
+                tool_summaries,
+                total_rounds: round + 1,
+            });
         }
+
         return Err("Ollama returned empty response with no tool calls".into());
     }
 
+    // Fallback after max rounds: force a final answer without tools
     let payload = build_ollama_payload(&conversation.messages, model, None);
     let response = send_ollama_request_raw(&payload, url, port).await?;
     if let Some(content) = response["message"]["content"].as_str() {
-        return Ok(content.to_string());
+        return Ok(LlmResponse {
+            text: content.to_string(),
+            tool_summaries,
+            total_rounds: MAX_TOOL_ROUNDS,
+        });
     }
     Err("Ollama did not produce a final answer after max tool rounds".into())
 }
 
-/// Plain Ollama chat (no tools) — original logic.
+/// Plain Ollama chat (no tools).
 async fn query_ollama_plain(
     messages: Vec<(String, String)>,
     url: &str,
     port: u16,
     model: &str,
-) -> Result<String, String> {
+) -> Result<LlmResponse, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -1026,7 +1335,11 @@ async fn query_ollama_plain(
             e, http_body
         )
     })?;
-    Ok(parsed.message.content)
+    Ok(LlmResponse {
+        text: parsed.message.content,
+        tool_summaries: Vec::new(),
+        total_rounds: 1,
+    })
 }
 
 fn build_ollama_payload(
@@ -1089,16 +1402,14 @@ async fn send_ollama_request_raw(
     serde_json::from_str(parts[1]).map_err(|e| format!("JSON parse error: {}", e))
 }
 
-/// Communicates with a local Ollama server via its native `/api/chat` endpoint.
 /// llama.cpp with optional tool-calling support.
-/// When `skill` is None, falls back to plain chat.
 async fn query_llamacpp_local(
     messages: Vec<(String, String)>,
     url: &str,
     port: u16,
     api_key: Option<&str>,
     skill: Option<&Skill>,
-) -> Result<String, String> {
+) -> Result<LlmResponse, String> {
     let Some(skill) = skill else {
         return query_llamacpp_plain(messages, url, port, api_key).await;
     };
@@ -1132,7 +1443,9 @@ async fn query_llamacpp_local(
             .push(serde_json::json!({"role": role, "content": content}));
     }
 
-    for _round in 0..MAX_TOOL_ROUNDS {
+    let mut tool_summaries: Vec<ToolCallSummary> = Vec::new();
+
+    for round in 0..MAX_TOOL_ROUNDS {
         let payload = build_llm_payload(&conversation.messages, Some(&tools_json));
         let response = send_llm_request_raw(&payload, url, port, api_key).await?;
         let choice = &response["choices"][0]["message"];
@@ -1140,16 +1453,17 @@ async fn query_llamacpp_local(
         if let Some(tool_calls) = choice["tool_calls"].as_array() {
             if !tool_calls.is_empty() {
                 conversation.push_assistant(choice);
-
                 for tc in tool_calls {
                     let func = &tc["function"];
-                    let tool_name = func["name"].as_str().unwrap_or("unknown");
-                    let call_id = tc["id"].as_str().unwrap_or("").to_string(); // ← grab the ID
-                    let args_str = func["arguments"].as_str().unwrap_or("{}");
+                    let tool_name = func["name"].as_str().unwrap_or("unknown").to_string();
+                    let call_id = tc["id"].as_str().unwrap_or("").to_string();
+                    let args_str = func["arguments"].as_str().unwrap_or("{}").to_string();
                     let args: serde_json::Value =
-                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                        serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
+
                     log::info!("[Tool] Calling {} with args: {}", tool_name, args_str);
-                    let result = skills::execute_tool(
+
+                    let result = match skills::execute_tool(
                         &skill
                             .tools
                             .iter()
@@ -1158,39 +1472,66 @@ async fn query_llamacpp_local(
                             .clone(),
                         &args,
                         &skill.config_defaults,
-                    )
-                    .unwrap_or_else(|e| format!("Error: {}", e));
-                    log::info!("[Tool] Result ({} chars)", result.len());
-                    conversation.push_tool_result(&call_id, tool_name, &result);
-                    // ← pass ID
-                }
+                    ) {
+                        Ok(r) => {
+                            tool_summaries.push(ToolCallSummary {
+                                tool_name: tool_name.clone(),
+                                args_brief: truncate_args(&args_str, 80),
+                                result_chars: r.len(),
+                                error: None,
+                            });
+                            log::info!("[Tool] Result ({} chars)", r.len());
+                            r
+                        }
+                        Err(e) => {
+                            tool_summaries.push(ToolCallSummary {
+                                tool_name: tool_name.clone(),
+                                args_brief: truncate_args(&args_str, 80),
+                                result_chars: 0,
+                                error: Some(e.clone()),
+                            });
+                            log::info!("[Tool] Error: {}", e);
+                            format!("Error: {}", e)
+                        }
+                    };
 
+                    conversation.push_tool_result(&call_id, &tool_name, &result);
+                }
                 continue;
             }
         }
 
         if let Some(content) = choice["content"].as_str() {
-            return Ok(content.to_string());
+            return Ok(LlmResponse {
+                text: content.to_string(),
+                tool_summaries,
+                total_rounds: round + 1,
+            });
         }
+
         return Err("LLM returned empty response with no tool calls".into());
     }
 
-    // Fallback: force final answer without tools
+    // Fallback after max rounds: force a final answer without tools
     let payload = build_llm_payload(&conversation.messages, None);
     let response = send_llm_request_raw(&payload, url, port, api_key).await?;
     if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
-        return Ok(content.to_string());
+        return Ok(LlmResponse {
+            text: content.to_string(),
+            tool_summaries,
+            total_rounds: MAX_TOOL_ROUNDS,
+        });
     }
     Err("LLM did not produce a final answer after max tool rounds".into())
 }
 
-/// Plain llama.cpp chat (no tools) — original logic.
+/// Plain llama.cpp chat (no tools).
 async fn query_llamacpp_plain(
     messages: Vec<(String, String)>,
     url: &str,
     port: u16,
     api_key: Option<&str>,
-) -> Result<String, String> {
+) -> Result<LlmResponse, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -1283,10 +1624,13 @@ async fn query_llamacpp_plain(
     if parsed.choices.is_empty() {
         return Err("No choices returned from LLM chat completions server".to_string());
     }
-    Ok(parsed.choices[0].message.content.clone())
+    Ok(LlmResponse {
+        text: parsed.choices[0].message.content.clone(),
+        tool_summaries: Vec::new(),
+        total_rounds: 1,
+    })
 }
 
-/// Build the JSON payload for a llama.cpp request.
 fn build_llm_payload(
     messages: &[serde_json::Value],
     tools: Option<&[serde_json::Value]>,
@@ -1304,8 +1648,65 @@ fn build_llm_payload(
     payload
 }
 
+async fn send_llm_request_raw(
+    payload: &serde_json::Value,
+    url: &str,
+    port: u16,
+    api_key: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let body =
+        serde_json::to_string(payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
+    let clean_host = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let addr = format!("{}:{}", clean_host, port);
+    let mut auth_header = String::new();
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            auth_header = format!("Authorization: Bearer {}\r\n", key.trim());
+        }
+    }
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.0\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         {}\
+         \r\n{}",
+        addr,
+        body.len(),
+        auth_header,
+        body
+    );
+    let mut stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("Connect failed: {}", e))?;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .map_err(|e| format!("Read failed: {}", e))?;
+    let response_str = String::from_utf8_lossy(&response);
+    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+    if parts.len() < 2 {
+        return Err("Malformed HTTP response".into());
+    }
+    serde_json::from_str(parts[1]).map_err(|e| format!("JSON parse error: {}", e))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LLM action helpers
+// ═══════════════════════════════════════════════════════════════════
+
 impl Editor {
-    /// Action: Review the function or visual selection.
     pub fn llm_review(&mut self) {
         let (code, instruction) = self.get_code_context(
             "Review this code for bugs, performance issues, and style improvements.",
@@ -1314,15 +1715,12 @@ impl Editor {
             "You are an expert senior software engineer performing a code review. Be concise and constructive.",
             &code,
             &instruction,
-            true // Auto-send
+            true
         );
     }
 
-    /// Action: Fix the function or visual selection (optionally including LSP diagnostics).
     pub fn llm_fix(&mut self) {
         let (code, base_instruction) = self.get_code_context("Fix the issues in this code.");
-
-        // Enrich with LSP diagnostics if available!
         let mut instruction = base_instruction;
         let row = self.active_window().row;
         let diagnostics: Vec<String> = self
@@ -1332,65 +1730,53 @@ impl Editor {
             .filter(|d| d.line == row)
             .map(|d| format!("- {}", d.message))
             .collect();
-
         if !diagnostics.is_empty() {
             instruction.push_str("\n\nCompiler/LSP Errors:\n");
             instruction.push_str(&diagnostics.join("\n"));
         }
-
         self.llm_action_helper(
             "You are an expert debugger. Provide ONLY the corrected code inside a markdown block, with no extra explanation unless necessary.",
             &code,
             &instruction,
-            true // Auto-send
+            true
         );
     }
 
-    /// Action: Add current selection/context to the existing chat (no auto-send).
     pub fn llm_add_to_chat(&mut self) {
         let (code, _) = self.get_code_context("");
         self.llm_action_helper(
-            "You are a helpful coding assistant.", // Reset to default system prompt
+            "You are a helpful coding assistant.",
             &code,
-            "I am adding this code to the context. My question is: ", // Leave open for user to type
-            false, // DO NOT auto-send, let the user type their question first!
+            "I am adding this code to the context. My question is: ",
+            false,
         );
     }
 
-    /// Action: Generate code based on a prompt (leaves prompt empty for user to type).
     pub fn llm_generate(&mut self) {
         self.llm_action_helper(
             "You are an expert coder. Output ONLY the requested code inside a markdown block.",
-            "",                         // No code provided
-            "Generate the following: ", // User types the rest
-            false,                      // DO NOT auto-send
+            "",
+            "Generate the following: ",
+            false,
         );
     }
 
-    /// Helper to get either the visual selection or the current function under cursor
     pub fn get_code_context(&self, default_instruction: &str) -> (String, String) {
-        // 1. Try visual selection first
         if let Some((r1, r2)) = self.get_visual_line_range() {
             if let Some(text) = self.extract_line_range_text(r1, r2) {
                 return (text, default_instruction.to_string());
             }
         }
-
-        // 2. Fallback to function under cursor
         if let Some(info) = self.function_around_span_info() {
             if let Some(text) = self.extract_line_range_text(info.start_row, info.end_row) {
                 return (text, default_instruction.to_string());
             }
         }
-
-        // 3. Fallback to empty (user must type/paste code)
         (String::new(), default_instruction.to_string())
     }
 }
 
 impl Editor {
-    /// Core helper for CodeLlm actions. Opens a chat (or uses an existing one),
-    /// injects the code with a specific instruction, and optionally auto-sends.
     fn llm_action_helper(
         &mut self,
         system_prompt: &str,
@@ -1398,7 +1784,6 @@ impl Editor {
         instruction: &str,
         auto_send: bool,
     ) {
-        // Check if a CodeLlm buffer already exists
         let existing_id = self
             .buffers
             .iter()
@@ -1406,25 +1791,19 @@ impl Editor {
             .map(|b| b.id);
 
         let chat_id = if let Some(id) = existing_id {
-            // Switch to the existing chat buffer
             self.switch_window_to_buffer(id);
             id
         } else {
-            // Open a new session
             self.open_codellm_chat_session();
-            self.buf().id // get the newly created ID
+            self.buf().id
         };
 
-        // Format the payload
         let payload = format!("Code:\n```\n{}\n```\n\n{}", code.trim_end(), instruction);
-
-        // Inject into the prompt area
         let buf = self.buf_mut();
         if buf.kind == BufferKind::CodeLlm {
             let current_len = buf.rope.len_chars();
             buf.rope.insert(current_len, &payload);
             buf.parse_syntax();
-
             let last_line = buf.len_lines().saturating_sub(1);
             let last_col = buf.line_char_len(last_line);
             let win = self.active_window_mut();
@@ -1432,10 +1811,7 @@ impl Editor {
             win.col = last_col;
             win.desired_col = last_col;
         }
-
-        // Override the system prompt for this specific request
         self.llm.system_prompt = Some(system_prompt.to_string());
-
         if auto_send {
             self.codellm_send();
         }
@@ -1471,72 +1847,6 @@ pub fn word_wrap(text: &str, max_width: usize) -> String {
         }
         out.push('\n');
     }
-    out.pop(); // trailing newline
+    out.pop();
     out
-}
-
-/// Maximum tool-calling rounds before forcing a final answer
-const MAX_TOOL_ROUNDS: usize = 15;
-
-/// Send the raw request and return the parsed JSON response.
-async fn send_llm_request_raw(
-    payload: &serde_json::Value,
-    url: &str,
-    port: u16,
-    api_key: Option<&str>,
-) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
-    let body =
-        serde_json::to_string(payload).map_err(|e| format!("JSON serialization failed: {}", e))?;
-
-    let clean_host = url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/');
-    let addr = format!("{}:{}", clean_host, port);
-
-    let mut auth_header = String::new();
-    if let Some(key) = api_key {
-        if !key.trim().is_empty() {
-            auth_header = format!("Authorization: Bearer {}\r\n", key.trim());
-        }
-    }
-
-    let request = format!(
-        "POST /v1/chat/completions HTTP/1.0\r\n\
-         Host: {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         {}\
-         \r\n{}",
-        addr,
-        body.len(),
-        auth_header,
-        body
-    );
-
-    let mut stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| format!("Connect failed: {}", e))?;
-
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| format!("Read failed: {}", e))?;
-
-    let response_str = String::from_utf8_lossy(&response);
-    let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
-    if parts.len() < 2 {
-        return Err("Malformed HTTP response".into());
-    }
-
-    serde_json::from_str(parts[1]).map_err(|e| format!("JSON parse error: {}", e))
 }

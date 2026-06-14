@@ -1362,7 +1362,7 @@ impl Editor {
         // ── Cycle / selectable items ──────────────────────────────
         let cycle_defs: Vec<(&str, Vec<&str>)> = vec![
             ("init_mode", vec!["vim", "brief"]),
-            ("llm_backend", vec!["llamacpp", "ollama"]),
+            ("llm_backend", vec!["llamacpp", "ollama", "deepseek"]),
             ("commit_backend", vec!["llamacpp", "ollama"]),
             ("copilot_style", vec!["ghost_text", "popup"]),
             ("codeium_style", vec!["ghost_text", "popup"]),
@@ -2206,10 +2206,9 @@ impl Editor {
     pub fn open_codellm_chat_session(&mut self) {
         // Reset to default system prompt for generic chats
         self.llm.system_prompt = None;
-
         let buf_id = self.next_buf_id;
         self.next_buf_id += 1;
-
+        let label = self.config.llm_backend_label();
         let mut buf = Buffer::new(buf_id, None).unwrap_or_else(|_| {
             let mut b = Buffer {
                 id: buf_id,
@@ -2239,18 +2238,14 @@ impl Editor {
             b.rope = Rope::from_str("\n");
             b
         });
-
         buf.kind = BufferKind::CodeLlm;
-        buf.rope = ropey::Rope::from_str("# Code LLM Chat\n\n## You\n");
+        buf.rope = ropey::Rope::from_str(&format!("# Code LLM Chat [{}]\n\n## You\n", label));
         buf.llm_lock_line = 3; // Lines 0, 1, 2 are locked
         buf.parse_syntax();
-
         let buf_id_val = buf.id;
         self.buffers.push(buf);
-
         // Switch the active window to show this buffer
         self.windows[self.active_window_idx].set_buffer_id(buf_id_val);
-
         // ── Pre-populate the prompt area with selection context ──────
         if let Some(context) = self.llm.active_context.clone() {
             let template = format!("Selected code:\n```\n{}\n```\n\n", context);
@@ -2260,7 +2255,6 @@ impl Editor {
                 buf.parse_syntax();
             }
         }
-
         // Move cursor to the end of the prompt area
         let (total, last_len) = {
             let b = self.buf_by_id(buf_id_val).unwrap();
@@ -2268,19 +2262,16 @@ impl Editor {
             let len = b.line_char_len(total);
             (total, len)
         };
-
         let win = self.active_window_mut();
         win.row = total;
         win.col = last_len;
         win.desired_col = last_len;
         win.scroll_line = 0;
-
         self.enter_insert();
         let hint = format!(
-            "Code LLM ({}) — type your prompt, Ctrl+Enter to send, q to close",
-            self.config.llm_backend
+            "Code LLM [{}] — type your prompt, NORMAL Enter to send, q to close",
+            label
         );
-
         self.set_status_msg(&hint, MessageKind::Info);
     }
 

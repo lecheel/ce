@@ -849,16 +849,24 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
             }
             .trim();
             if !prompt_text.is_empty() {
-                let selection_text = if had_visual_range {
-                    sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                // ── Route by destination buffer ──
+                if editor.buf().kind == BufferKind::CodeLlm {
+                    // CodeLlm buffer → inject + codellm_send (response comes back here)
+                    editor.codellm_send_prompt(prompt_text.to_string());
                 } else {
-                    None
-                };
-                if let Some(sel) = selection_text {
-                    let full_msg = format!("Selected code:\n```\n{}\n```\n\n{}", sel, prompt_text);
-                    editor.llm_send_from_prompt(full_msg);
-                } else {
-                    editor.llm_send_from_prompt(prompt_text.to_string());
+                    // Llm/LlmInput/Normal → existing conversation-buffer flow
+                    let selection_text = if had_visual_range {
+                        sel_range.and_then(|(r1, r2)| editor.extract_line_range_text(r1, r2))
+                    } else {
+                        None
+                    };
+                    if let Some(sel) = selection_text {
+                        let full_msg =
+                            format!("Selected code:\n```\n{}\n```\n\n{}", sel, prompt_text);
+                        editor.llm_send_from_prompt(full_msg);
+                    } else {
+                        editor.llm_send_from_prompt(prompt_text.to_string());
+                    }
                 }
             } else {
                 editor.set_status_msg("Usage: :prompt <message>", MessageKind::Error);
