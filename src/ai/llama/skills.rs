@@ -553,3 +553,76 @@ pub fn file_skill() -> Skill {
         config_defaults: HashMap::new(),
     }
 }
+
+/// Create a composite skill that merges ALL available skills
+/// (including the built-in file-explorer) into a single skill.
+///
+/// Merge strategy:
+/// - **Tools**: collected from every skill; duplicates by name are replaced
+///   (last loaded skill wins).
+/// - **System prompt**: each skill's prompt becomes a `## skill-name`
+///   section in the combined prompt so the LLM can distinguish context.
+/// - **Context docs**: concatenated from all skills.
+/// - **Triggers**: collected from all skills.
+/// - **Config defaults**: merged (later skills override earlier keys).
+pub fn merge_all_skills() -> Skill {
+    let all = load_all_skills();
+
+    let mut combined_tools: Vec<ToolDef> = Vec::new();
+    let mut seen_tool_names = std::collections::HashSet::new();
+    let mut combined_prompt_parts: Vec<String> = Vec::new();
+    let mut combined_context_docs: Vec<String> = Vec::new();
+    let mut combined_triggers: Vec<String> = Vec::new();
+    let mut combined_config: HashMap<String, toml::Value> = HashMap::new();
+    let mut descriptions: Vec<String> = Vec::new();
+
+    for skill in all {
+        // ── Merge tools (deduplicate by name, last wins) ─────────
+        for tool in skill.tools {
+            if seen_tool_names.contains(&tool.name) {
+                if let Some(pos) = combined_tools.iter().position(|t| t.name == tool.name) {
+                    combined_tools[pos] = tool;
+                }
+            } else {
+                seen_tool_names.insert(tool.name.clone());
+                combined_tools.push(tool);
+            }
+        }
+
+        // ── Combine system prompts with section headers ──────────
+        let prompt = skill.system_prompt.trim();
+        if !prompt.is_empty() {
+            combined_prompt_parts.push(format!("## {}\n{}", skill.name, prompt));
+        }
+
+        // ── Collect context docs ─────────────────────────────────
+        combined_context_docs.extend(skill.context_docs);
+
+        // ── Collect triggers ─────────────────────────────────────
+        combined_triggers.extend(skill.triggers);
+
+        // ── Merge config defaults (later overrides earlier) ──────
+        for (key, value) in skill.config_defaults {
+            combined_config.insert(key, value);
+        }
+
+        descriptions.push(skill.name.clone());
+    }
+
+    let combined_system_prompt = if combined_prompt_parts.is_empty() {
+        "You are a helpful assistant with access to multiple tools.".to_string()
+    } else {
+        combined_prompt_parts.join("\n\n")
+    };
+
+    Skill {
+        name: "all".to_string(),
+        version: "1.0.0".to_string(),
+        description: format!("All skills ({})", descriptions.join(", ")),
+        triggers: combined_triggers,
+        system_prompt: combined_system_prompt,
+        context_docs: combined_context_docs,
+        tools: combined_tools,
+        config_defaults: combined_config,
+    }
+}

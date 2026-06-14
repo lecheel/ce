@@ -751,6 +751,16 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         s if s.starts_with("skill ") => {
             let arg = s.strip_prefix("skill ").unwrap().trim();
             match arg {
+                "all" => {
+                    let merged = crate::ai::llama::skills::merge_all_skills();
+                    let tool_count = merged.tools.len();
+                    let desc = merged.description.clone();
+                    editor.llm.active_skill = Some(merged);
+                    editor.set_status_msg(
+                        &format!("Skill: all active — {} tools ({})", tool_count, desc),
+                        MessageKind::Success,
+                    );
+                }
                 "file" | "file-explorer" => {
                     editor.llm.active_skill = Some(crate::ai::llama::skills::file_skill());
                     editor.set_status_msg("Skill: file-explorer active", MessageKind::Success);
@@ -761,16 +771,22 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 }
                 "list" | "ls" => {
                     let available = crate::ai::llama::skills::load_all_skills();
-                    let names: Vec<String> = available
-                        .iter()
-                        .map(|s| format!("  {} — {}", s.name, s.description))
-                        .collect();
+                    let builtin = crate::ai::llama::skills::file_skill();
+                    let mut lines: Vec<String> = Vec::new();
+                    lines.push(format!(
+                        "  {} — {} [builtin]",
+                        builtin.name, builtin.description
+                    ));
+                    for s in &available {
+                        lines.push(format!("  {} — {}", s.name, s.description));
+                    }
+                    lines.push(String::new());
+                    lines.push("Use :skill <name> or :skill all to activate".to_string());
                     editor.set_status_msg(
-                        &format!("Available skills:\n{}", names.join("\n")),
+                        &format!("Available skills:\n{}", lines.join("\n")),
                         MessageKind::Info,
                     );
                 }
-                // Load by name from installed skills
                 name => {
                     let all = crate::ai::llama::skills::load_all_skills();
                     match all.into_iter().find(|s| s.name == name) {
@@ -794,6 +810,7 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
                 }
             }
         }
+
         // ---- LLM Commands ----
         "llm" => {
             let selection_text = if had_visual_range {
@@ -954,6 +971,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
         "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep", "skill ",
+        "skill all",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();
