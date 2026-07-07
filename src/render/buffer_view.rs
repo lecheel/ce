@@ -410,17 +410,27 @@ fn draw_pane(
         let mut search_mask = vec![false; chars.len()];
         if let Some(query) = search_query {
             if !query.is_empty() {
-                let line_str: String = chars.iter().collect();
-                let mut start = 0;
-                while let Some(pos) = line_str[start..].find(query) {
-                    let abs_pos = start + pos;
-                    let char_len = query.chars().count();
-                    for offset in 0..char_len {
-                        if abs_pos + offset < search_mask.len() {
-                            search_mask[abs_pos + offset] = true;
+                let query_chars: Vec<char> = query.chars().collect();
+                let qlen = query_chars.len();
+                if qlen > 0 && qlen <= chars.len() {
+                    let mut i = 0;
+                    while i <= chars.len() - qlen {
+                        let mut matches = true;
+                        for j in 0..qlen {
+                            if chars[i + j] != query_chars[j] {
+                                matches = false;
+                                break;
+                            }
+                        }
+                        if matches {
+                            for offset in 0..qlen {
+                                search_mask[i + offset] = true;
+                            }
+                            i += qlen; // Skip past the matched query to avoid overlap
+                        } else {
+                            i += 1;
                         }
                     }
-                    start = abs_pos + char_len.max(1);
                 }
             }
         }

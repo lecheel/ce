@@ -970,12 +970,25 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
         Action::CommandLineLeft => {
             if editor.command_cursor > 0 {
-                editor.command_cursor -= 1;
+                let prev = editor.command()[..editor.command_cursor]
+                    .char_indices()
+                    .rev()
+                    .next()
+                    .map(|(b, _)| b)
+                    .unwrap_or(0);
+                editor.command_cursor = prev;
             }
         }
         Action::CommandLineRight => {
-            if editor.command_cursor < editor.command().len() {
-                editor.command_cursor += 1;
+            let s = editor.command();
+            if editor.command_cursor < s.len() {
+                // advance by the byte length of the char under the cursor
+                let n = s[editor.command_cursor..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                editor.command_cursor += n;
             }
         }
         Action::CommandDeleteChar => {

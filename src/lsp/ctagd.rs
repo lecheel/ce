@@ -1,17 +1,26 @@
 //! Client for the `ctagd` Language Server daemon.
 //!
-//! Communicates via NDJSON over a Unix domain socket at
-//! `/tmp/.ctagd.sock`.  See `client.md` for the full protocol spec.
+//! Communicates via NDJSON over a Unix domain socket (Unix)
+//! or TCP loopback (Windows). See `client.md` for the full protocol spec.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-// ── Constants ────────────────────────────────────────────────────────────
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 
+#[cfg(windows)]
+use std::net::TcpStream;
+#[cfg(unix)]
 const DEFAULT_SOCKET_PATH: &str = "/tmp/.ctagd.sock";
+
+#[cfg(windows)]
+const DEFAULT_HOST: &str = "127.0.0.1";
+#[cfg(windows)]
+const DEFAULT_PORT: u16 = 49152; // Make sure your daemon listens on this port for Windows!
+
 const CONNECT_TIMEOUT_MS: u64 = 300;
 const READ_TIMEOUT_MS: u64 = 1500;
 const WRITE_TIMEOUT_MS: u64 = 200;
@@ -75,20 +84,100 @@ pub struct SymbolResult {
 
 // ── Client ───────────────────────────────────────────────────────────────
 
+/// Send a JSON payload, read one NDJSON response line.
+fn send_and_recv_raw(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    #[cfg(unix)]
+    {
+        let path = PathBuf::from(DEFAULT_SOCKET_PATH);
+        let stream = UnixStream::connect(&path).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)))
+            .ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(CONNECT_TIMEOUT_MS)))
+            .ok()?;
+
+        let mut stream = stream;
+        write!(stream, "{}\n", payload).ok()?;
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+
+        if line.trim().is_empty() {
+            return None;
+        }
+
+        let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
+        resp.get("result").cloned()
+    }
+
+    #[cfg(windows)]
+    {
+        let addr = format!("{}:{}", DEFAULT_HOST, DEFAULT_PORT);
+        let socket_addr: std::net::SocketAddr = addr.parse().ok()?;
+        let stream =
+            TcpStream::connect_timeout(&socket_addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
+                .ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)))
+            .ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)))
+            .ok()?;
+
+        let mut stream = stream;
+        write!(stream, "{}\n", payload).ok()?;
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+
+        if line.trim().is_empty() {
+            return None;
+        }
+
+        let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
+        resp.get("result").cloned()
+    }
+}
+
+/// Fire-and-forget: connect, write, ignore response.
+fn send_raw_fire_and_forget(payload: serde_json::Value) {
+    #[cfg(unix)]
+    {
+        let path = PathBuf::from(DEFAULT_SOCKET_PATH);
+        if let Ok(mut stream) = UnixStream::connect(&path) {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+            let _ = write!(stream, "{}\n", payload);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let addr = format!("{}:{}", DEFAULT_HOST, DEFAULT_PORT);
+        let socket_addr: std::net::SocketAddr = match addr.parse() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        if let Ok(mut stream) =
+            TcpStream::connect_timeout(&socket_addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
+        {
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+            let _ = write!(stream, "{}\n", payload);
+        }
+    }
+}
+
 /// Client for the `ctagd` daemon.
 pub struct RustLspClient {
-    socket_path: PathBuf,
     available: bool,
 }
 
 impl RustLspClient {
     pub fn new() -> Self {
-        let socket_path = PathBuf::from(DEFAULT_SOCKET_PATH);
-        let available = socket_path.exists();
-        Self {
-            socket_path,
-            available,
-        }
+        let available = Self::check_availability();
+        Self { available }
     }
 
     pub fn is_available(&self) -> bool {
@@ -96,10 +185,25 @@ impl RustLspClient {
     }
 
     pub fn refresh_availability(&mut self) {
-        self.available = self.socket_path.exists();
+        self.available = Self::check_availability();
     }
 
-    // ── Fire-and-forget: `saved` ──────────────────────────────────────
+    fn check_availability() -> bool {
+        #[cfg(unix)]
+        {
+            PathBuf::from(DEFAULT_SOCKET_PATH).exists()
+        }
+
+        #[cfg(windows)]
+        {
+            let addr = format!("{}:{}", DEFAULT_HOST, DEFAULT_PORT);
+            let addr: std::net::SocketAddr = match addr.parse() {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
+            TcpStream::connect_timeout(&addr, Duration::from_millis(CONNECT_TIMEOUT_MS)).is_ok()
+        }
+    }
 
     pub fn notify_saved(&self, repo_root: &Path, file: &str, content: &str) {
         if !self.available {
@@ -114,12 +218,8 @@ impl RustLspClient {
             "content": content,
         });
 
-        let socket_path = self.socket_path.clone();
         std::thread::spawn(move || {
-            if let Ok(mut stream) = UnixStream::connect(&socket_path) {
-                let _ = stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
-                let _ = write!(stream, "{}\n", payload);
-            }
+            send_raw_fire_and_forget(payload);
         });
     }
 
@@ -147,7 +247,7 @@ impl RustLspClient {
             "symbol": symbol,
         });
 
-        match self.send_and_receive(&payload) {
+        match send_and_recv_raw(&payload) {
             Some(result) => self.parse_definition_result(result),
             None => {
                 self.available = false;
@@ -168,7 +268,7 @@ impl RustLspClient {
             "query": query,
         });
 
-        match self.send_and_receive(&payload) {
+        match send_and_recv_raw(&payload) {
             Some(result) => self.parse_definition_result(result),
             None => {
                 self.available = false;
@@ -193,7 +293,7 @@ impl RustLspClient {
             "query": query,
         });
 
-        match self.send_and_receive(&payload) {
+        match send_and_recv_raw(&payload) {
             Some(result) => self.parse_workspace_symbols(result),
             None => {
                 self.available = false;
@@ -202,30 +302,67 @@ impl RustLspClient {
         }
     }
 
-    // ── Private ───────────────────────────────────────────────────────
-
-    fn send_and_receive(&self, payload: &serde_json::Value) -> Option<serde_json::Value> {
-        let stream = UnixStream::connect(&self.socket_path).ok()?;
-        stream
-            .set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)))
-            .ok()?;
-        stream
-            .set_write_timeout(Some(Duration::from_millis(CONNECT_TIMEOUT_MS)))
-            .ok()?;
-
-        let mut stream = stream;
-        write!(stream, "{}\n", payload).ok()?;
-
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
-
-        if line.trim().is_empty() {
+    /// `info` - query daemon status for a repo.
+    pub fn info(&mut self, repo_root: &Path) -> Option<DaemonInfo> {
+        if !self.available {
             return None;
         }
 
-        let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
-        resp.get("result").cloned()
+        let payload = serde_json::json!({
+            "id": next_request_id(),
+            "method": "info",
+            "repo_root": repo_root.to_string_lossy().as_ref(),
+        });
+
+        match send_and_recv_raw(&payload) {
+            Some(result) => self.parse_info_result(result),
+            None => {
+                self.available = false;
+                None
+            }
+        }
+    }
+
+    /// `sessions` - list all active repo sessions in the daemon.
+    pub fn sessions(&mut self) -> Option<Vec<SessionInfo>> {
+        if !self.available {
+            return None;
+        }
+
+        let payload = serde_json::json!({
+            "id": next_request_id(),
+            "method": "sessions",
+            "repo_root": "",
+        });
+
+        match send_and_recv_raw(&payload) {
+            Some(result) => self.parse_sessions_result(result),
+            None => {
+                self.available = false;
+                None
+            }
+        }
+    }
+
+    /// `scan` - trigger a full repo re-index.
+    pub fn scan(&mut self, repo_root: &Path) -> bool {
+        if !self.available {
+            return false;
+        }
+
+        let payload = serde_json::json!({
+            "id": next_request_id(),
+            "method": "scan",
+            "repo_root": repo_root.to_string_lossy().as_ref(),
+        });
+
+        match send_and_recv_raw(&payload) {
+            Some(_) => true,
+            None => {
+                self.available = false;
+                false
+            }
+        }
     }
 
     fn parse_definition_result(&self, result: serde_json::Value) -> Option<DefinitionResult> {
@@ -262,27 +399,6 @@ impl RustLspClient {
         Some(symbols)
     }
 
-    /// `info` — query daemon status for a repo.
-    pub fn info(&mut self, repo_root: &Path) -> Option<DaemonInfo> {
-        if !self.available {
-            return None;
-        }
-
-        let payload = serde_json::json!({
-            "id": next_request_id(),
-            "method": "info",
-            "repo_root": repo_root.to_string_lossy().as_ref(),
-        });
-
-        match self.send_and_receive(&payload) {
-            Some(result) => self.parse_info_result(result),
-            None => {
-                self.available = false;
-                None
-            }
-        }
-    }
-
     fn parse_info_result(&self, result: serde_json::Value) -> Option<DaemonInfo> {
         let obj = result.as_object()?;
         Some(DaemonInfo {
@@ -306,28 +422,6 @@ impl RustLspClient {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize,
         })
-    }
-
-    /// `sessions` — list all active repo sessions in the daemon.
-    /// Does not require a specific repo_root; sends an empty one.
-    pub fn sessions(&mut self) -> Option<Vec<SessionInfo>> {
-        if !self.available {
-            return None;
-        }
-
-        let payload = serde_json::json!({
-            "id": next_request_id(),
-            "method": "sessions",
-            "repo_root": "",
-        });
-
-        match self.send_and_receive(&payload) {
-            Some(result) => self.parse_sessions_result(result),
-            None => {
-                self.available = false;
-                None
-            }
-        }
     }
 
     fn parse_sessions_result(&self, result: serde_json::Value) -> Option<Vec<SessionInfo>> {
@@ -358,26 +452,5 @@ impl RustLspClient {
             });
         }
         Some(sessions)
-    }
-
-    /// `scan` — trigger a full repo re-index.
-    pub fn scan(&mut self, repo_root: &Path) -> bool {
-        if !self.available {
-            return false;
-        }
-
-        let payload = serde_json::json!({
-            "id": next_request_id(),
-            "method": "scan",
-            "repo_root": repo_root.to_string_lossy().as_ref(),
-        });
-
-        match self.send_and_receive(&payload) {
-            Some(_) => true,
-            None => {
-                self.available = false;
-                false
-            }
-        }
     }
 }

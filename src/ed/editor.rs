@@ -1687,6 +1687,11 @@ impl Editor {
         };
 
         // Compute final position OUTSIDE the block so it stays in scope
+        {
+            let (win, buf) = self.active_window_and_buf_mut();
+            buf.push_undo(win.row, win.col);
+        }
+
         let (final_row, final_col) = {
             let is_line_paste = text.ends_with('\n') || text.ends_with('\r');
 

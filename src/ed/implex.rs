@@ -908,16 +908,27 @@ impl Editor {
         self.comp.on_leave_insert();
         self.cmd_history_idx = None;
     }
+
     pub fn push_command(&mut self, ch: char) {
+        // insert(idx, char) is byte-based; advance by the char's UTF-8 size
         self.command.insert(self.command_cursor, ch);
-        self.command_cursor += 1;
+        self.command_cursor += ch.len_utf8();
     }
+
     pub fn pop_command(&mut self) {
         if self.command_cursor > 0 {
-            self.command_cursor -= 1;
+            // walk back to the previous char boundary
+            let prev = self.command[..self.command_cursor]
+                .char_indices()
+                .rev()
+                .next()
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            self.command_cursor = prev;
             self.command.remove(self.command_cursor);
         }
     }
+
     pub fn set_command(&mut self, cmd: String) {
         self.command = cmd;
         self.command_cursor = self.command.len();
