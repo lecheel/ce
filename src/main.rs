@@ -74,17 +74,13 @@ pub enum AppMessage {
 )]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
-    /// File path(s) to open (each becomes a separate buffer).
     path: Vec<String>,
-
-    /// Open fuzzy file finder with initial filter (e.g., `--fd pop` or `--fd "src/util"`)
     #[arg(long, value_name = "FILTER")]
     fd: Option<String>,
-
-    /// Run ripgrep search and open quickfix popup (e.g., `--rg fn main` or `--rg "fn.*async"`)
     #[arg(long, num_args = 1.., value_name = "PATTERN")]
     rg: Option<Vec<String>>,
-
+    #[arg(long, alias = "st", help = "Load modified files from git status")]
+    gs: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -112,7 +108,7 @@ async fn main() -> Result<()> {
         None => {
             let fd_filter = cli.fd;
             let rg_pattern = cli.rg.map(|parts| parts.join(" "));
-            cmd_edit(cli.path, fd_filter, rg_pattern).await
+            cmd_edit(cli.path, fd_filter, rg_pattern, cli.gs).await
         }
     }
 }
@@ -158,6 +154,7 @@ async fn cmd_edit(
     all_args: Vec<String>,
     initial_fd_filter: Option<String>,
     initial_rg_pattern: Option<String>,
+    load_git_status_files: bool,
 ) -> Result<()> {
     let config = Config::load().context("Failed to load config")?;
 
@@ -181,7 +178,6 @@ async fn cmd_edit(
     // ── Parse Vim-style +N arguments (e.g. ./ce +5 main.rs) ──────────
     let mut initial_line: Option<usize> = None;
     let mut files = Vec::new();
-
     for arg in all_args {
         if let Some(num_str) = arg.strip_prefix('+') {
             if num_str.is_empty() {
@@ -191,6 +187,22 @@ async fn cmd_edit(
             }
         } else {
             files.push(arg);
+        }
+    }
+
+    if load_git_status_files {
+        let start_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        if let Some(root) = crate::git::gutter::find_git_root(&start_dir) {
+            if let Some((state, _)) = crate::git::status::GitStatusState::load(&root) {
+                for file in state.files {
+                    if file.status != crate::git::status::FileStatusType::Untracked
+                        && file.status != crate::git::status::FileStatusType::Deleted
+                    {
+                        let full_path = root.join(&file.path);
+                        files.push(full_path.to_string_lossy().to_string());
+                    }
+                }
+            }
         }
     }
 
