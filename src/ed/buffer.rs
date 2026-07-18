@@ -8,6 +8,7 @@
 use crate::ed::syntax::SyntaxState;
 use anyhow::{Context, Result};
 use ropey::Rope;
+use std::io::Write as _;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -315,14 +316,36 @@ impl Buffer {
 
                 if format_on_save {
                     if path.ends_with(".rs") {
-                        match std::process::Command::new("rustfmt")
+                        // NOTE: deliberately NOT passing `&path` to rustfmt.
+                        // rustfmt treats a crate root (main.rs/lib.rs) specially:
+                        // given a path, it walks every `mod` declaration and
+                        // reformats the whole reachable module tree instead of
+                        // just this file. Piping via stdin/stdout keeps it
+                        // scoped to exactly the buffer being saved.
+                        let rustfmt_result = std::process::Command::new("rustfmt")
                             .arg("--edition")
                             .arg("2021")
-                            .arg(&path)
-                            .output()
-                        {
+                            .arg("--emit")
+                            .arg("stdout")
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()
+                            .and_then(|mut child| {
+                                if let Some(mut stdin) = child.stdin.take() {
+                                    stdin.write_all(text.as_bytes())?;
+                                }
+                                child.wait_with_output()
+                            });
+                        match rustfmt_result {
                             Ok(output) if output.status.success() => {
-                                if let Err(e) = self.open_file(&path) {
+                                let formatted = String::from_utf8_lossy(&output.stdout).to_string();
+                                if let Err(e) = std::fs::write(&path, &formatted) {
+                                    warning = Some(format!(
+                                        "Saved, but failed to write rustfmt output: {}",
+                                        e
+                                    ));
+                                } else if let Err(e) = self.open_file(&path) {
                                     warning = Some(format!(
                                         "Saved, but failed to reload after rustfmt: {}",
                                         e
