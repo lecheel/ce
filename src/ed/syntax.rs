@@ -555,6 +555,7 @@ pub enum TextObject {
 fn get_language(id: &str) -> Option<tree_sitter::Language> {
     match id {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
+        "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "python" => Some(tree_sitter_python::LANGUAGE.into()),
         "javascript" | "typescript" => Some(tree_sitter_javascript::LANGUAGE.into()),
         "diff" => Some(tree_sitter_diff::LANGUAGE.into()),
