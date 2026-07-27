@@ -89,12 +89,13 @@ fn styled_spans_from_highlights(
     line_bg: Option<Color>,
     tab_size: usize,
     start_visual_col: usize,
+    guide_depth: usize,
+    indent_guide_style: Style,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if chars.is_empty() {
         return spans;
     }
-
     let get_style = |idx: usize| -> Style {
         let mut base = highlights
             .get(idx)
@@ -112,17 +113,32 @@ fn styled_spans_from_highlights(
         }
         base
     };
-
-    // 1. Expand tabs into spaces and build a flat array of (char, style)
     let mut expanded: Vec<(char, Style)> = Vec::new();
     let mut visual_col = start_visual_col;
-
     for (i, &ch) in chars.iter().enumerate() {
         let style = get_style(i);
         if ch == '\t' {
             let width = tab_size - (visual_col % tab_size);
-            for _ in 0..width {
-                expanded.push((' ', style));
+            for w in 0..width {
+                let mut char_to_push = ' ';
+                let mut style_to_push = style;
+                if guide_depth > 0 && w == 0 && visual_col % tab_size == 0 {
+                    let level = visual_col / tab_size + 1;
+                    if level <= guide_depth {
+                        char_to_push = '|';
+                        style_to_push = indent_guide_style;
+                        if selected_mask.get(i).copied().unwrap_or(false) {
+                            style_to_push = style_to_push.bg(Color::Rgb(40, 50, 80));
+                        } else if search_mask.get(i).copied().unwrap_or(false) {
+                            style_to_push = style_to_push.fg(Color::Black).bg(Color::Yellow);
+                        } else if style_to_push.bg.is_none() {
+                            if let Some(bg) = line_bg {
+                                style_to_push = style_to_push.bg(bg);
+                            }
+                        }
+                    }
+                }
+                expanded.push((char_to_push, style_to_push));
             }
             visual_col += width;
         } else {
@@ -519,6 +535,8 @@ fn draw_pane(
                 line_bg,
                 tab_size,
                 line_start_vcol,
+                guide_depths[virtual_row - scroll],
+                indent_guide_style,
             ));
 
             let before_str: String = chars[..safe_offset].iter().collect();
@@ -568,6 +586,8 @@ fn draw_pane(
                         line_bg,
                         tab_size,
                         vcol_at(after_offset),
+                        guide_depths[virtual_row - scroll],
+                        indent_guide_style,
                     ));
                 } else {
                     spans.push(Span::styled(" ".to_string(), cursor_style));
@@ -590,6 +610,8 @@ fn draw_pane(
                     line_bg,
                     tab_size,
                     vcol_at(safe_offset),
+                    guide_depths[virtual_row - scroll],
+                    indent_guide_style,
                 ));
             }
 
@@ -661,6 +683,8 @@ fn draw_pane(
                 line_bg,
                 tab_size,
                 line_start_vcol,
+                guide_depths[virtual_row - scroll],
+                indent_guide_style,
             ));
             rendered.push(Line::from(spans));
         }
