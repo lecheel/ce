@@ -418,6 +418,47 @@ impl Buffer {
                             }
                             self.git_diffs.clear();
                         }
+                    } else if path.ends_with(".go") {
+                        // NOTE: deliberately piping via stdin/stdout (same as rustfmt)
+                        // so formatting stays scoped to exactly the buffer being saved.
+                        // `gofmt` reads from stdin when no file arg is given and writes
+                        // the formatted source to stdout.
+                        let gofmt_result = std::process::Command::new("gofmt")
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()
+                            .and_then(|mut child| {
+                                if let Some(mut stdin) = child.stdin.take() {
+                                    stdin.write_all(text.as_bytes())?;
+                                }
+                                child.wait_with_output()
+                            });
+                        match gofmt_result {
+                            Ok(output) if output.status.success() => {
+                                let formatted =
+                                    String::from_utf8_lossy(&output.stdout).to_string();
+                                if let Err(e) = std::fs::write(&path, &formatted) {
+                                    warning = Some(format!(
+                                        "Saved, but failed to write gofmt output: {}",
+                                        e
+                                    ));
+                                } else if let Err(e) = self.open_file(&path) {
+                                    warning = Some(format!(
+                                        "Saved, but failed to reload after gofmt: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                warning =
+                                    Some(format!("Saved, gofmt failed: {}", stderr.trim()));
+                            }
+                            Err(e) => {
+                                warning = Some(format!("Saved, but gofmt not found: {}", e));
+                            }
+                        }
                     }
                 }
 

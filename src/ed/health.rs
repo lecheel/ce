@@ -123,6 +123,50 @@ fn check_rustfmt(hb: &mut HealthBuilder) {
     }
 }
 
+fn check_go_formatters(hb: &mut HealthBuilder) {
+    hb.header("Go Formatters (optional)");
+
+    let gofmt_found = match std::process::Command::new("gofmt").arg("--help").output() {
+        Ok(output) if output.status.success() => {
+            // gofmt --help writes to stdout; grab a version-ish line if present
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let version_line = stdout
+                .lines()
+                .next()
+                .unwrap_or("gofmt available")
+                .trim()
+                .to_string();
+            hb.ok(&format!("gofmt: {}", version_line));
+            true
+        }
+        _ => {
+            hb.warn("gofmt not found");
+            false
+        }
+    };
+
+    let go_found = match std::process::Command::new("go").arg("version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            hb.ok(&format!("go: {}", version));
+            true
+        }
+        _ => {
+            hb.warn("go toolchain not found");
+            false
+        }
+    };
+
+    if !gofmt_found && !go_found {
+        hb.info("Install Go for .go auto-formatting on save");
+        hb.info("  https://go.dev/doc/install");
+    } else if gofmt_found {
+        hb.info("gofmt will be used for .go files on save");
+    } else {
+        hb.info("gofmt ships with the Go toolchain — reinstall Go to enable .go formatting");
+    }
+}
+
 fn check_python_formatters(hb: &mut HealthBuilder) {
     hb.header("Python Formatters (optional)");
 
@@ -424,6 +468,7 @@ impl Editor {
         check_ripgrep(&mut hb);
         check_rustfmt(&mut hb);
         check_python_formatters(&mut hb);
+        check_go_formatters(&mut hb);
         check_config(&mut hb, &config);
         check_treesitter(&mut hb);
         check_llm(&mut hb, &config);
