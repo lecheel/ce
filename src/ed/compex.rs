@@ -439,7 +439,12 @@ impl Editor {
         let min_word_prefix: usize = 4;
 
         // ── Source 1: FilePaths (synchronous, no debounce needed) ──
-        if is_path_prefix && prefix.len() >= 2 {
+        // Only trigger path completion if the character immediately after
+        // the cursor is a space, tab, or the cursor is at the end of line.
+        let next_char = self.buf().line_text(row).chars().nth(col);
+        let allow_path_popup = matches!(next_char, Some(' ') | Some('\t') | None);
+
+        if is_path_prefix && prefix.len() >= 2 && allow_path_popup {
             let (_req_id, version) = self.comp.start_source_request(CompletionSource::FilePaths);
             let matches = crate::comp::path_complete::complete_path(&prefix);
             self.comp
