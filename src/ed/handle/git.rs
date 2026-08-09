@@ -6,7 +6,7 @@ use crate::ed::mode::MessageKind;
 use crate::event::KeyEvent;
 use crate::git::log::GitLogLineAction;
 use crate::Editor;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::KeyCode;
 
 impl Editor {
     // ── GitLog (tig-style vsplit) ─────────────────────────────────────
@@ -282,8 +282,11 @@ impl Editor {
                 true
             }
             KeyCode::Char('l') => {
-                let dir = if key.modifiers.contains(KeyModifiers::SHIFT) { -1 } else { 1 };
-                self.git_status_cycle_section(dir);
+                self.git_status_cycle_section(1);
+                true
+            }
+            KeyCode::Char('L') => {
+                self.git_status_cycle_section(-1);
                 true
             }
             KeyCode::Char('q') => {

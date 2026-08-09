@@ -267,7 +267,7 @@ impl GitStatusState {
         // ── 4. Render Branches section ────────────────────────────────
         display_lines.push(String::new());
         section_starts.push(display_lines.len());
-        display_lines.push("  ------ Branch ------".to_string());
+        display_lines.push("  Branch".to_string());
         display_lines.push(format!("  {}", "─".repeat(40)));
 
         let active_branch = Command::new("git")
@@ -321,7 +321,7 @@ impl GitStatusState {
 
         display_lines.push(String::new());
         section_starts.push(display_lines.len());
-        display_lines.push("  ------ Last Commit ------".to_string());
+        display_lines.push("  Last Commit".to_string());
         display_lines.push(format!("  {}", "─".repeat(40)));
 
         let mut last_commit_count = 0;
@@ -349,7 +349,7 @@ impl GitStatusState {
         // ── 6. Render Stashes section ─────────────────────────────────
         display_lines.push(String::new());
         section_starts.push(display_lines.len());
-        display_lines.push("  ------ Stash ------".to_string());
+        display_lines.push("  Stash".to_string());
         display_lines.push(format!("  {}", "─".repeat(40)));
 
         let mut stash_count = 0;
@@ -391,8 +391,10 @@ impl GitStatusState {
         } else if !files.is_empty() {
             display_lines.push("  [c] Stage all and commit with LLM".to_string());
         }
-        display_lines
-            .push("  [s] Toggle staged  [Enter] Open file  [l/L] Cycle section  [z] stash  [q] Close".to_string());
+        display_lines.push(
+            "  [s] Toggle staged  [Enter] Open file  [l/L] Cycle section  [z] stash  [q] Close"
+                .to_string(),
+        );
 
         if display_lines.is_empty() {
             return None;

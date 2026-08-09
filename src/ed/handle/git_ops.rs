@@ -290,33 +290,35 @@ impl Editor {
             return;
         }
 
-        let target_start = if dir > 0 {
-            section_starts.iter().find(|&&s| s > row).copied()
-                .or_else(|| section_starts.first().copied())
+        // Find the current section index based on the cursor row
+        let current_section_idx = section_starts.iter().rposition(|&s| s <= row).unwrap_or(0);
+
+        // Calculate the target section index, wrapping around correctly
+        let target_idx = if dir > 0 {
+            (current_section_idx + 1) % section_starts.len()
         } else {
-            section_starts.iter().rev().find(|&&s| s < row).copied()
-                .or_else(|| section_starts.last().copied())
+            (current_section_idx + section_starts.len() - 1) % section_starts.len()
         };
 
-        if let Some(start) = target_start {
-            let buf_len = self.buf().len_lines();
-            let has_first_item = self.buf().git_status_state.as_ref()
-                .and_then(|s| s.line_actions.get(&(start + 2)))
-                .is_some();
+        let start = section_starts[target_idx];
 
-            let win = self.active_window_mut();
-            let max_row = buf_len.saturating_sub(1);
+        let buf_len = self.buf().len_lines();
+        let has_first_item = self.buf().git_status_state.as_ref()
+            .and_then(|s| s.line_actions.get(&(start + 2)))
+            .is_some();
 
-            let target_row = if has_first_item {
-                start + 2
-            } else {
-                start
-            };
+        let win = self.active_window_mut();
+        let max_row = buf_len.saturating_sub(1);
 
-            win.row = target_row.min(max_row);
-            win.desired_col = 0;
-            win.col = 0;
-        }
+        let target_row = if has_first_item {
+            start + 2
+        } else {
+            start
+        };
+
+        win.row = target_row.min(max_row);
+        win.desired_col = 0;
+        win.col = 0;
     }
 
     pub(super) fn git_status_close(&mut self) {
