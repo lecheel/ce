@@ -268,6 +268,13 @@ async fn cmd_edit(
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    // Open git status buffer if requested via --st / --gs
+    // ═══════════════════════════════════════════════════════════════════
+    if load_git_status_files {
+        editor.open_git_status();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     // Open fd popup with initial filter if requested via --fd
     // ═══════════════════════════════════════════════════════════════════
     if let Some(filter) = initial_fd_filter {
