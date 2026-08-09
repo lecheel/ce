@@ -65,6 +65,7 @@ pub struct GitStatusState {
     /// Maps 0-based display row → action for that row.
     pub line_actions: HashMap<usize, GitStatusLineAction>,
     pub has_staged_changes: bool,
+    pub section_starts: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,7 @@ impl GitStatusState {
         let mut line_actions: HashMap<usize, GitStatusLineAction> = HashMap::new();
         let mut display_lines: Vec<String> = Vec::new();
         let mut has_staged_changes = false;
+        let mut section_starts: Vec<usize> = Vec::new();
 
         let mut staged_files = Vec::new();
         let mut unstaged_files = Vec::new();
@@ -201,6 +203,7 @@ impl GitStatusState {
 
         // ── 1. Render Stage Changes section ──────────────────────────────
         display_lines.push(String::new());
+        section_starts.push(display_lines.len());
         display_lines.push(format!("  Stage Changes ({})", staged_files.len()));
         display_lines.push(format!("  {}", "─".repeat(40)));
 
@@ -221,6 +224,7 @@ impl GitStatusState {
 
         // ── 2. Render Unstage Changes section ────────────────────────────
         display_lines.push(String::new());
+        section_starts.push(display_lines.len());
         display_lines.push(format!("  Unstage Changes ({})", unstaged_files.len()));
         display_lines.push(format!("  {}", "─".repeat(40)));
 
@@ -241,6 +245,7 @@ impl GitStatusState {
 
         // ── 3. Render Untracked Files section ───────────────────────────
         display_lines.push(String::new());
+        section_starts.push(display_lines.len());
         display_lines.push(format!("  Untracked Files ({})", untracked_files.len()));
         display_lines.push(format!("  {}", "─".repeat(40)));
 
@@ -261,6 +266,7 @@ impl GitStatusState {
 
         // ── 4. Render Branches section ────────────────────────────────
         display_lines.push(String::new());
+        section_starts.push(display_lines.len());
         display_lines.push("  ------ Branch ------".to_string());
         display_lines.push(format!("  {}", "─".repeat(40)));
 
@@ -304,8 +310,45 @@ impl GitStatusState {
             display_lines.push("    (none)".to_string());
         }
 
-        // ── 5. Render Stashes section ─────────────────────────────────
+        // ── 5. Render Last Commit Files section ──────────────────────
+        let last_commit_files_text = Command::new("git")
+            .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
         display_lines.push(String::new());
+        section_starts.push(display_lines.len());
+        display_lines.push("  ------ Last Commit ------".to_string());
+        display_lines.push(format!("  {}", "─".repeat(40)));
+
+        let mut last_commit_count = 0;
+        for line in last_commit_files_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            last_commit_count += 1;
+
+            let idx = display_lines.len();
+            display_lines.push(format!("    {}", trimmed));
+
+            line_actions.insert(
+                idx,
+                GitStatusLineAction::OpenFile {
+                    path: trimmed.to_string(),
+                },
+            );
+        }
+        if last_commit_count == 0 {
+            display_lines.push("    (none)".to_string());
+        }
+
+        // ── 6. Render Stashes section ─────────────────────────────────
+        display_lines.push(String::new());
+        section_starts.push(display_lines.len());
         display_lines.push("  ------ Stash ------".to_string());
         display_lines.push(format!("  {}", "─".repeat(40)));
 
@@ -349,7 +392,7 @@ impl GitStatusState {
             display_lines.push("  [c] Stage all and commit with LLM".to_string());
         }
         display_lines
-            .push("  [s] Toggle staged  [Enter] Open file  [z] stash [q] Close".to_string());
+            .push("  [s] Toggle staged  [Enter] Open file  [l/L] Cycle section  [z] stash  [q] Close".to_string());
 
         if display_lines.is_empty() {
             return None;
@@ -364,6 +407,7 @@ impl GitStatusState {
                 files,
                 line_actions,
                 has_staged_changes,
+                section_starts,
             },
             display_text,
         ))

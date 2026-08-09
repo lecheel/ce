@@ -6,7 +6,7 @@ use crate::ed::mode::MessageKind;
 use crate::event::KeyEvent;
 use crate::git::log::GitLogLineAction;
 use crate::Editor;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 impl Editor {
     // ── GitLog (tig-style vsplit) ─────────────────────────────────────
@@ -279,6 +279,11 @@ impl Editor {
                 self.enter_command();
                 self.command = "stash ".to_string();
                 self.set_status_msg("Type stash comment and press Enter", MessageKind::Info);
+                true
+            }
+            KeyCode::Char('l') => {
+                let dir = if key.modifiers.contains(KeyModifiers::SHIFT) { -1 } else { 1 };
+                self.git_status_cycle_section(dir);
                 true
             }
             KeyCode::Char('q') => {

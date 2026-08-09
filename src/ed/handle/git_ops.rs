@@ -278,6 +278,47 @@ impl Editor {
         }
     }
 
+    pub(super) fn git_status_cycle_section(&mut self, dir: i32) {
+        let row = self.active_window().row;
+
+        let section_starts = match self.buf().git_status_state.as_ref() {
+            Some(s) => s.section_starts.clone(),
+            None => return,
+        };
+
+        if section_starts.is_empty() {
+            return;
+        }
+
+        let target_start = if dir > 0 {
+            section_starts.iter().find(|&&s| s > row).copied()
+                .or_else(|| section_starts.first().copied())
+        } else {
+            section_starts.iter().rev().find(|&&s| s < row).copied()
+                .or_else(|| section_starts.last().copied())
+        };
+
+        if let Some(start) = target_start {
+            let buf_len = self.buf().len_lines();
+            let has_first_item = self.buf().git_status_state.as_ref()
+                .and_then(|s| s.line_actions.get(&(start + 2)))
+                .is_some();
+
+            let win = self.active_window_mut();
+            let max_row = buf_len.saturating_sub(1);
+
+            let target_row = if has_first_item {
+                start + 2
+            } else {
+                start
+            };
+
+            win.row = target_row.min(max_row);
+            win.desired_col = 0;
+            win.col = 0;
+        }
+    }
+
     pub(super) fn git_status_close(&mut self) {
         let target = "*git-status*";
         if let Some(id) = self
