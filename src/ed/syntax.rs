@@ -169,6 +169,11 @@ impl SyntaxState {
                 self.highlight_cache.insert(row, char_styles.clone());
                 return char_styles;
             }
+            Some("markdown") => {
+                char_styles = style_for_md_patch_line(line_text);
+                self.highlight_cache.insert(row, char_styles.clone());
+                return char_styles;
+            }
             None => {
                 self.highlight_cache.insert(row, char_styles.clone());
                 return char_styles;
@@ -937,6 +942,36 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
     }
     styles
 }
+fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut styles = vec![None; chars.len()];
+    let trimmed = line.trim_start();
+
+    if trimmed.starts_with("// DELETE: ") {
+        let style = Style::default()
+            .fg(Color::Rgb(243, 139, 168)) // Red
+            .add_modifier(Modifier::BOLD);
+        styles.fill(Some(style));
+    } else if trimmed.starts_with("// ") {
+        let style = Style::default()
+            .fg(Color::Rgb(137, 180, 250)) // Blue
+            .add_modifier(Modifier::BOLD);
+        styles.fill(Some(style));
+    } else if trimmed.starts_with("<<<<<<< SEARCH") || trimmed.starts_with(">>>>>>> REPLACE") {
+        let style = Style::default()
+            .fg(Color::Rgb(203, 166, 247)) // Mauve
+            .add_modifier(Modifier::BOLD);
+        styles.fill(Some(style));
+    } else if trimmed.starts_with("=======") {
+        let style = Style::default()
+            .fg(Color::Rgb(94, 105, 120)) // Overlay0
+            .add_modifier(Modifier::BOLD);
+        styles.fill(Some(style));
+    }
+
+    styles
+}
+
 fn style_for_git_status_line(line: &str) -> Vec<Option<Style>> {
     let chars: Vec<char> = line.chars().collect();
     let mut styles = vec![None; chars.len()];
