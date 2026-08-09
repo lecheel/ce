@@ -945,28 +945,226 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
 fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
     let chars: Vec<char> = line.chars().collect();
     let mut styles = vec![None; chars.len()];
-    let trimmed = line.trim_start();
+    
+    // Find the starting character index of non-whitespace
+    let mut leading_ws = 0;
+    while leading_ws < chars.len() && chars[leading_ws].is_whitespace() {
+        leading_ws += 1;
+    }
+    if leading_ws >= chars.len() {
+        return styles;
+    }
 
-    if trimmed.starts_with("// DELETE: ") {
+    let starts_with = |s: &str| -> bool {
+        let target: Vec<char> = s.chars().collect();
+        chars[leading_ws..(leading_ws + target.len().min(chars.len() - leading_ws))] == target
+    };
+
+    // 1. Aider Patch Directives
+    if starts_with("// DELETE: ") {
         let style = Style::default()
             .fg(Color::Rgb(243, 139, 168)) // Red
             .add_modifier(Modifier::BOLD);
         styles.fill(Some(style));
-    } else if trimmed.starts_with("// ") {
+        return styles;
+    } else if starts_with("// ") {
         let style = Style::default()
             .fg(Color::Rgb(137, 180, 250)) // Blue
             .add_modifier(Modifier::BOLD);
         styles.fill(Some(style));
-    } else if trimmed.starts_with("<<<<<<< SEARCH") || trimmed.starts_with(">>>>>>> REPLACE") {
+        return styles;
+    } else if starts_with("<<<<<<< SEARCH") || starts_with(">>>>>>> REPLACE") {
         let style = Style::default()
             .fg(Color::Rgb(203, 166, 247)) // Mauve
             .add_modifier(Modifier::BOLD);
         styles.fill(Some(style));
-    } else if trimmed.starts_with("=======") {
+        return styles;
+    } else if starts_with("=======") {
         let style = Style::default()
             .fg(Color::Rgb(94, 105, 120)) // Overlay0
             .add_modifier(Modifier::BOLD);
         styles.fill(Some(style));
+        return styles;
+    }
+
+    // 2. Standard Markdown Headers
+    if chars[leading_ws] == '#' {
+        let mut level = 0;
+        while leading_ws + level < chars.len() && chars[leading_ws + level] == '#' {
+            level += 1;
+        }
+        if level <= 6 && leading_ws + level < chars.len() && chars[leading_ws + level] == ' ' {
+            let header_style = match level {
+                1 => Style::default().fg(Color::Rgb(203, 166, 247)).add_modifier(Modifier::BOLD), // Mauve
+                2 => Style::default().fg(Color::Rgb(137, 180, 250)).add_modifier(Modifier::BOLD), // Blue
+                _ => Style::default().fg(Color::Rgb(116, 199, 236)).add_modifier(Modifier::BOLD), // Cyan
+            };
+            styles.fill(Some(header_style));
+            return styles;
+        }
+    }
+
+    // 3. Blockquotes
+    if chars[leading_ws] == '>' {
+        let style = Style::default().fg(Color::Rgb(94, 105, 120)).add_modifier(Modifier::ITALIC); // Overlay0
+        styles.fill(Some(style));
+        return styles;
+    }
+
+    // 4. Code blocks
+    if starts_with("```") || starts_with("~~~") {
+        let style = Style::default().fg(Color::Rgb(137, 180, 250)); // Blue
+        styles.fill(Some(style));
+        return styles;
+    }
+
+    // 5. Lists (Unordered)
+    let first_char = chars[leading_ws];
+    if (first_char == '-' || first_char == '*') && leading_ws + 1 < chars.len() && chars[leading_ws + 1] == ' ' {
+        let bullet_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
+        styles[leading_ws] = Some(bullet_style);
+        styles[leading_ws + 1] = Some(bullet_style);
+    } else if first_char.is_ascii_digit() {
+        // Ordered lists (e.g., "1. Item")
+        let mut dot_pos = leading_ws;
+        while dot_pos < chars.len() && chars[dot_pos].is_ascii_digit() {
+            dot_pos += 1;
+        }
+        if dot_pos < chars.len() && chars[dot_pos] == '.' && dot_pos + 1 < chars.len() && chars[dot_pos + 1] == ' ' {
+            let bullet_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
+            for i in leading_ws..=dot_pos {
+                styles[i] = Some(bullet_style);
+            }
+        }
+    }
+
+    // 6. Inline elements (Code, Bold, Italic, Links)
+    let mut i = leading_ws;
+    while i < chars.len() {
+        // Inline code `code`
+        if chars[i] == '`' {
+            let start = i;
+            i += 1;
+            let mut found = false;
+            while i < chars.len() {
+                if chars[i] == '`' {
+                    found = true;
+                    break;
+                }
+                i += 1;
+            }
+            if found {
+                let code_style = Style::default().fg(Color::Rgb(166, 227, 161)); // Green
+                for j in start..=i {
+                    styles[j] = Some(code_style);
+                }
+                i += 1;
+                continue;
+            } else {
+                i = start; // Unmatched, fallback
+            }
+        }
+        // Bold / Italic
+        else if chars[i] == '*' || chars[i] == '_' {
+            let marker = chars[i];
+            let mut count = 0;
+            while i < chars.len() && chars[i] == marker {
+                count += 1;
+                i += 1;
+            }
+            let start_marker_pos = i - count;
+            
+            // Find matching marker in chars
+            let mut found_pos = None;
+            let mut j = i;
+            while j < chars.len() {
+                if chars[j] == marker {
+                    let mut k = 0;
+                    while j + k < chars.len() && k < count && chars[j + k] == marker {
+                        k += 1;
+                    }
+                    if k == count {
+                        found_pos = Some(j);
+                        break;
+                    }
+                    j += k;
+                } else {
+                    j += 1;
+                }
+            }
+            
+            if let Some(abs_pos) = found_pos {
+                let style_to_apply = match count {
+                    1 => Style::default().add_modifier(Modifier::ITALIC),
+                    2 => Style::default().add_modifier(Modifier::BOLD),
+                    _ => Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC),
+                };
+                for k in start_marker_pos..abs_pos {
+                    styles[k] = Some(style_to_apply);
+                }
+                // Mute the markers themselves
+                let mute_style = Style::default().fg(Color::Rgb(94, 105, 120));
+                for k in start_marker_pos..i {
+                    styles[k] = Some(mute_style);
+                }
+                for k in abs_pos..(abs_pos + count) {
+                    styles[k] = Some(mute_style);
+                }
+                i = abs_pos + count;
+                continue;
+            } else {
+                // Unmatched marker
+                let mute_style = Style::default().fg(Color::Rgb(94, 105, 120));
+                for k in start_marker_pos..i {
+                    styles[k] = Some(mute_style);
+                }
+            }
+        }
+        // Links [text](url)
+        else if chars[i] == '[' {
+            let start_text = i;
+            let mut j = i + 1;
+            let mut found_close = false;
+            while j < chars.len() {
+                if chars[j] == ']' {
+                    found_close = true;
+                    break;
+                }
+                j += 1;
+            }
+            if found_close && j + 1 < chars.len() && chars[j + 1] == '(' {
+                let close_bracket = j;
+                let mut k = j + 2;
+                let mut found_paren = false;
+                while k < chars.len() {
+                    if chars[k] == ')' {
+                        found_paren = true;
+                        break;
+                    }
+                    k += 1;
+                }
+                if found_paren {
+                    let close_paren = k;
+                    let text_style = Style::default().fg(Color::Rgb(130, 215, 250)); // Cyan
+                    let url_style = Style::default().fg(Color::Rgb(137, 180, 250)); // Blue
+                    let bracket_style = Style::default().fg(Color::Rgb(94, 105, 120));
+                    
+                    for l in (start_text + 1)..close_bracket {
+                        styles[l] = Some(text_style);
+                    }
+                    for l in (close_bracket + 2)..close_paren {
+                        styles[l] = Some(url_style);
+                    }
+                    styles[start_text] = Some(bracket_style);
+                    styles[close_bracket] = Some(bracket_style);
+                    styles[close_bracket + 1] = Some(bracket_style);
+                    styles[close_paren] = Some(bracket_style);
+                    i = close_paren + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
     }
 
     styles
