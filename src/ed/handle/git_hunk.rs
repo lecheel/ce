@@ -33,6 +33,26 @@ fn find_hunk_idx(patch: &git2::Patch, row: usize) -> Option<usize> {
     None
 }
 
+/// Expand tab characters to `width` spaces, tracking column position so
+/// tabs align to stops rather than each counting as a single column.
+/// Popup box-drawing computes line width from `.chars().count()`, and an
+/// un-expanded `\t` renders wider in the terminal than it counts for,
+/// which breaks the border alignment.
+fn expand_tabs(s: &str, width: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    for ch in s.chars() {
+        if ch == '\t' {
+            let spaces = width - (col % width);
+            out.push_str(&" ".repeat(spaces));
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
+}
 /// Extract formatted diff lines from a specific hunk.
 fn extract_hunk_lines(patch: &git2::Patch, hunk_idx: usize) -> Vec<String> {
     let hunk_header = match patch.hunk(hunk_idx) {
@@ -54,9 +74,10 @@ fn extract_hunk_lines(patch: &git2::Patch, hunk_idx: usize) -> Vec<String> {
                 let origin = line.origin();
                 let content = String::from_utf8_lossy(line.content()).to_string();
                 let trimmed = content.trim_end_matches('\n');
+                let expanded = expand_tabs(trimmed, 4);
                 match origin {
-                    '+' | '-' | ' ' => lines.push(format!("{}{}", origin, trimmed)),
-                    _ => lines.push(trimmed.to_string()),
+                    '+' | '-' | ' ' => lines.push(format!("{}{}", origin, expanded)),
+                    _ => lines.push(expanded),
                 }
             }
         }
