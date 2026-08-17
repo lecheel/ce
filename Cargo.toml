@@ -32,9 +32,6 @@ webpki-roots = "0.26"
 git2 = "0.20.4"
 toml = "0.8"
 
-# arboard (system clipboard) is not supported on Termux/Android.
-[target.'cfg(not(target_os = "android"))'.dependencies]
-arboard = "3.4"
 fuzzy-matcher = "0.3"
 strum = { version = "0.26", features = ["derive"] }
 strum_macros = "0.26"
@@ -51,6 +48,11 @@ tree-sitter-javascript = "0.23"
 tree-sitter-diff = "0.1.0"
 glob = "0.3.3"
 which = "8.0.2"
+
+
+# arboard (system clipboard) is not supported on Termux/Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3.4"
 
 [lints.rust]
 unused_variables = "allow"

@@ -53,15 +53,24 @@ impl HealthBuilder {
 fn check_clipboard(hb: &mut HealthBuilder, config: &crate::config::app_config::Config) {
     hb.header("Clipboard");
 
-    match arboard::Clipboard::new() {
-        Ok(_) => {
-            hb.ok("System clipboard (arboard) is available");
+    #[cfg(not(target_os = "android"))]
+    {
+        match arboard::Clipboard::new() {
+            Ok(_) => {
+                hb.ok("System clipboard (arboard) is available");
+            }
+            Err(e) => {
+                hb.error(&format!("System clipboard (arboard) not available: {}", e));
+                hb.info("On Linux, install xclip or xsel for X11, or check Wayland support");
+                hb.info("On macOS/Windows, this should work out of the box");
+            }
         }
-        Err(e) => {
-            hb.error(&format!("System clipboard (arboard) not available: {}", e));
-            hb.info("On Linux, install xclip or xsel for X11, or check Wayland support");
-            hb.info("On macOS/Windows, this should work out of the box");
-        }
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        hb.warn("System clipboard (arboard) is not supported on Termux/Android");
+        hb.info("Editor will use internal clipboard only.");
     }
 }
 
