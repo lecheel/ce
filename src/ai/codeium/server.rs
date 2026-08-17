@@ -49,6 +49,12 @@ fn get_target_info() -> (&'static str, &'static str) {
             "02829b8180a77f7b4e5b2b0094170e0326cfcebd4b3a80bad2618eef8e6ca0f5",
         );
     }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        // Fallback for unsupported platforms like Android/Termux
+        return ("unsupported_platform", "");
+    }
 }
 
 // ---------------------------------------------------------------------------
