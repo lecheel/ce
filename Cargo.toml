@@ -30,8 +30,11 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
 git2 = "0.20.4"
-arboard = "3.4"
 toml = "0.8"
+
+# arboard (system clipboard) is not supported on Termux/Android.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = "3.4"
 fuzzy-matcher = "0.3"
 strum = { version = "0.26", features = ["derive"] }
 strum_macros = "0.26"

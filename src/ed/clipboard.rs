@@ -15,6 +15,11 @@ use crate::ed::MessageKind;
 // ---------------------------------------------------------------------------
 
 /// Read the current system clipboard contents as a String.
+///
+/// On platforms where `arboard` is unavailable (e.g. Termux/Android),
+/// this always returns `None`, causing the editor to fall back to the
+/// internal clipboard only.
+#[cfg(not(target_os = "android"))]
 pub fn read_system_clipboard() -> Option<String> {
     match arboard::Clipboard::new() {
         Ok(mut cb) => match cb.get_text() {
@@ -25,12 +30,27 @@ pub fn read_system_clipboard() -> Option<String> {
     }
 }
 
+#[cfg(target_os = "android")]
+pub fn read_system_clipboard() -> Option<String> {
+    None
+}
+
 /// Write a string to the system clipboard.
+///
+/// Returns `false` on platforms where `arboard` is unavailable
+/// (e.g. Termux/Android), so callers can fall back to the internal
+/// clipboard without failing the operation.
+#[cfg(not(target_os = "android"))]
 pub fn write_system_clipboard(text: &str) -> bool {
     match arboard::Clipboard::new() {
         Ok(mut cb) => cb.set_text(text).is_ok(),
         Err(_) => false,
     }
+}
+
+#[cfg(target_os = "android")]
+pub fn write_system_clipboard(_text: &str) -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
