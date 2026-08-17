@@ -482,6 +482,10 @@ impl Buffer {
         }
         let start = self.rope.line_to_char(idx);
         let end = self.rope.line_to_char(idx + 1);
+        eprintln!(
+            "[line_text] idx={} len_lines={} start={} end={}",
+            idx, self.rope.len_lines(), start, end
+        );
         if end > start {
             // FIX: only strip the newline if it actually is one
             if self.rope.char(end - 1) == '\n' {

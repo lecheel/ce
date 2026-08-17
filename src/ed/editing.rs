@@ -123,13 +123,15 @@ pub fn insert_char(win: &mut Window, buf: &mut Buffer, ch: char) {
 
 /// Insert a newline at the cursor position, auto-copying indentation.
 pub fn insert_newline(win: &mut Window, buf: &mut Buffer) {
+    if !cursor_in_bounds(win, buf) {
+        return;
+    }
     let row = win.row;
     let line_text = buf.line_text(row);
     let chars: Vec<char> = line_text.chars().collect();
-
-    let before: String = chars[..win.col].iter().collect();
-    let after: String = chars[win.col..].iter().collect();
-
+    let col = win.col.min(chars.len());
+    let before: String = chars[..col].iter().collect();
+    let after: String = chars[col..].iter().collect();
     let before_trimmed = before.trim_end();
     let base_indent: String = line_text
         .chars()
@@ -165,6 +167,9 @@ pub fn insert_newline(win: &mut Window, buf: &mut Buffer) {
 }
 
 pub fn insert_newline_below(win: &mut Window, buf: &mut Buffer) {
+    if !cursor_in_bounds(win, buf) {
+        return;
+    }
     let row = win.row;
     let raw_line = buf.line_text(row);
     let line_text = raw_line.trim_end_matches('\n');
@@ -199,6 +204,9 @@ pub fn insert_newline_below(win: &mut Window, buf: &mut Buffer) {
 }
 
 pub fn insert_newline_above(win: &mut Window, buf: &mut Buffer) {
+    if !cursor_in_bounds(win, buf) {
+        return;
+    }
     let row = win.row;
     let raw_line = buf.line_text(row);
     let line_text = raw_line.trim_end_matches('\n');
@@ -236,40 +244,35 @@ pub fn backspace(win: &mut Window, buf: &mut Buffer) {
     if !cursor_in_bounds(win, buf) {
         return;
     }
-    if win.col > 0 {
+    let line_len = buf.line_char_len(win.row);
+    let col = win.col.min(line_len);
+    if col > 0 {
         let line_start = buf.rope.line_to_char(win.row);
         let text = buf.line_text(win.row);
-
-        // Find grapheme ending at win.col
         let mut char_idx = 0;
         let mut prev_char_idx = 0;
         let mut prev_grapheme_len = 0;
         for grapheme in graphemes(&text) {
-            if char_idx == win.col {
+            if char_idx == col {
                 break;
             }
             prev_char_idx = char_idx;
             prev_grapheme_len = grapheme.chars().count();
             char_idx += grapheme.chars().count();
         }
-
         let start_offset = line_start + prev_char_idx;
-        let end_offset = line_start + win.col;
-
+        let end_offset = line_start + col;
         let start_byte = buf.rope.char_to_byte(start_offset);
         let old_end_byte = buf.rope.char_to_byte(end_offset);
         let start_row = win.row;
         let start_col_byte = start_byte.saturating_sub(buf.rope.line_to_byte(start_row));
         let old_end_col_byte = old_end_byte.saturating_sub(buf.rope.line_to_byte(start_row));
-
         let start_point = tree_sitter::Point::new(start_row, start_col_byte);
         let old_end_point = tree_sitter::Point::new(start_row, old_end_col_byte);
-
         buf.rope.remove(start_offset..end_offset);
         win.col = prev_char_idx;
         win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
         buf.mark_modified();
-
         let edit = tree_sitter::InputEdit {
             start_byte,
             old_end_byte,
@@ -318,24 +321,21 @@ pub fn delete_char_forward(win: &mut Window, buf: &mut Buffer) {
         return;
     }
     let line_len = buf.line_char_len(win.row);
-
-    if win.col < line_len {
+    let col = win.col.min(line_len);
+    if col < line_len {
         let line_start = buf.rope.line_to_char(win.row);
         let text = buf.line_text(win.row);
-
         let mut char_idx = 0;
         let mut grapheme_len = 1;
         for grapheme in graphemes(&text) {
-            if char_idx == win.col {
+            if char_idx == col {
                 grapheme_len = grapheme.chars().count();
                 break;
             }
             char_idx += grapheme.chars().count();
         }
-
-        let start_offset = line_start + win.col;
-        let end_offset = line_start + win.col + grapheme_len;
-
+        let start_offset = line_start + col;
+        let end_offset = line_start + col + grapheme_len;
         let start_byte = buf.rope.char_to_byte(start_offset);
         let old_end_byte = buf.rope.char_to_byte(end_offset);
         let start_row = win.row;
@@ -502,12 +502,13 @@ pub fn paste_text(win: &mut Window, buf: &mut Buffer, text: &str) {
     if !cursor_in_bounds(win, buf) {
         return;
     }
+    let line_len = buf.line_char_len(win.row);
+    let col = win.col.min(line_len);
     let line_start = buf.rope.line_to_char(win.row);
-    let insert_offset = line_start + win.col;
-
+    let insert_offset = line_start + col;
     let char_count = text.chars().count();
     buf.rope.insert(insert_offset, text);
-    win.col += char_count;
+    win.col = col + char_count;
     win.desired_col = visual_col_from_char_idx(&buf.line_text(win.row), win.col, buf.tab_size);
     buf.mark_modified();
     buf.parse_syntax();
