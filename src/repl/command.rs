@@ -915,6 +915,9 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
         "gc" | "gitcommit" => {
             editor.git_commit_generate();
         }
+        "blame" => {
+            editor.toggle_git_blame();
+        }
         // ---- Clear Search Highlight ----
         "noh" | "nohl" | "nohlsearch" => {
             editor.last_search_query = None;
@@ -971,7 +974,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
         "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep", "skill ",
-        "skill all",
+        "skill all", "blame",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();
