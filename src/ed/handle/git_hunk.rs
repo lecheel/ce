@@ -1,6 +1,8 @@
 //! Hunk-level operations: popup, revert, jump-to-hunk, diff stats.
 
+use crate::ed::buffer::BufferKind;
 use crate::ed::misc_helper::{get_head_file_content, group_signed_rows};
+use crate::ed::Buffer;
 use crate::ed::MessageKind;
 use crate::Editor;
 
@@ -420,4 +422,149 @@ impl Editor {
         }
         on_hunk
     }
+
+    pub fn toggle_git_blame(&mut self) {
+        self.blame_active = !self.blame_active;
+        if self.blame_active {
+            let filename = match self.buf().filename.clone() {
+                Some(f) => f,
+                None => {
+                    self.set_status_msg("No file associated with buffer", MessageKind::Error);
+                    self.blame_active = false;
+                    return;
+                }
+            };
+            self.blame_data = fetch_blame_data(&filename);
+            self.set_status_msg(
+                "Git blame enabled. Press 'c' to view commit.",
+                MessageKind::Info,
+            );
+        } else {
+            self.blame_data.clear();
+            self.blame_diff_buf_id = None;
+            self.blame_orig_buf_id = None;
+            self.set_status_msg("Git blame disabled", MessageKind::Info);
+        }
+    }
+
+    pub fn show_blame_commit(&mut self) {
+        let row = self.active_window().row;
+        let commit_hash = match self.blame_data.get(row).and_then(|o| o.as_ref()) {
+            Some((_, hash)) => hash.clone(),
+            None => {
+                self.set_status_msg("No blame info at cursor", MessageKind::Error);
+                return;
+            }
+        };
+
+        let filename = self.buf().filename.clone().unwrap_or_default();
+        let repo_root = match std::path::Path::new(&filename)
+            .parent()
+            .and_then(|p| git2::Repository::discover(p).ok())
+            .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+        {
+            Some(root) => root,
+            None => std::path::PathBuf::from("."),
+        };
+
+        let diff_text = crate::git::log::load_commit_diff(&repo_root, &commit_hash)
+            .unwrap_or_else(|| "Failed to load commit diff".to_string());
+
+        let buf_id = self.next_buf_id;
+        self.next_buf_id += 1;
+        let mut buf = match Buffer::new(buf_id, None) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        buf.kind = BufferKind::GitDiff;
+        buf.rope = ropey::Rope::from_str(&diff_text);
+        buf.parse_syntax();
+
+        self.buffers.push(buf);
+        self.blame_orig_buf_id = Some(self.active_window().buffer_id());
+        self.blame_diff_buf_id = Some(buf_id);
+        self.windows[self.active_window_idx].set_buffer_id(buf_id);
+        self.active_window_mut().row = 0;
+        self.active_window_mut().col = 0;
+        self.active_window_mut().scroll_line = 0;
+    }
+
+    pub fn close_blame_commit(&mut self) {
+        if let Some(orig_id) = self.blame_orig_buf_id.take() {
+            self.windows[self.active_window_idx].set_buffer_id(orig_id);
+            self.blame_diff_buf_id = None;
+            self.scroll_active_window_to_cursor();
+        }
+    }
+}
+
+fn fetch_blame_data(filename: &str) -> Vec<Option<(String, String)>> {
+    let path = std::path::Path::new(filename);
+    let repo = match git2::Repository::discover(path) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let workdir = match repo.workdir() {
+        Some(wd) => wd,
+        None => return Vec::new(),
+    };
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let rel_path = match canon.strip_prefix(workdir) {
+        Ok(rp) => rp.to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    };
+
+    let output = std::process::Command::new("git")
+        .args(["blame", "--date=format:%d%b%y %H:%M", "--", &rel_path])
+        .current_dir(workdir)
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut result = Vec::new();
+    let mut prev_key: Option<String> = None;
+    let blame_width = 36;
+
+    for line in text.lines() {
+        if let Some((hash, rest)) = line.split_once(' ') {
+            let hash = hash.trim_start_matches('^');
+            if let Some(details) = rest.strip_prefix('(') {
+                if let Some(end) = details.find(')') {
+                    let inner = &details[..end];
+                    let mut iter = inner.rsplitn(4, ' ');
+                    let _line_num = iter.next().unwrap_or("");
+                    let time = iter.next().unwrap_or("");
+                    let day = iter.next().unwrap_or("");
+                    let author = iter.next().unwrap_or("");
+                    let full_date = format!("{} {}", day, time);
+
+                    let short_hash = &hash[..hash.len().min(5)];
+                    let key = format!("{}{}", hash, author);
+
+                    if Some(&key) == prev_key.as_ref() {
+                        result.push(None);
+                    } else {
+                        let short_author = if author.chars().count() > 8 {
+                            author.chars().take(8).collect::<String>()
+                        } else {
+                            author.to_string()
+                        };
+                        let display = format!("{:<5} {:<13} {:<8} │ ", short_hash, full_date.trim(), short_author);
+                        let display = if display.len() > blame_width {
+                            display[..blame_width].to_string()
+                        } else {
+                            format!("{:<width$}", display, width = blame_width)
+                        };
+                        result.push(Some((display, hash.to_string())));
+                        prev_key = Some(key);
+                    }
+                }
+            }
+        }
+    }
+    result
 }

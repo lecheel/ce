@@ -210,6 +210,7 @@ pub enum Action {
     HunkPrev,
     GitRevert,
     HunkPopup,
+    ToggleGitBlame,
     GitLog,
     GitStatus,
 

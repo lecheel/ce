@@ -231,7 +231,11 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
     let windows = &editor.windows;
     let buffers = &mut editor.buffers;
     let config = &editor.config;
-
+    let blame_data: &[Option<(String, String)>] = if editor.blame_active {
+        &editor.blame_data
+    } else {
+        &[]
+    };
     for (idx, win) in windows.iter().enumerate() {
         let pos = win.position;
         if !pos.is_visible() {
@@ -274,6 +278,7 @@ pub fn draw_windows(f: &mut Frame, area: Rect, editor: &mut Editor) {
                 block_insert_col,
                 search_query.as_deref(),
                 em_targets,
+                blame_data,
             );
         }
     }
@@ -299,6 +304,7 @@ fn draw_pane(
     block_insert_col: Option<usize>,
     search_query: Option<&str>,
     easymotion_targets: Option<&[crate::ed::editor::EasyMotionTarget]>,
+    blame_data: &[Option<(String, String)>],
 ) {
     let viewport_height = area.height as usize;
     let scroll = win.scroll_line;
@@ -452,7 +458,15 @@ fn draw_pane(
         }
 
         let gutter_spans = crate::ed::gutter::render_gutter_line(buf, win, i, config);
-
+        let blame_str = if !blame_data.is_empty() {
+            match blame_data.get(i) {
+                Some(Some((display, _))) => display.clone(),
+                _ => " ".repeat(36),
+            }
+        } else {
+            String::new()
+        };
+        let blame_span = Span::styled(blame_str, Style::default().fg(Color::Rgb(100, 100, 120)));
         let line_bg = if is_cursor_line && config.cursor_line_highlight {
             Some(config.resolve_color(&config.cursor_line_highlight_color))
         } else {
@@ -524,7 +538,7 @@ fn draw_pane(
             let visual_cursor_x = vis_col.saturating_sub(win.scroll_col) as u16;
 
             let mut spans = gutter_spans;
-
+            spans.push(blame_span.clone());
             let before_len = safe_offset.min(highlights.len());
             spans.extend(styled_spans_from_highlights(
                 &chars[..safe_offset],
@@ -674,6 +688,7 @@ fn draw_pane(
             );
 
             let mut spans = gutter_spans;
+            spans.push(blame_span.clone());
             spans.extend(styled_spans_from_highlights(
                 &chars,
                 text_style,

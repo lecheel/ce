@@ -1909,6 +1909,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::HunkPopup => {
             editor.open_hunk_popup();
         }
+        Action::ToggleGitBlame => {
+            editor.toggle_git_blame();
+        }
         Action::GitLog => {
             editor.open_git_log(None);
         }

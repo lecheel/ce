@@ -223,6 +223,10 @@ pub struct Editor {
     /// Channel to receive MQTT messages from the background subscriber.
     pub mqtt_rx: Option<std::sync::mpsc::Receiver<String>>,
     pub input_box_result: Option<String>,
+    pub blame_active: bool,
+    pub blame_data: Vec<Option<(String, String)>>,
+    pub blame_orig_buf_id: Option<usize>,
+    pub blame_diff_buf_id: Option<usize>,
 
     //-- struct Editor (anchor dont removed) --//
     pub quit_prompt: QuitPrompt,
@@ -357,6 +361,10 @@ impl Editor {
             current_count: 0,
             insert_buffer: None,
             quit_prompt: QuitPrompt::None,
+            blame_active: false,
+            blame_data: Vec::new(),
+            blame_orig_buf_id: None,
+            blame_diff_buf_id: None,
         };
 
         editor.comp.sync_config(&editor.config);
@@ -898,11 +906,16 @@ impl Editor {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return;
         }
-        if matches!(key.code, crossterm::event::KeyCode::Modifier(_)) {
-            return;
+        if self.blame_active && matches!(self.mode, Mode::Normal) {
+            if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
+                if self.blame_diff_buf_id.is_some() && self.active_window().buffer_id() == self.blame_diff_buf_id.unwrap() {
+                    self.close_blame_commit();
+                } else {
+                    self.show_blame_commit();
+                }
+                return;
+            }
         }
-
-        // ── Register prefix for Normal / Visual modes ──────────────
         if matches!(
             self.mode,
             Mode::Normal | Mode::Visual | Mode::VisualLine | Mode::VisualBlock

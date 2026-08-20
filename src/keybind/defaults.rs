@@ -76,6 +76,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         (">", Action::IndentSelection),
         ("<", Action::OutdentSelection),
         ("space g r", Action::GitRevert),
+        ("space g b", Action::ToggleGitBlame),
         // Global shortcuts
         ("alt+d", Action::DeleteCurrentLine),
         ("ctrl+alt+p", Action::EnterCommandPalette),
