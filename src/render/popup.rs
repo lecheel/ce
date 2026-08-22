@@ -1679,15 +1679,26 @@ fn draw_quickfix(f: &mut Frame, editor: &Editor, screen: Rect) {
             } else {
                 Style::default().fg(Color::Gray)
             };
-
+            let tab_size = editor.config.tab_size.max(1);
+            let mut clean_text = String::new();
+            let mut col = 0;
+            for ch in entry.line_text.chars() {
+                if ch == '\t' {
+                    let spaces = tab_size - (col % tab_size);
+                    clean_text.push_str(&" ".repeat(spaces));
+                    col += spaces;
+                } else if ch != '\r' && ch != '\n' {
+                    clean_text.push(ch);
+                    col += 1;
+                }
+            }
             let line = Line::from(vec![
                 Span::styled(format!(" {:>3} ", entry_idx + 1), idx_style),
                 Span::styled(format!("{} ", display_path.display()), path_style),
                 Span::styled(format!(":{} ", entry.line_number), line_style),
-                Span::styled(entry.line_text.clone(), text_style),
+                Span::styled(clean_text, text_style),
             ])
             .style(row_style);
-
             list_items.push(ListItem::new(line));
         } else {
             list_items.push(ListItem::new(Line::from("")));
