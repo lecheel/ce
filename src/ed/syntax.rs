@@ -945,7 +945,7 @@ fn style_for_rg_line(line: &str) -> Vec<Option<Style>> {
 fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
     let chars: Vec<char> = line.chars().collect();
     let mut styles = vec![None; chars.len()];
-    
+
     // Find the starting character index of non-whitespace
     let mut leading_ws = 0;
     while leading_ws < chars.len() && chars[leading_ws].is_whitespace() {
@@ -995,9 +995,15 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
         }
         if level <= 6 && leading_ws + level < chars.len() && chars[leading_ws + level] == ' ' {
             let header_style = match level {
-                1 => Style::default().fg(Color::Rgb(203, 166, 247)).add_modifier(Modifier::BOLD), // Mauve
-                2 => Style::default().fg(Color::Rgb(137, 180, 250)).add_modifier(Modifier::BOLD), // Blue
-                _ => Style::default().fg(Color::Rgb(116, 199, 236)).add_modifier(Modifier::BOLD), // Cyan
+                1 => Style::default()
+                    .fg(Color::Rgb(203, 166, 247))
+                    .add_modifier(Modifier::BOLD), // Mauve
+                2 => Style::default()
+                    .fg(Color::Rgb(137, 180, 250))
+                    .add_modifier(Modifier::BOLD), // Blue
+                _ => Style::default()
+                    .fg(Color::Rgb(116, 199, 236))
+                    .add_modifier(Modifier::BOLD), // Cyan
             };
             styles.fill(Some(header_style));
             return styles;
@@ -1006,7 +1012,9 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
 
     // 3. Blockquotes
     if chars[leading_ws] == '>' {
-        let style = Style::default().fg(Color::Rgb(94, 105, 120)).add_modifier(Modifier::ITALIC); // Overlay0
+        let style = Style::default()
+            .fg(Color::Rgb(94, 105, 120))
+            .add_modifier(Modifier::ITALIC); // Overlay0
         styles.fill(Some(style));
         return styles;
     }
@@ -1020,7 +1028,10 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
 
     // 5. Lists (Unordered)
     let first_char = chars[leading_ws];
-    if (first_char == '-' || first_char == '*') && leading_ws + 1 < chars.len() && chars[leading_ws + 1] == ' ' {
+    if (first_char == '-' || first_char == '*')
+        && leading_ws + 1 < chars.len()
+        && chars[leading_ws + 1] == ' '
+    {
         let bullet_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
         styles[leading_ws] = Some(bullet_style);
         styles[leading_ws + 1] = Some(bullet_style);
@@ -1030,7 +1041,11 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
         while dot_pos < chars.len() && chars[dot_pos].is_ascii_digit() {
             dot_pos += 1;
         }
-        if dot_pos < chars.len() && chars[dot_pos] == '.' && dot_pos + 1 < chars.len() && chars[dot_pos + 1] == ' ' {
+        if dot_pos < chars.len()
+            && chars[dot_pos] == '.'
+            && dot_pos + 1 < chars.len()
+            && chars[dot_pos + 1] == ' '
+        {
             let bullet_style = Style::default().fg(Color::Rgb(249, 226, 175)); // Yellow
             for i in leading_ws..=dot_pos {
                 styles[i] = Some(bullet_style);
@@ -1073,7 +1088,7 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
                 i += 1;
             }
             let start_marker_pos = i - count;
-            
+
             // Find matching marker in chars
             let mut found_pos = None;
             let mut j = i;
@@ -1092,12 +1107,14 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
                     j += 1;
                 }
             }
-            
+
             if let Some(abs_pos) = found_pos {
                 let style_to_apply = match count {
                     1 => Style::default().add_modifier(Modifier::ITALIC),
                     2 => Style::default().add_modifier(Modifier::BOLD),
-                    _ => Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::ITALIC),
+                    _ => Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::ITALIC),
                 };
                 for k in start_marker_pos..abs_pos {
                     styles[k] = Some(style_to_apply);
@@ -1148,7 +1165,7 @@ fn style_for_md_patch_line(line: &str) -> Vec<Option<Style>> {
                     let text_style = Style::default().fg(Color::Rgb(130, 215, 250)); // Cyan
                     let url_style = Style::default().fg(Color::Rgb(137, 180, 250)); // Blue
                     let bracket_style = Style::default().fg(Color::Rgb(94, 105, 120));
-                    
+
                     for l in (start_text + 1)..close_bracket {
                         styles[l] = Some(text_style);
                     }

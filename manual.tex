@@ -1,0 +1,598 @@
+\documentclass[11pt,a4paper,openany]{book}
+
+% ==========================================
+% Packages & Configuration
+% ==========================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm, top=2.5cm, bottom=2.5cm]{geometry}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{tcolorbox}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{multicol}
+\usepackage{enumitem}
+\usepackage{amssymb}
+\usepackage{ragged2e}
+
+% ==========================================
+% Color Palette
+% ==========================================
+\definecolor{catMauve}{RGB}{136, 57, 239}
+\definecolor{catBlue}{RGB}{30, 102, 245}
+\definecolor{catSapphire}{RGB}{32, 159, 181}
+\definecolor{catGreen}{RGB}{64, 160, 43}
+\definecolor{catPeach}{RGB}{254, 100, 11}
+\definecolor{catDark}{RGB}{30, 30, 46}
+\definecolor{codebg}{RGB}{246, 247, 250}
+\definecolor{codeframe}{RGB}{220, 224, 232}
+\definecolor{inlinebg}{RGB}{236, 239, 244}
+
+% ==========================================
+% Custom JSON Language Definition for Listings
+% ==========================================
+\lstdefinelanguage{json}{
+    basicstyle=\small\ttfamily\color{catDark},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=8pt,
+    showstringspaces=false,
+    breaklines=true,
+    breakatwhitespace=true,
+    frame=single,
+    backgroundcolor=\color{codebg},
+    rulecolor=\color{codeframe},
+    stringstyle=\color{catSapphire},
+    keywordstyle=\color{catMauve}\bfseries,
+    morestring=[b]",
+    morestring=[d]',
+    literate=
+     *{:}{{{\color{catDark}{:}}}}{1}
+      {,}{{{\color{catDark}{,}}}}{1}
+      {\{}{{{\color{catMauve}{\{}}}}{1}
+      {\}}{{{\color{catMauve}{\}}}}}{1}
+      {[}{{{\color{catMauve}{[}}}}{1}
+      {]}{{{\color{catMauve}{]}}}}{1},
+}
+
+% ==========================================
+% General Code Listings Style
+% ==========================================
+\lstdefinestyle{codeStyle}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\small\ttfamily\color{catDark},
+    keywordstyle=\color{catMauve}\bfseries,
+    commentstyle=\color{catGreen}\itshape,
+    stringstyle=\color{catSapphire},
+    breaklines=true,
+    breakatwhitespace=true,
+    frame=single,
+    rulecolor=\color{codeframe},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    showstringspaces=false,
+    tabsize=4
+}
+\lstset{style=codeStyle}
+
+\newcommand{\code}[1]{\colorbox{inlinebg}{\texttt{#1}}}
+
+% ==========================================
+% TColorBox Environments
+% ==========================================
+\tcbuselibrary{skins,breakable}
+
+\newtcolorbox{recipebox}[1]{
+    enhanced,
+    colback=white,
+    colframe=catBlue,
+    arc=2.5mm,
+    fonttitle=\bfseries\sffamily\small,
+    title={$\blacktriangleright$\hspace{0.5em}#1},
+    boxrule=1pt,
+    left=10pt, right=10pt, top=8pt, bottom=8pt,
+    breakable
+}
+
+\newtcolorbox{keybox}[1]{
+    enhanced,
+    colback=white,
+    colframe=catMauve,
+    arc=2.5mm,
+    fonttitle=\bfseries\sffamily\small,
+    title={$\boxplus$\hspace{0.5em}#1},
+    boxrule=1pt,
+    left=10pt, right=10pt, top=8pt, bottom=8pt,
+    breakable
+}
+
+\newtcolorbox{notebox}[1]{
+    enhanced,
+    colback=codebg,
+    colframe=catSapphire,
+    arc=2.5mm,
+    fonttitle=\bfseries\sffamily\small,
+    coltitle=white,
+    title={$\blacklozenge$\hspace{0.5em}#1},
+    boxrule=0.8pt,
+    left=10pt, right=10pt, top=8pt, bottom=8pt,
+    breakable
+}
+
+% ==========================================
+% Headers & Footers
+% ==========================================
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\sffamily\small\thepage}
+\fancyhead[RE]{\sffamily\small\nouppercase{\leftmark}}
+\fancyhead[LO]{\sffamily\small\nouppercase{\rightmark}}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% ==========================================
+% Hyperref Settings
+% ==========================================
+\hypersetup{
+    colorlinks=true,
+    linkcolor=catBlue,
+    citecolor=catMauve,
+    urlcolor=catSapphire,
+    pdftitle={The ce Editor Manual & Developer Cookbook},
+    pdfauthor={ce Core Project},
+    pdfsubject={Modal Text Editing, AST Text Objects, and Embedded AI Architectures}
+}
+
+% ==========================================
+% Document Body
+% ==========================================
+\begin{document}
+
+% ------------------------------------------
+% Front Matter
+% ------------------------------------------
+\frontmatter
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries\sffamily The \texttt{ce} Editor Manual}\\[0.6em]
+    {\LARGE\bfseries\sffamily Architecture, Workflows \& Developer Cookbook}\\[1.5em]
+    {\large\color{catMauve}\textbf{Mini Vim Modal Buffer Editor with Native AI Ghost-Text, Copilot LSP,}}\\
+    {\large\color{catMauve}\textbf{Local LLM Skills, Tree-Sitter AST Objects, and Interactive Wgrep}}\\[3cm]
+
+    \texttt{>\_}\hspace{0.8em}\textbf{Native Rust Implementation}\\[0.5em]
+    \href{https://github.com/lecheel/ce}{\texttt{[GitHub] https://github.com/lecheel/ce}}\\[4cm]
+
+    \vfill
+    {\small\sffamily Comprehensive Edition $\cdot$ Built with Tokio, Ratatui, Tree-Sitter, and Git2}\\[0.3em]
+    {\small\sffamily \today}
+\end{titlepage}
+
+\tableofcontents
+
+% ------------------------------------------
+% Main Matter
+% ------------------------------------------
+\mainmatter
+
+% ==========================================
+% CHAPTER 1
+% ==========================================
+\chapter{System Overview \& Architecture}
+
+\section{Core Philosophy}
+The \texttt{ce} editor is a modal terminal text editor written in Rust. It eliminates the friction of traditional terminal editor plugin ecosystems by providing built-in, asynchronous native subsystems for:
+\begin{itemize}[noitemsep]
+    \item \textbf{Dual Modal Personalities:} Full Vim modal editing combined with legacy Brief editor emulation.
+    \item \textbf{Deep AI Ingestion \& Completions:} Non-blocking ghost-text completions from Codeium and GitHub Copilot, plus multi-backend local LLM integration (Ollama, llama.cpp, DeepSeek) with autonomous multi-round tool-calling skills.
+    \item \textbf{AST-Aware Editing:} Embedded Tree-Sitter grammars providing live scope tracking and AST-level text objects.
+    \item \textbf{Integrated Git \& Search Suite:} Non-blocking gutter diff calculation via \texttt{git2}, interactive status/log exploration, and two-way in-place disk refactoring via \texttt{wgrep}.
+\end{itemize}
+
+\section{Internal System Architecture}
+The editor is architected around an asynchronous event loop powered by Tokio and Ratatui.
+
+\begin{figure}[htbp]
+\centering
+\begin{tcolorbox}[colback=codebg,colframe=codeframe,arc=2mm,center,width=\textwidth]
+\fontsize{8.5pt}{10pt}\selectfont
+\begin{verbatim}
+                   +---------------------------------------+
+                   |        Terminal Crossterm Input       |
+                   +-------------------+-------------------+
+                                       |
+                                       v
++----------------+          +--------------------+         +-----------------+
+| Async LSP Task | -------> |  Tokio MPSC Event  | <------ | Codeium/Copilot |
+| (ctagd/stdio)  | AppMsg   |     Dispatcher     |  AppMsg | Ghost-Text Feed |
++----------------+          +---------+----------+         +-----------------+
+                                      |
+                                      v
+                  +---------------------------------------+
+                  |              Editor Core              |
+                  | - Buffer Manager (ropey::Rope)        |
+                  | - Window & Layout Engine (Splits)     |
+                  | - Tree-Sitter AST & Syntax Cache      |
+                  | - Modal State (Vim / Brief / Visual)  |
+                  | - Git Debouncer & Async Gutter Worker |
+                  +-------------------+-------------------+
+                                      |
+                                      v
+                  +---------------------------------------+
+                  |       Ratatui Rendering Pipeline      |
+                  | (Buffer Views, Status Bar, Popups)    |
+                  +---------------------------------------+
+\end{verbatim}
+\end{tcolorbox}
+\caption{The \texttt{ce} asynchronous runtime architecture.}
+\end{figure}
+
+\section{Buffer \& Memory Engine}
+Buffers in \texttt{ce} are represented using \texttt{ropey::Rope}, an immutable chunk-based rope data structure that delivers $O(\log N)$ insertions, deletions, and line-to-character indexing:
+\begin{itemize}[noitemsep]
+    \item \textbf{Incremental Syntax Snapshots:} Edits emit Tree-Sitter \texttt{InputEdit} structs, re-parsing only the modified AST nodes.
+    \item \textbf{Snapshot-based Undo/Redo:} Full cursor and buffer state tracking with branching undo chains.
+    \item \textbf{Specialized Buffer Kinds:} Including \texttt{Normal}, \texttt{Llm} history, \texttt{LlmInput}, \texttt{CodeLlm}, \texttt{Ripgrep}, \texttt{Wgrep}, \texttt{GitStatus}, \texttt{GitLog}, and \texttt{Build} diagnostics.
+\end{itemize}
+
+% ==========================================
+% CHAPTER 2
+% ==========================================
+\chapter{Installation, CLI Flags \& Initialization}
+
+\section{Compiling and Installing}
+\begin{recipebox}{Building from Source}
+Ensure Rust (1.78+) and Cargo are installed:
+\begin{lstlisting}[language=bash]
+# Clone repository
+git clone https://github.com/lecheel/ce.git
+cd ce
+
+# Build release binary
+cargo build --release
+
+# Install globally
+sudo install -m 755 target/release/ce /usr/local/bin/ce
+\end{lstlisting}
+\end{recipebox}
+
+\section{CLI Options and Subcommands}
+\texttt{ce} supports direct file opening, specific line jumping, directory search popups, and Git preloading.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Invocation} & \textbf{Action / Behavior} \\
+\midrule
+\code{ce} & Launch editor with a blank untitled buffer. \\
+\code{ce src/main.rs} & Open a single file buffer. \\
+\code{ce src/main.rs +142} & Open file and immediately place cursor on line 142. \\
+\code{ce a.rs b.rs c.rs} & Open multiple file buffers simultaneously. \\
+\code{ce --fd "<filter>"} & Launch directly into the \texttt{fd} directory finder popup with an initial query. \\
+\code{ce --rg "<pattern>"} & Launch directly into the Ripgrep search buffer matching the pattern. \\
+\code{ce --gs} (or \code{ce -st}) & Parse repository \texttt{git status}, open all modified files into buffers, and launch the Git Status dashboard. \\
+\code{ce auth} & Execute Codeium browser login flow and write API key to configuration. \\
+\code{ce status} & Print status of the Codeium Language Server binary and active API key. \\
+\bottomrule
+\end{tabularx}
+\caption{Command-line interface flags and parameters.}
+\end{table}
+
+% ==========================================
+% CHAPTER 3
+% ==========================================
+\chapter{Modal Editing Paradigms}
+
+\section{Normal Mode (Vim)}
+The default mode upon startup. Intercepts single-letter commands for cursor movement, deletions, yanks, and mode transitions.
+
+\section{Insert Mode}
+Entered via \code{i} (insert before cursor), \code{a} (append after cursor), \code{I} (line start), \code{A} (line end), \code{o} (open newline below), or \code{O} (open newline above). Keystrokes insert directly into the underlying rope buffer. Pressing \code{<Esc>} returns to Normal mode.
+
+\section{Visual Modes (Character, Line, and Block)}
+\begin{itemize}[noitemsep]
+    \item \textbf{Visual Character (\code{v}):} Highlight continuous text spans character-by-character.
+    \item \textbf{Visual Line (\code{V}):} Highlight full line intervals.
+    \item \textbf{Visual Block (\code{Ctrl+V}):} Highlight rectangular text columns. Press \code{I} to insert text on all selected rows simultaneously, or \code{A} to append to all rows.
+\end{itemize}
+
+\section{Brief Mode}
+Triggered by typing \code{g i} in Normal mode. Emulates the classic Borland Brief editor:
+\begin{itemize}[noitemsep]
+    \item \textbf{Home Tap Tracking:} Tap \code{Home} once to go to column 0; tap twice to jump to the top of the visible screen; tap three times to jump to line 1 of the file.
+    \item \textbf{End Tap Tracking:} Tap \code{End} once to go to line end; tap twice to jump to the bottom of the screen; tap three times to jump to the last line of the file.
+    \item \textbf{Exit Brief Mode:} Press \code{F9} or type \code{:vim} / \code{:normal}.
+\end{itemize}
+
+\section{EasyMotion Navigation}
+Pressing \code{s} in Normal mode activates the EasyMotion subsystem. Type any two characters; \texttt{ce} overlays letter tags over all matching targets across the viewport. Pressing the matching tag jumps the cursor directly to that coordinate.
+
+% ==========================================
+% CHAPTER 4
+% ==========================================
+\chapter{Exhaustive Keybinding Matrix}
+
+\begin{keybox}{Normal Mode Navigation \& Text Operations}
+\begin{tabularx}{\textwidth}{l X l X}
+\toprule
+\textbf{Key} & \textbf{Action} & \textbf{Key} & \textbf{Action} \\
+\midrule
+\code{h / j / k / l} & Move left / down / up / right & \code{w / b} & Move word forward / backward \\
+\code{0 / \$} & Move line start / line end & \code{g g / G} & First line / last line \\
+\code{PageUp / Down} & Viewport page jump & \code{z z} & Center cursor in window \\
+\code{\%} & Jump to matching bracket & \code{s} & EasyMotion 2-character jump \\
+\code{* / \#} & Search word under cursor & \code{/ / ?} & Regex search forward / back \\
+\code{n / N} & Next / previous search match & \code{u / Ctrl+R} & Undo / redo buffer snapshot \\
+\code{d d / Alt+D} & Delete (cut) current line & \code{d \$ / d G} & Delete to line end / file end \\
+\code{y y / y w} & Yank line / yank word & \code{p} & Paste register contents \\
+\code{.} & Repeat last modifying change & \code{g c c} & Toggle language line comment \\
+\code{m <a-z>} & Set named bookmark & \code{` <a-z>} & Jump to named bookmark \\
+\code{+} & Yank to OS system clipboard & \code{Ctrl+Alt+P} & Open Command Palette \\
+\bottomrule
+\end{tabularx}
+\end{keybox}
+
+\begin{keybox}{Leader Key (\code{<Space>}) Shortcuts}
+The leader key opens the interactive Which-Key popup after a 300\,ms delay:
+\begin{tabularx}{\textwidth}{l X l X}
+\toprule
+\textbf{Key Sequence} & \textbf{Command / Action} & \textbf{Key Sequence} & \textbf{Command / Action} \\
+\midrule
+\code{<Space> f} & Open Function Outline popup & \code{<Space> r} & Open MRU file browser \\
+\code{<Space> b} & Open active Buffer List & \code{<Space> m} & Toggle bookmark on current line \\
+\code{<Space> g r} & Revert Git hunk under cursor & \code{<Space> g b} & Toggle inline Git blame overlay \\
+\code{<Space> t t} & Dismiss / toggle active popup & \code{<Space> t n} & Toggle line numbers \\
+\code{<Space> t r} & Toggle relative line numbers & \code{<Space> t g} & Toggle Git gutter signs \\
+\code{<Space> t b} & Toggle bookmark markers & \code{<Space> p v} & Paste from system clipboard \\
+\code{<Space> Q} & Force quit all windows (\code{qa!}) & \code{g t} & Translate line via AI/MQTT \\
+\bottomrule
+\end{tabularx}
+\end{keybox}
+
+\begin{keybox}{Window Layout \& Split Management (\code{Ctrl+W})}
+\begin{tabularx}{\textwidth}{l >{\RaggedRight}X l >{\RaggedRight}X}
+\toprule
+\textbf{Key Sequence} & \textbf{Action} & \textbf{Key Sequence} & \textbf{Action} \\
+\midrule
+\code{Ctrl+W s} & Horizontal window split & \code{Ctrl+W v} & Vertical window split \\
+\code{Ctrl+W q} & Close active window pane & \code{Ctrl+W o} & Close all other window panes \\
+\code{Ctrl+W w} & Cycle focus to next window & \code{Ctrl+W h/j/k/l} & Focus Left / Down / Up / Right \\
+\bottomrule
+\end{tabularx}
+\end{keybox}
+
+% ==========================================
+% CHAPTER 5
+% ==========================================
+\chapter{Tree-Sitter AST Text Objects}
+
+\section{Grammar-Aware Text Selections}
+Unlike regex-based pattern matching, \texttt{ce} evaluates the underlying Concrete Syntax Tree (CST) generated by Tree-Sitter parsers. Operators adhere to the structure:
+$$\mathbf{Operator} \in \{d, c, y\} \quad+\quad \mathbf{Target\ Range} \in \{i, a\} \quad+\quad \mathbf{AST\ Node}$$
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+\textbf{Combination} & \textbf{Scope} & \textbf{Structural Effect} \\
+\midrule
+\code{d i f} / \code{c i f} & Function Body & Delete / Change the statement block inside the enclosing function. \\
+\code{d a f} / \code{y a f} & Function Span & Delete / Yank the entire function including attributes, visibility modifiers, and docstrings (guarded by a 500-line safety check). \\
+\code{d i "} / \code{c i "} & String Content & Delete / Change contents inside string literals (\code{"..."}, \code{'...'}, \code{`...`}). \\
+\code{d i (} / \code{c i (} & Parameters & Delete / Change parameters inside expression parentheses. \\
+\code{d i \{} / \code{c i \{} & Braces Block & Delete / Change inner body inside block scope braces. \\
+\code{d i [} / \code{c i [} & Array Indices & Delete / Change values inside square brackets. \\
+\code{d i w} / \code{c i w} & Word Bounds & Delete / Change inside current word boundary. \\
+\bottomrule
+\end{tabularx}
+\caption{Tree-Sitter AST text-object manipulation commands.}
+\end{table}
+
+\section{Real-Time Scope Breadcrumbs}
+The status bar uses Tree-Sitter AST queries to render the exact namespace and function containing the cursor in real time (e.g., \code{Config::load}, \code{Editor::handle\_key}).
+
+% ==========================================
+% CHAPTER 6
+% ==========================================
+\chapter{AI Subsystems: Ghost-Text, CodeLLM \& Tool Skills}
+
+\section{Ghost-Text Completions (Codeium \& Copilot)}
+\texttt{ce} polls AI completion providers asynchronously. When suggestions arrive, ghost text appears inline in a dimmed foreground color:
+\begin{itemize}[noitemsep]
+    \item \code{<Tab>}: Accept the ghost-text suggestion.
+    \item \code{Ctrl+N} / \code{Ctrl+P}: Cycle between alternate suggestions.
+    \item \code{:copilot auth}: Initiate the device-code login flow for GitHub Copilot.
+\end{itemize}
+
+\section{Multi-Backend Local LLM Configurations}
+The editor connects directly to Ollama, llama.cpp, or DeepSeek endpoints without third-party CLI wrappers.
+
+\begin{recipebox}{Configuring AI Backends in \texttt{config.json}}
+\begin{lstlisting}[language=json]
+{
+  "llm_backend": "ollama",
+  "ollama_url": "127.0.0.1",
+  "ollama_port": 11434,
+  "ollama_model": "gemma4:31b-cloud",
+  "deepseek_url": "https://api.deepseek.com",
+  "deepseek_api_key": "sk-...",
+  "deepseek_model": "deepseek-v4-flash",
+  "llm_url": "127.0.0.1",
+  "llm_port": 8080
+}
+\end{lstlisting}
+\end{recipebox}
+
+\section{CodeLLM Sessions \& Visual Selection Prompting}
+\begin{itemize}
+    \item \textbf{Direct Prompting (\code{:llm <query>} / \code{:prompt <query>}):} Opens the interactive \code{*llm-chat*} buffer and streams the response.
+    \item \textbf{Visual Selection Prompting (\code{:'<,'>codellm <query>}):} Captures the visual selection into a markdown block and submits it to the model.
+    \item \textbf{Function Explanation (\code{:fninfo}):} Tree-Sitter extracts the enclosing function boundaries, builds an explanation prompt, and streams the analysis.
+    \item \textbf{AI Commit Generation (\code{:gc} / \code{:gitcommit}):} Queries \texttt{git diff}, invokes the model, formats a conventional commit message, and loads it into a commit buffer.
+\end{itemize}
+
+\section{Autonomous Skill Execution (Tool Calling)}
+\texttt{ce} supports autonomous agent loops up to 15 rounds (\code{MAX\_TOOL\_ROUNDS = 15}):
+\begin{lstlisting}[language=bash]
+:skill list      # List all loaded tool definitions
+:skill file      # Enable local filesystem inspection tool
+:skill all       # Enable all discovered tools
+:skill off       # Deactivate tool calling
+\end{lstlisting}
+
+% ==========================================
+% CHAPTER 7
+% ==========================================
+\chapter{Git Suite \& Interactive Wgrep Refactoring}
+
+\section{Git Status Dashboard (\texttt{:gs})}
+Executing \code{:gs} opens the Git Status manager:
+\begin{itemize}[noitemsep]
+    \item Staged changes (Green), Unstaged changes (Yellow), Untracked files (Red).
+    \item Press \code{s} on any file line to toggle between staged and unstaged.
+    \item Press \code{<Enter>} to jump directly to the selected file.
+\end{itemize}
+
+\section{Split-View Git Diffs (\texttt{:diffthis} and \texttt{:diffoff})}
+Executing \code{:diffthis} creates a synchronized side-by-side viewport displaying the file at \texttt{HEAD} on the left and the working tree buffer on the right. Run \code{:diffoff} to return to single-pane editing.
+
+\section{Interactive Wgrep (Project-Wide In-Place Refactoring)}
+\begin{recipebox}{The Wgrep Refactoring Workflow}
+\begin{enumerate}[noitemsep]
+    \item Search the repository: \code{:rg fn initialize}
+    \item Transform search results into an editable buffer: \code{:wg}
+    \item Perform edits across multiple matches using normal Vim commands or substitutions (\code{:\%s/old/new/g}).
+    \item Write all modifications back to physical source files on disk: \code{:wgrepw} (or \code{:wgrep-write}).
+    \item To discard edits without writing to disk: \code{:wgrep!}
+\end{enumerate}
+\end{recipebox}
+
+% ==========================================
+% CHAPTER 8
+% ==========================================
+\chapter{Navigation, LSP, Ctags \& Popups}
+
+\section{Fuzzy Popups \& Pickers}
+\begin{itemize}[noitemsep]
+    \item \textbf{File Picker (\code{:ff} / \code{:finder}):} Fast filesystem browser.
+    \item \textbf{Ripgrep (\code{:rg <pattern>} / \code{:lastrg}):} Search repository using ripgrep.
+    \item \textbf{Buffer List (\code{:ls} / \code{:buffers} / \code{<Space> b}):} Fuzzy buffer switcher.
+    \item \textbf{MRU Browser (\code{:mru} / \code{:mru!} / \code{<Space> r}):} Most recently used files (repository-scoped or system-wide).
+    \item \textbf{Function List (\code{:fn} / \code{:functions} / \code{<Space> f}):} Tree-Sitter outline of all functions.
+\end{itemize}
+
+\section{LSP \& Ctags Navigation}
+\begin{itemize}[noitemsep]
+    \item \code{g d} / \code{Ctrl+5}: Jump to definition (\code{TagJump}) using the background \texttt{ctagd} daemon or LSP.
+    \item \code{Ctrl+T}: Return from jump location (\code{TagBack}).
+    \item \code{:symbols <query>} / \code{:sym}: Search symbols across the entire workspace.
+    \item \code{:retag}: Invalidate and regenerate tag indices.
+\end{itemize}
+
+% ==========================================
+% CHAPTER 9
+% ==========================================
+\chapter{Configuration Engine \& Custom Keymaps}
+
+\section{Configuration Schema}
+Configurations reside at \code{\textasciitilde{}/.config/ce/config.json}.
+
+\begin{lstlisting}[language=json]
+{
+  "editor_language": "rust",
+  "init_mode": "vim",
+  "leader": "space",
+  "tab_size": 4,
+  "insert_spaces": true,
+  "format_on_save": false,
+  "line_numbers_enabled": true,
+  "relative_line_numbers": true,
+  "git_gutter_enabled": true,
+  "codeium_enabled": true,
+  "codeium_style": "ghost_text",
+  "llm_backend": "ollama",
+  "ollama_url": "127.0.0.1",
+  "ollama_port": 11434,
+  "ollama_model": "gemma4:31b-cloud",
+  "which_key_delay_ms": 250,
+  "keybindings": {
+    "normal": {
+      "ctrl+s": "save",
+      "space f f": "file_picker",
+      "space g s": "git_status",
+      "space d f": "delete_inside_function && save",
+      "space 1": "switch_buffer:1",
+      "space 2": "switch_buffer:2"
+    },
+    "insert": {
+      "ctrl+space": "manual_complete"
+    }
+  }
+}
+\end{lstlisting}
+
+\section{Keybind Grammar: Pipelines and Chains}
+\begin{itemize}
+    \item \textbf{Sequential Pipelines (\code{\textbar{}}):} Executes actions sequentially regardless of intermediate error states:
+    \begin{lstlisting}[language=json]
+    "ctrl+k": "move_line_start | delete_to_end_of_line"
+    \end{lstlisting}
+    \item \textbf{Conditional Chains (\code{\&\&}):} Executes actions sequentially, aborting if any action reports an error:
+    \begin{lstlisting}[language=json]
+    "space x": "yank_inside_function && quit"
+    \end{lstlisting}
+    \item \textbf{Direct Buffer Index Switching:}
+    \begin{lstlisting}[language=json]
+    "space 1": "switch_buffer:1"
+    \end{lstlisting}
+\end{itemize}
+
+% ==========================================
+% APPENDIX
+% ==========================================
+\appendix
+\chapter{REPL Command Quick Reference}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l X}
+\toprule
+\textbf{Command} & \textbf{Functionality} \\
+\midrule
+\code{:w [path]} & Save active buffer (or save to new path). \\
+\code{:q / :q!} & Close buffer / Force quit without saving. \\
+\code{:wq / :x} & Save active buffer and close window. \\
+\code{:\%s/<pat>/<rep>/[flags]} & Global search and replace with interactive confirmation. \\
+\code{:'<,'>s/<pat>/<rep>/} & Search and replace restricted to visual selection. \\
+\code{:sort [i] [u] [r]} & Sort lines (case-insensitive \code{i}, unique \code{u}, reverse \code{r}). \\
+\code{:retab} & Convert tab characters to spaces according to \code{tab\_size}. \\
+\code{:bn / :bp / :bd} & Next buffer / Previous buffer / Delete (close) buffer. \\
+\code{:sp / :vs / :on} & Horizontal split / Vertical split / Close all other splits. \\
+\code{:ff / :fd [query]} & Open fuzzy file picker / Open \texttt{fd} directory search popup. \\
+\code{:rg <pattern>} & Run ripgrep and populate search buffer. \\
+\code{:wg / :wgrepw} & Toggle Wgrep mode / Write wgrep modifications to disk. \\
+\code{:gs / :tig} & Open Git status dashboard / Open Git log history. \\
+\code{:diffthis / :diffoff} & Open side-by-side git diff / Close split diff. \\
+\code{:llm / :codellm} & Open LLM chat session / Open CodeLLM markdown workspace. \\
+\code{:gc / :gitcommit} & Generate semantic git commit message using AI. \\
+\code{:build / :make} & Run \texttt{cargo build} and populate diagnostic error buffer. \\
+\code{:checkhealth} & Audit clipboard, git, ripgrep, formatters, and AI health. \\
+\bottomrule
+\end{tabularx}
+\caption{Comprehensive command-line and REPL cheat sheet.}
+\end{table}
+
+\end{document}

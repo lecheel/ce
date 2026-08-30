@@ -553,7 +553,12 @@ fn fetch_blame_data(filename: &str) -> Vec<Option<(String, String)>> {
                         } else {
                             author.to_string()
                         };
-                        let display = format!("{:<5} {:<13} {:<8} │ ", short_hash, full_date.trim(), short_author);
+                        let display = format!(
+                            "{:<5} {:<13} {:<8} │ ",
+                            short_hash,
+                            full_date.trim(),
+                            short_author
+                        );
                         let display = if display.len() > blame_width {
                             display[..blame_width].to_string()
                         } else {

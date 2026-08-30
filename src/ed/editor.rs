@@ -908,7 +908,9 @@ impl Editor {
         }
         if self.blame_active && matches!(self.mode, Mode::Normal) {
             if key.code == KeyCode::Char('c') && key.modifiers.is_empty() {
-                if self.blame_diff_buf_id.is_some() && self.active_window().buffer_id() == self.blame_diff_buf_id.unwrap() {
+                if self.blame_diff_buf_id.is_some()
+                    && self.active_window().buffer_id() == self.blame_diff_buf_id.unwrap()
+                {
                     self.close_blame_commit();
                 } else {
                     self.show_blame_commit();

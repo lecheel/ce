@@ -436,8 +436,7 @@ impl Buffer {
                             });
                         match gofmt_result {
                             Ok(output) if output.status.success() => {
-                                let formatted =
-                                    String::from_utf8_lossy(&output.stdout).to_string();
+                                let formatted = String::from_utf8_lossy(&output.stdout).to_string();
                                 if let Err(e) = std::fs::write(&path, &formatted) {
                                     warning = Some(format!(
                                         "Saved, but failed to write gofmt output: {}",
@@ -452,8 +451,7 @@ impl Buffer {
                             }
                             Ok(output) => {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
-                                warning =
-                                    Some(format!("Saved, gofmt failed: {}", stderr.trim()));
+                                warning = Some(format!("Saved, gofmt failed: {}", stderr.trim()));
                             }
                             Err(e) => {
                                 warning = Some(format!("Saved, but gofmt not found: {}", e));

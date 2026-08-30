@@ -303,18 +303,17 @@ impl Editor {
         let start = section_starts[target_idx];
 
         let buf_len = self.buf().len_lines();
-        let has_first_item = self.buf().git_status_state.as_ref()
+        let has_first_item = self
+            .buf()
+            .git_status_state
+            .as_ref()
             .and_then(|s| s.line_actions.get(&(start + 2)))
             .is_some();
 
         let win = self.active_window_mut();
         let max_row = buf_len.saturating_sub(1);
 
-        let target_row = if has_first_item {
-            start + 2
-        } else {
-            start
-        };
+        let target_row = if has_first_item { start + 2 } else { start };
 
         win.row = target_row.min(max_row);
         win.desired_col = 0;
