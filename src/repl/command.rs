@@ -106,7 +106,18 @@ pub fn execute(editor: &mut crate::ed::editor::Editor, cmd: &str) {
     }
 
     match cmd_str.as_str() {
-        // ---- Sort Commands ----
+        "help" => {
+            editor.popup.open_help();
+        }
+        s if s.starts_with("help ") => {
+            let arg = s.strip_prefix("help ").unwrap().trim();
+            editor.popup.open_help();
+            if let Some(h) = editor.popup.help.as_mut() {
+                for c in arg.chars() {
+                    h.filter_push(c);
+                }
+            }
+        }
         s if s.starts_with("sort") => {
             let (start_row, end_row) = if let Some((r1, r2)) = sel_range {
                 (r1, r2)
@@ -974,7 +985,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
         "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
         "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep", "skill ",
-        "skill all", "blame",
+        "skill all", "blame", "help",
     ];
     //-- complete command (anchor dont removed) --//
     let mut results = Vec::new();
@@ -987,10 +998,15 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
             }
         }
     } else if let Some((cmd_name, path_prefix)) = split_cmd_and_arg(input) {
-        // 2. Path autocomplete for e/w/wq commands
         if cmd_name == "e" || cmd_name == "w" || cmd_name == "wq" {
             for path in complete_paths(path_prefix) {
                 results.push(format!("{} {}", cmd_name, path));
+            }
+        } else if cmd_name == "help" {
+            for cmd in &command_list {
+                if cmd.starts_with(path_prefix) {
+                    results.push(format!("help {}", cmd));
+                }
             }
         }
     }

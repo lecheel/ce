@@ -73,6 +73,10 @@ impl Editor {
             self.handle_command_palette_key(key);
             return;
         }
+        if self.popup.help.is_some() {
+            self.handle_help_key(key);
+            return;
+        }
         if self.popup.file_picker.is_some() {
             self.handle_file_picker_key(key);
             return;
@@ -372,6 +376,26 @@ impl Editor {
         let popup = crate::popup::fn_info::FnInfoPopup::build(mode, &self.config);
         self.popup.fn_info = Some(popup);
         self.popup.kind = Some(crate::popup::PopupKind::FnInfo);
+    }
+}
+
+impl Editor {
+    fn handle_help_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        let Some(popup) = self.popup.help.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => popup.move_up(),
+            KeyCode::Down => popup.move_down(),
+            KeyCode::Backspace => popup.filter_pop(),
+            KeyCode::Char(c) => popup.filter_push(c),
+            KeyCode::Esc | KeyCode::Enter => {
+                self.popup.help = None;
+                self.popup.kind = None;
+            }
+            _ => {}
+        }
     }
 }
 

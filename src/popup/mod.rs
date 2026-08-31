@@ -10,6 +10,7 @@ pub mod function_list;
 pub mod fuzzy;
 pub mod git_hunk;
 pub mod guide;
+pub mod help;
 pub mod input_box;
 pub mod marks;
 pub mod mru;
@@ -23,6 +24,7 @@ pub use command_palette::CommandPalettePopup;
 pub use fd::FdPopup;
 pub use file_picker::FilePicker;
 pub use function_list::FunctionListPopup;
+pub use help::HelpPopup;
 pub use marks::{MarkEntry, MarksPopup};
 pub use mru::{MruEntry, MruPopup};
 pub use quickfix::QuickfixPopup;
@@ -101,6 +103,7 @@ pub enum PopupKind {
     FnInfo,
     InputBox, // Added for top-anchored input box
     Error,    // Added for multi-line error redirection
+    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +177,7 @@ pub struct PopupState {
     pub fn_info: Option<fn_info::FnInfoPopup>,
     pub quickfix: Option<QuickfixPopup>,
     pub input_box: Option<crate::popup::input_box::InputBox>,
+    pub help: Option<HelpPopup>,
 }
 
 impl PopupState {
@@ -205,6 +209,7 @@ impl PopupState {
             fd: None, // tag_fd_new
             quickfix: None,
             input_box: None,
+            help: None,
         }
     }
 
@@ -227,6 +232,7 @@ impl PopupState {
             || self.quickfix.is_some()
             || self.fn_info.is_some()
             || self.input_box.is_some()
+            || self.help.is_some()
     }
 
     pub fn close(&mut self) {
@@ -255,6 +261,7 @@ impl PopupState {
         self.quickfix = None;
         self.fn_info = None;
         self.input_box = None;
+        self.help = None;
     }
 
     pub fn open_error(&mut self, message: impl Into<String>) {
@@ -423,5 +430,11 @@ impl PopupState {
             .with_default(default);
         self.input_box = Some(ib);
         self.kind = Some(PopupKind::InputBox);
+    }
+    pub fn open_help(&mut self) {
+        self.close();
+        let entries = help::build_help_entries();
+        self.help = Some(HelpPopup::new(entries));
+        self.kind = Some(PopupKind::Help);
     }
 }
