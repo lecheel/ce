@@ -983,7 +983,7 @@ pub fn complete_command(input: &str, history: &[String]) -> Vec<String> {
         "llm", "prompt", ">", "gs", "gitstatus", "stash", "diffthis", "gd", "checkhealth",
         "command_palette","guide","guide sync", "guide update", "gen_desc", "doff", 
         "tag", "ta", "retag", "tags", "sort", "fd", "copilot", "copilot auth",
-        "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status",
+        "sym", "symbols", "ctagd", "ctagd info", "ctagd scan", "ctagd status","functions",
         "codellm", "cllm", "reg", "build","retab","close","fninfo","wgrep", "skill ",
         "skill all", "blame", "help",
     ];
