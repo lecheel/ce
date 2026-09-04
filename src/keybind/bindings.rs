@@ -584,6 +584,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 | Action::ChangeInsideFunction
                 | Action::ChangeInsideBraces
                 | Action::ChangeInsideBrackets
+                | Action::ChangeWordForward
+                | Action::ChangeCurrentLine
+                | Action::ChangeToEndOfLine
                 | Action::EnterBrief
         )
     };
@@ -1137,52 +1140,551 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
 
         // ---------------------------------------------------------------
-        // Text Objects
+        // Text Objects (Multi-cursor aware)
         // ---------------------------------------------------------------
         Action::DeleteInsideWord => {
-            for _ in 0..count {
-                editor.edit_text_object(crate::ed::syntax::TextObject::Word, true, false);
-            }
+            apply_to_all_cursors(editor, |win, buf| {
+                for _ in 0..count {
+                    let row = win.row;
+                    let col = win.col;
+                    let line_text = buf.line_text(row);
+                    let chars: Vec<char> = line_text.chars().collect();
+                    if chars.is_empty() {
+                        break;
+                    }
+                    let c = col.min(chars.len().saturating_sub(1));
+                    let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+                    let (start, end) = if is_word_char(chars[c]) {
+                        let mut s = c;
+                        while s > 0 && is_word_char(chars[s - 1]) {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && is_word_char(chars[e]) {
+                            e += 1;
+                        }
+                        (s, e)
+                    } else if chars[c].is_whitespace() {
+                        let mut s = c;
+                        while s > 0 && chars[s - 1].is_whitespace() {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && chars[e].is_whitespace() {
+                            e += 1;
+                        }
+                        (s, e)
+                    } else {
+                        let ch = chars[c];
+                        let mut s = c;
+                        while s > 0 && chars[s - 1] == ch {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && chars[e] == ch {
+                            e += 1;
+                        }
+                        (s, e)
+                    };
+                    let line_start = buf.rope.line_to_char(row);
+                    let start_offset = line_start + start;
+                    let end_offset = line_start + end;
+                    if end_offset > start_offset && end_offset <= buf.rope.len_chars() {
+                        buf.rope.remove(start_offset..end_offset);
+                        win.row = row;
+                        win.col = start;
+                        win.col = win.col.min(buf.line_char_len(win.row));
+                        buf.mark_modified();
+                    }
+                }
+            });
         }
         Action::DeleteWordForward => {
-            for _ in 0..count {
-                editor.edit_text_object(crate::ed::syntax::TextObject::Word, false, false);
-            }
+            apply_to_all_cursors(editor, |win, buf| {
+                for _ in 0..count {
+                    let row = win.row;
+                    let col = win.col;
+                    let line_text = buf.line_text(row);
+                    let chars: Vec<char> = line_text.chars().collect();
+                    if chars.is_empty() {
+                        break;
+                    }
+                    let c = col.min(chars.len().saturating_sub(1));
+                    let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+                    let (start, end) = if is_word_char(chars[c]) {
+                        let mut s = c;
+                        while s > 0 && is_word_char(chars[s - 1]) {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && is_word_char(chars[e]) {
+                            e += 1;
+                        }
+                        while e < chars.len() && chars[e].is_whitespace() {
+                            e += 1;
+                        }
+                        (s, e)
+                    } else if chars[c].is_whitespace() {
+                        let mut s = c;
+                        while s > 0 && chars[s - 1].is_whitespace() {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && chars[e].is_whitespace() {
+                            e += 1;
+                        }
+                        (s, e)
+                    } else {
+                        let ch = chars[c];
+                        let mut s = c;
+                        while s > 0 && chars[s - 1] == ch {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && chars[e] == ch {
+                            e += 1;
+                        }
+                        while e < chars.len() && chars[e].is_whitespace() {
+                            e += 1;
+                        }
+                        (s, e)
+                    };
+                    let line_start = buf.rope.line_to_char(row);
+                    let start_offset = line_start + start;
+                    let end_offset = line_start + end;
+                    if end_offset > start_offset && end_offset <= buf.rope.len_chars() {
+                        buf.rope.remove(start_offset..end_offset);
+                        win.row = row;
+                        win.col = start;
+                        win.col = win.col.min(buf.line_char_len(win.row));
+                        buf.mark_modified();
+                    }
+                }
+            });
+        }
+        Action::ChangeWordForward => {
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                let line_text = buf.line_text(row);
+                let chars: Vec<char> = line_text.chars().collect();
+                if chars.is_empty() {
+                    return;
+                }
+                let c = col.min(chars.len().saturating_sub(1));
+                let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+                let (start, end) = if is_word_char(chars[c]) {
+                    let mut s = c;
+                    while s > 0 && is_word_char(chars[s - 1]) {
+                        s -= 1;
+                    }
+                    let mut e = c + 1;
+                    while e < chars.len() && is_word_char(chars[e]) {
+                        e += 1;
+                    }
+                    while e < chars.len() && chars[e].is_whitespace() {
+                        e += 1;
+                    }
+                    (s, e)
+                } else if chars[c].is_whitespace() {
+                    let mut s = c;
+                    while s > 0 && chars[s - 1].is_whitespace() {
+                        s -= 1;
+                    }
+                    let mut e = c + 1;
+                    while e < chars.len() && chars[e].is_whitespace() {
+                        e += 1;
+                    }
+                    (s, e)
+                } else {
+                    let ch = chars[c];
+                    let mut s = c;
+                    while s > 0 && chars[s - 1] == ch {
+                        s -= 1;
+                    }
+                    let mut e = c + 1;
+                    while e < chars.len() && chars[e] == ch {
+                        e += 1;
+                    }
+                    while e < chars.len() && chars[e].is_whitespace() {
+                        e += 1;
+                    }
+                    (s, e)
+                };
+                let line_start = buf.rope.line_to_char(row);
+                let start_offset = line_start + start;
+                let end_offset = line_start + end;
+                if end_offset > start_offset && end_offset <= buf.rope.len_chars() {
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = row;
+                    win.col = start;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
+            editor.enter_insert();
+        }
+        Action::ChangeCurrentLine => {
+            apply_to_all_cursors(editor, |win, buf| {
+                if buf.len_lines() <= 1 {
+                    buf.rope.remove(..buf.rope.len_chars());
+                    buf.rope.insert(0, "\n");
+                    win.col = 0;
+                    win.desired_col = 0;
+                    buf.mark_modified();
+                    return;
+                }
+                let line_start = buf.rope.line_to_char(win.row);
+                let next_line_start = if win.row + 1 < buf.len_lines() {
+                    buf.rope.line_to_char(win.row + 1)
+                } else {
+                    buf.rope.len_chars()
+                };
+                if next_line_start > line_start {
+                    buf.rope.remove(line_start..next_line_start);
+                    buf.rope.insert(line_start, "\n");
+                }
+                win.col = 0;
+                win.desired_col = 0;
+                buf.mark_modified();
+            });
+            editor.enter_insert();
+        }
+        Action::ChangeToEndOfLine => {
+            apply_to_all_cursors(editor, |win, buf| {
+                let line_start = buf.rope.line_to_char(win.row);
+                let line_char_len = buf.line_char_len(win.row);
+                let del_start = line_start + win.col;
+                let del_end = line_start + line_char_len;
+                if del_start < del_end {
+                    buf.rope.remove(del_start..del_end);
+                }
+                buf.mark_modified();
+            });
+            editor.enter_insert();
         }
         Action::ChangeInsideWord => {
-            for _ in 0..count {
-                editor.edit_text_object(crate::ed::syntax::TextObject::Word, true, true);
-            }
+            apply_to_all_cursors(editor, |win, buf| {
+                for _ in 0..count {
+                    let row = win.row;
+                    let col = win.col;
+                    let line_text = buf.line_text(row);
+                    let chars: Vec<char> = line_text.chars().collect();
+                    if chars.is_empty() {
+                        break;
+                    }
+                    let c = col.min(chars.len().saturating_sub(1));
+                    let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+                    let (start, end) = if is_word_char(chars[c]) {
+                        let mut s = c;
+                        while s > 0 && is_word_char(chars[s - 1]) {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && is_word_char(chars[e]) {
+                            e += 1;
+                        }
+                        (s, e)
+                    } else if chars[c].is_whitespace() {
+                        let mut s = c;
+                        while s > 0 && chars[s - 1].is_whitespace() {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && chars[e].is_whitespace() {
+                            e += 1;
+                        }
+                        (s, e)
+                    } else {
+                        let ch = chars[c];
+                        let mut s = c;
+                        while s > 0 && chars[s - 1] == ch {
+                            s -= 1;
+                        }
+                        let mut e = c + 1;
+                        while e < chars.len() && chars[e] == ch {
+                            e += 1;
+                        }
+                        (s, e)
+                    };
+                    let line_start = buf.rope.line_to_char(row);
+                    let start_offset = line_start + start;
+                    let end_offset = line_start + end;
+                    if end_offset > start_offset && end_offset <= buf.rope.len_chars() {
+                        buf.rope.remove(start_offset..end_offset);
+                        win.row = row;
+                        win.col = start;
+                        win.col = win.col.min(buf.line_char_len(win.row));
+                        buf.mark_modified();
+                    }
+                }
+            });
+            editor.enter_insert();
         }
         Action::DeleteInsideQuotes => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Quotes, true, false);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Quotes,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
         }
         Action::ChangeInsideQuotes => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Quotes, true, true);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Quotes,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
+            editor.enter_insert();
         }
         Action::DeleteInsideParens => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Parens, true, false);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Parens,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
         }
         Action::ChangeInsideParens => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Parens, true, true);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Parens,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
+            editor.enter_insert();
         }
         Action::DeleteInsideFunction => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Function, true, false);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Function,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
         }
         Action::ChangeInsideFunction => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Function, true, true);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Function,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
+            editor.enter_insert();
         }
         Action::DeleteInsideBraces => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Braces, true, false);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Braces,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
         }
         Action::ChangeInsideBraces => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Braces, true, true);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Braces,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
+            editor.enter_insert();
         }
         Action::DeleteInsideBrackets => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Brackets, true, false);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Brackets,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
         }
         Action::ChangeInsideBrackets => {
-            editor.edit_text_object(crate::ed::syntax::TextObject::Brackets, true, true);
+            apply_to_all_cursors(editor, |win, buf| {
+                let row = win.row;
+                let col = win.col;
+                if let Some((sr, sc, er, ec)) = buf.syntax.text_object_range(
+                    row,
+                    col,
+                    crate::ed::syntax::TextObject::Brackets,
+                    true,
+                ) {
+                    if sr >= buf.len_lines() || er >= buf.len_lines() {
+                        return;
+                    }
+                    let start_offset = buf.rope.line_to_char(sr).saturating_add(sc);
+                    let end_offset = buf.rope.line_to_char(er).saturating_add(ec);
+                    if end_offset <= start_offset || end_offset > buf.rope.len_chars() {
+                        return;
+                    }
+                    buf.rope.remove(start_offset..end_offset);
+                    win.row = sr;
+                    win.col = sc;
+                    win.col = win.col.min(buf.line_char_len(win.row));
+                    buf.mark_modified();
+                }
+            });
+            editor.enter_insert();
         }
         Action::YankAroundFunction => {
             if let Err(msg) = check_around_function_safetynet(editor) {

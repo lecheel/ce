@@ -32,6 +32,8 @@ pub enum Action {
     DeleteCharForward,
     DeleteCurrentLine,
     DeleteToEndOfLine,
+    ChangeCurrentLine,
+    ChangeToEndOfLine,
     DeleteToEndOfFile,
     InsertNewline,
     InsertNewlineBelow,
@@ -119,6 +121,7 @@ pub enum Action {
     DeleteInsideWord,
     DeleteWordForward,
     ChangeInsideWord,
+    ChangeWordForward,
     DeleteInsideQuotes,
     ChangeInsideQuotes,
     DeleteInsideParens,
@@ -379,6 +382,8 @@ impl Action {
                 | Action::DeleteCharForward
                 | Action::DeleteCurrentLine
                 | Action::DeleteToEndOfLine
+                | Action::ChangeCurrentLine
+                | Action::ChangeToEndOfLine
                 | Action::DeleteToEndOfFile
                 | Action::InsertNewline
                 | Action::InsertNewlineBelow
@@ -391,6 +396,7 @@ impl Action {
                 | Action::DeleteInsideWord
                 | Action::DeleteWordForward
                 | Action::ChangeInsideWord
+                | Action::ChangeWordForward
                 | Action::DeleteInsideQuotes
                 | Action::ChangeInsideQuotes
                 | Action::DeleteInsideParens
