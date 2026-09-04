@@ -8,6 +8,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -23,25 +26,24 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: ce
-            artifact_name: ce-linux-x86_64
+            archive_name: ce-linux-x86_64.tar.gz
 
           # macOS (Apple Silicon / aarch64)
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: ce
-            artifact_name: ce-macos-arm64
+            archive_name: ce-macos-arm64.tar.gz
 
           # Windows (x86_64)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: ce.exe
-            artifact_name: ce-windows-x86_64.exe
+            archive_name: ce-windows-x86_64.zip
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Install Linux build prerequisites needed for git2 and arboard (clipboard)
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -62,23 +64,44 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      # Stage the compiled binary for artifact upload
-      - name: Prepare artifact (Unix)
+      # Package Linux & macOS into .tar.gz
+      - name: Create tar.gz archive (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.artifact_name }}
+          tar -czvf "dist/${{ matrix.archive_name }}" -C "target/${{ matrix.target }}/release" "${{ matrix.binary_name }}"
 
-      - name: Prepare artifact (Windows)
+      # Package Windows into .zip
+      - name: Create zip archive (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.binary_name }} dist/${{ matrix.artifact_name }}
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path "target\${{ matrix.target }}\release\${{ matrix.binary_name }}" -DestinationPath "dist\${{ matrix.archive_name }}"
 
-      - name: Upload Build Artifact
+      # Upload the archive as an artifact
+      - name: Upload Build Archive
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/*
+          name: ${{ matrix.archive_name }}
+          path: dist/${{ matrix.archive_name }}
           if-no-files-found: error
+
+  # This job only runs when pushing a Git tag (e.g., v0.3.1)
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
