@@ -319,47 +319,21 @@ impl LayoutNode {
 
 #[derive(Debug, Clone)]
 pub struct Window {
-    /// Unique window identifier.
     pub id: usize,
-
-    /// ID of the buffer this window is viewing.
     buffer_id: usize,
-
-    // ── Cursor ────────────────────────────────────────────────────
-    /// 0-based cursor row (line index within the buffer).
     pub row: usize,
-    /// 0-based cursor column (character offset within the line,
-    /// excluding the line-break).
     pub col: usize,
-
-    // ── Scroll ────────────────────────────────────────────────────
     pub desired_col: usize,
-    /// Vertical scroll: index of the first visible line.
     pub scroll_line: usize,
-    /// Horizontal scroll: first visible display column.
     pub scroll_col: usize,
-    /// Sub-line vertical pixel offset for smooth scrolling.
     pub scroll_offset_y: usize,
-
-    /// Position before the last jump — used by `` (backtick ping-pong).
     pub last_jump: Option<(usize, usize)>,
-
-    // Link to another window currently participating in side-by-side diff comparison
     pub diff_sibling: Option<usize>,
-
-    // ── Layout ────────────────────────────────────────────────────
-    /// Position and size of this window within the terminal grid.
     pub position: WindowPosition,
     pub visual_anchor: Option<(usize, usize)>,
+    pub extra_cursors: Vec<(usize, usize)>,
 }
-
 impl Window {
-    // -----------------------------------------------------------------------
-    // Constructor
-    // -----------------------------------------------------------------------
-
-    /// Create a new window viewing `buffer_id`, with cursor at (0, 0)
-    /// and scroll at the top of the file.
     pub fn new(id: usize, buffer_id: usize) -> Self {
         Self {
             id,
@@ -374,6 +348,7 @@ impl Window {
             visual_anchor: None,
             last_jump: None,
             diff_sibling: None,
+            extra_cursors: Vec::new(),
         }
     }
 

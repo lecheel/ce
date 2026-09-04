@@ -46,6 +46,7 @@ pub fn get_default_actions() -> Vec<(&'static str, Action)> {
         ("g d", Action::TagJump),
         ("I", Action::EnterInsertLineStart),
         ("A", Action::EnterInsertLineEnd),
+        ("C", Action::AddCursorDown),
         ("o", Action::InsertNewlineBelow),
         ("O", Action::InsertNewlineAbove),
         ("x", Action::DeleteCharForward),

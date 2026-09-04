@@ -498,7 +498,6 @@ fn draw_pane(
                 guide_depths[virtual_row - scroll],
                 indent_guide_style,
             );
-
             apply_easymotion_overlay(
                 &mut chars,
                 &mut highlights,
@@ -508,7 +507,32 @@ fn draw_pane(
                 hscroll,
                 easymotion_targets,
             );
-
+            if is_active && !win.extra_cursors.is_empty() {
+                let extra_cursor_style = Style::default()
+                    .fg(Color::Rgb(255, 255, 255))
+                    .bg(Color::Rgb(100, 100, 120));
+                let mut needs_trailing_cursor = false;
+                for &(er, ec) in &win.extra_cursors {
+                    if er == i {
+                        let local_idx = ec.saturating_sub(hscroll);
+                        if local_idx < highlights.len() {
+                            if chars.get(local_idx) == Some(&'\n') {
+                                needs_trailing_cursor = true;
+                            } else {
+                                highlights[local_idx] = Some(extra_cursor_style);
+                            }
+                        } else if local_idx == highlights.len() {
+                            needs_trailing_cursor = true;
+                        }
+                    }
+                }
+                if needs_trailing_cursor {
+                    chars.push(' ');
+                    highlights.push(Some(extra_cursor_style));
+                    selected_mask.push(false);
+                    search_mask.push(false);
+                }
+            }
             let mut vis_col = 0;
             let mut char_offset = 0;
             let mut cursor_grapheme: Option<&str> = None;
@@ -676,7 +700,6 @@ fn draw_pane(
                 guide_depths[virtual_row - scroll],
                 indent_guide_style,
             );
-
             apply_easymotion_overlay(
                 &mut chars,
                 &mut highlights,
@@ -686,7 +709,32 @@ fn draw_pane(
                 hscroll,
                 easymotion_targets,
             );
-
+            if is_active && !win.extra_cursors.is_empty() {
+                let extra_cursor_style = Style::default()
+                    .fg(Color::Rgb(255, 255, 255))
+                    .bg(Color::Rgb(100, 100, 120));
+                let mut needs_trailing_cursor = false;
+                for &(er, ec) in &win.extra_cursors {
+                    if er == i {
+                        let local_idx = ec.saturating_sub(hscroll);
+                        if local_idx < highlights.len() {
+                            if chars.get(local_idx) == Some(&'\n') {
+                                needs_trailing_cursor = true;
+                            } else {
+                                highlights[local_idx] = Some(extra_cursor_style);
+                            }
+                        } else if local_idx == highlights.len() {
+                            needs_trailing_cursor = true;
+                        }
+                    }
+                }
+                if needs_trailing_cursor {
+                    chars.push(' ');
+                    highlights.push(Some(extra_cursor_style));
+                    selected_mask.push(false);
+                    search_mask.push(false);
+                }
+            }
             let mut spans = gutter_spans;
             spans.push(blame_span.clone());
             spans.extend(styled_spans_from_highlights(

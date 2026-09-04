@@ -1190,14 +1190,13 @@ impl Editor {
                 Mode::Visual | Mode::VisualLine | Mode::VisualBlock
             ) || self.visual_block_insert_state.is_some()
                 || self.windows.iter().any(|w| w.visual_anchor.is_some());
-
+            let has_extra_cursors = self.windows.iter().any(|w| !w.extra_cursors.is_empty());
             if !self.status_msg.is_empty() {
                 self.clear_status_msg();
-                if !is_selecting {
+                if !is_selecting && !has_extra_cursors {
                     handled = true;
                 }
             }
-
             // AGGRESSIVE CLEANUP: If ESC is pressed and we have lingering anchors
             // clear them immediately to prevent ghost marks in the next round.
             if is_selecting && self.visual_block_insert_state.is_none() {
@@ -1205,7 +1204,12 @@ impl Editor {
                     win.visual_anchor = None;
                 }
             }
-
+            if has_extra_cursors {
+                for win in &mut self.windows {
+                    win.extra_cursors.clear();
+                }
+                handled = true;
+            }
             if handled {
                 return;
             }

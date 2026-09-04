@@ -46,6 +46,7 @@ pub enum Action {
     EnterAppend,
     EnterInsertLineStart,
     EnterInsertLineEnd,
+    AddCursorDown,
     EnterCommand,
     EnterBrief,
     EnterNormal,

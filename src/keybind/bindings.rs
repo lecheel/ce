@@ -5,10 +5,12 @@
 //! supporting custom user mappings parsed from the configuration file.
 
 use crate::config::app_config::Config;
+use crate::ed::buffer::Buffer;
 use crate::ed::editor::Editor;
 use crate::ed::editor::PendingInput;
 use crate::ed::mode::{MessageKind, Mode};
 use crate::ed::repeat::{DeleteDirection, RepeatExt, RepeatableAction};
+use crate::ed::window::Window;
 use crate::ed::{editing, movement};
 pub use crate::keybind::actions::Action;
 use crate::keybind::binding_ex::execute_indent_outdent;
@@ -20,11 +22,92 @@ use crate::keybind::config_keys::find_custom_action;
 use crate::keybind::defaults::get_default_actions;
 use crate::keybind::display::action_display_name;
 use crate::keybind::safetynet::check_around_function_safetynet;
-use unicode_segmentation::UnicodeSegmentation;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
+use unicode_segmentation::UnicodeSegmentation;
 
+fn apply_to_all_cursors(editor: &mut Editor, mut f: impl FnMut(&mut Window, &mut Buffer)) {
+    let win = editor.active_window();
+    let primary_pos = (win.row, win.col);
+    let mut all_cursors = win.extra_cursors.clone();
+    all_cursors.push(primary_pos);
+    // Sort descending by row, then descending by column
+    all_cursors.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    all_cursors.dedup();
+
+    let mut new_cursors: Vec<(usize, usize)> = Vec::with_capacity(all_cursors.len());
+    let mut new_primary = primary_pos;
+    let mut primary_processed = false;
+
+    for (r, c) in all_cursors {
+        let (win, buf) = editor.active_window_and_buf_mut();
+        let lines_before = buf.len_lines();
+        let chars_before = buf.rope.len_chars();
+
+        win.row = r.min(lines_before.saturating_sub(1));
+        win.col = c.min(buf.line_char_len(win.row));
+        f(win, buf);
+
+        let lines_after = buf.len_lines();
+        let chars_after = buf.rope.len_chars();
+        let lines_diff = lines_after as isize - lines_before as isize;
+        let chars_diff = chars_after as isize - chars_before as isize;
+
+        // Shift already processed cursors
+        for nc in &mut new_cursors {
+            if lines_diff != 0 && nc.0 > r {
+                nc.0 = (nc.0 as isize + lines_diff) as usize;
+            } else if lines_diff == 0 && nc.0 == r {
+                let new_col = nc.1 as isize + chars_diff;
+                nc.1 = new_col.max(0) as usize;
+            }
+        }
+        if primary_processed {
+            if lines_diff != 0 && new_primary.0 > r {
+                new_primary.0 = (new_primary.0 as isize + lines_diff) as usize;
+            } else if lines_diff == 0 && new_primary.0 == r {
+                let new_col = new_primary.1 as isize + chars_diff;
+                new_primary.1 = new_col.max(0) as usize;
+            }
+        }
+
+        let new_pos = (win.row, win.col);
+        if (r, c) == primary_pos {
+            new_primary = new_pos;
+            primary_processed = true;
+        } else {
+            new_cursors.push(new_pos);
+        }
+    }
+
+    let (win, _) = editor.active_window_and_buf_mut();
+    win.row = new_primary.0;
+    win.col = new_primary.1;
+    win.extra_cursors = new_cursors;
+}
+
+fn apply_movement_to_all_cursors(editor: &mut Editor, mut f: impl FnMut(&mut Window, &Buffer)) {
+    let (win, buf) = editor.active_window_and_buf_mut();
+    f(win, buf);
+    // Capture the primary cursor's result BEFORE touching extra cursors —
+    // the loop below reuses win.row/win.col as scratch space for each
+    // extra cursor, so without this the primary position gets silently
+    // overwritten by whichever extra cursor is processed last. That was
+    // the cause of a 5-cursor multicursor selection collapsing to 4
+    // effective cursors after entering Insert mode (e.g. via `a`).
+    let primary_result = (win.row, win.col);
+    let cursors = std::mem::take(&mut win.extra_cursors);
+    let mut new_cursors = Vec::with_capacity(cursors.len());
+    for (r, c) in cursors {
+        win.row = r;
+        win.col = c;
+        f(win, buf);
+        new_cursors.push((win.row, win.col));
+    }
+    win.extra_cursors = new_cursors;
+    win.row = primary_result.0;
+    win.col = primary_result.1;
+}
 // ========== BRIEF MODE HOME/END TRACKERS ==========
 struct BriefHomeTracker {
     last_press: Option<Instant>,
@@ -303,8 +386,13 @@ pub fn resolve_single_key(
         }
 
         Mode::LlmPrompt => None,
-        Mode::Normal => None,
-
+        Mode::Normal => match raw_key.code {
+            // Esc must always be able to clear multicursor state, even
+            // when no config/default binding maps "esc" to anything in
+            // Normal mode.
+            KeyCode::Esc => Some(Action::ExitMode),
+            _ => None,
+        },
         Mode::Visual | Mode::VisualLine | Mode::VisualBlock => match key_str {
             "y" | "ctrl+c" => Some(Action::YankSelection),
             // "+" => Some(Action::YankToSystemClipboard),
@@ -673,6 +761,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         }
 
         Action::EnterBrief => {
+            editor.active_window_mut().extra_cursors.clear();
             editor.enter_brief();
         }
         Action::BriefSelectionToggle => {
@@ -780,7 +869,27 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // ---------------------------------------------------------------
         // Visual Selection Operations
         // ---------------------------------------------------------------
+        Action::AddCursorDown => {
+            let (win, buf) = editor.active_window_and_buf_mut();
+            let max_row = buf.len_lines().saturating_sub(1);
+            // Respect the count prefix ("4C" => 4 new cursors on the 4
+            // lines below, 5 total including the original). Stop instead
+            // of stacking a duplicate cursor once we run out of lines —
+            // that duplicate was causing double-typed text on the last line.
+            for _ in 0..count {
+                let r = win.row;
+                let c = win.col;
+                if r >= max_row {
+                    break;
+                }
+                win.extra_cursors.push((r, c));
+                win.row = r + 1;
+                win.col = c.min(buf.line_char_len(win.row));
+            }
+            editor.snap_cursor_to_viewport();
+        }
         Action::EnterVisual => {
+            editor.active_window_mut().extra_cursors.clear();
             if editor.mode() == Mode::Visual {
                 editor.change_mode(Mode::Normal);
             } else {
@@ -788,6 +897,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
         }
         Action::EnterVisualLine => {
+            editor.active_window_mut().extra_cursors.clear();
             if editor.mode() == Mode::VisualLine {
                 editor.change_mode(Mode::Normal);
             } else {
@@ -795,6 +905,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
         }
         Action::EnterVisualBlock => {
+            editor.active_window_mut().extra_cursors.clear();
             if editor.mode() == Mode::VisualBlock {
                 editor.change_mode(Mode::Normal);
             } else {
@@ -818,82 +929,93 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // ---------------------------------------------------------------
         Action::MoveLeft => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for _ in 0..count {
-                    movement::move_left(win, buf);
-                }
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    for _ in 0..count {
+                        movement::move_left(w, b);
+                    }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveRight => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for _ in 0..count {
-                    movement::move_right(win, buf);
-                }
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    for _ in 0..count {
+                        movement::move_right(w, b);
+                    }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveUp => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for _ in 0..count {
-                    movement::move_up(win, buf);
-                }
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    for _ in 0..count {
+                        movement::move_up(w, b);
+                    }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveDown => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for _ in 0..count {
-                    movement::move_down(win, buf);
-                }
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    for _ in 0..count {
+                        movement::move_down(w, b);
+                    }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveWordForward => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for _ in 0..count {
-                    movement::move_word_forward(win, buf);
-                }
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    for _ in 0..count {
+                        movement::move_word_forward(w, b);
+                    }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveWordBackward => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                for _ in 0..count {
-                    movement::move_word_backward(win, buf);
-                }
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    for _ in 0..count {
+                        movement::move_word_backward(w, b);
+                    }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveLineStart => {
             let is_brief = editor.mode() == Mode::Brief;
+            let tap_count = if is_brief {
+                crate::keybind::brief_trackers::home_tap()
+            } else {
+                0
+            };
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                if is_brief {
-                    let count = crate::keybind::brief_trackers::home_tap(); // ← replaces inline tracker
-                    match count {
-                        0 => movement::move_line_start(win, buf),
-                        1 => {
-                            win.row = win.scroll_line;
-                            win.col = 0;
-                            win.clamp_cursor(buf);
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    if is_brief {
+                        match tap_count {
+                            0 => movement::move_line_start(w, b),
+                            1 => {
+                                w.row = w.scroll_line;
+                                w.col = 0;
+                                w.clamp_cursor(b);
+                            }
+                            _ => movement::move_to_first_line(w, b),
                         }
-                        _ => movement::move_to_first_line(win, buf),
+                    } else {
+                        movement::move_line_start(w, b);
                     }
-                } else {
-                    movement::move_line_start(win, buf);
-                }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -901,60 +1023,69 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::MoveLineEnd => {
             let current_mode = editor.mode();
             let is_brief = current_mode == Mode::Brief;
+            let tap_count = if is_brief {
+                crate::keybind::brief_trackers::end_tap()
+            } else {
+                0
+            };
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                if is_brief {
-                    let count = crate::keybind::brief_trackers::end_tap(); // ← replaces inline tracker
-                    match count {
-                        0 => movement::move_line_end(win, buf, current_mode),
-                        1 => {
-                            let last_visible = (win.scroll_line
-                                + win.position.height.saturating_sub(1))
-                            .min(buf.len_lines().saturating_sub(1));
-                            win.row = last_visible;
-                            win.col = editing::line_display_width(buf, win.row).saturating_sub(1);
-                            win.desired_col = win.col;
-                            win.clamp_cursor(buf);
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    if is_brief {
+                        match tap_count {
+                            0 => movement::move_line_end(w, b, current_mode),
+                            1 => {
+                                let last_visible = (w.scroll_line
+                                    + w.position.height.saturating_sub(1))
+                                .min(b.len_lines().saturating_sub(1));
+                                w.row = last_visible;
+                                w.col = editing::line_display_width(b, w.row).saturating_sub(1);
+                                w.desired_col = w.col;
+                                w.clamp_cursor(b);
+                            }
+                            _ => movement::move_to_last_line(w, b),
                         }
-                        _ => movement::move_to_last_line(win, buf),
+                    } else {
+                        movement::move_line_end(w, b, current_mode);
                     }
-                } else {
-                    movement::move_line_end(win, buf, current_mode);
-                }
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveToFirstLine => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_to_first_line(win, buf);
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    movement::move_to_first_line(w, b);
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::MoveToLastLine => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                movement::move_to_last_line(win, buf);
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    movement::move_to_last_line(w, b);
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::PageUp => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                let jump = win.position.height.saturating_sub(2).max(1);
-                movement::page_up(win, buf, jump);
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    let jump = w.position.height.saturating_sub(2).max(1);
+                    movement::page_up(w, b, jump);
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
         }
         Action::PageDown => {
             {
-                let (win, buf) = editor.active_window_and_buf_mut();
-                let jump = win.position.height.saturating_sub(2).max(1);
-                movement::page_down(win, buf, jump);
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    let jump = w.position.height.saturating_sub(2).max(1);
+                    movement::page_down(w, b, jump);
+                });
             }
             editor.snap_cursor_to_viewport();
             editor.comp.on_leave_insert();
@@ -1336,18 +1467,16 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         // Editing
         // ---------------------------------------------------------------
         Action::Backspace => {
-            // Capture deletion range BEFORE the edit for LSP notification
-            let delete_range = {
+            let has_extra = !editor.active_window().extra_cursors.is_empty();
+            let delete_range = if !has_extra {
                 let (win, buf) = editor.active_window_and_buf_mut();
                 let row = win.row;
                 let col = win.col;
-
                 if col > 0 {
                     let line_text = buf.line_text(row);
                     let mut char_idx = 0;
                     let mut prev_char_idx = 0;
                     for grapheme in line_text.graphemes(true) {
-                        // <-- FIX: use .graphemes(true) on &str
                         if char_idx == col {
                             break;
                         }
@@ -1356,23 +1485,26 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                     }
                     Some((row, prev_char_idx, row, col))
                 } else {
-                    None // Line join - will use full sync
+                    None
                 }
+            } else {
+                None
             };
-
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::backspace(win, buf);
-
-            // Notify LSP of the deletion
-            editor.lsp_notify_backspace(delete_range);
-
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::backspace(win, buf);
+            });
+            if has_extra {
+                if let Some(filename) = editor.active_filename() {
+                    editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                }
+            } else {
+                editor.lsp_notify_backspace(delete_range);
+            }
             editor.on_completion_edit();
         }
         Action::DeleteCharForward => {
             let is_brief_selecting =
                 editor.mode() == Mode::Brief && editor.active_window().visual_anchor.is_some();
-
             if is_brief_selecting {
                 // Delete the selection (without yanking to clipboard)
                 let mode = Mode::Visual;
@@ -1392,19 +1524,17 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
                 editor.active_window_mut().visual_anchor = None;
             } else {
-                // Capture deletion range BEFORE the edit for LSP notification
-                let delete_range = {
+                let has_extra = !editor.active_window().extra_cursors.is_empty();
+                let delete_range = if !has_extra {
                     let (win, buf) = editor.active_window_and_buf_mut();
                     let row = win.row;
                     let col = win.col;
                     let line_len = buf.line_char_len(row);
-
                     if col < line_len {
                         let line_text = buf.line_text(row);
                         let mut char_idx = 0;
                         let mut grapheme_len = 1;
                         for grapheme in line_text.graphemes(true) {
-                            // <-- FIX: use .graphemes(true) on &str
                             if char_idx == col {
                                 grapheme_len = grapheme.chars().count();
                                 break;
@@ -1413,22 +1543,24 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                         }
                         Some((row, col, row, col + grapheme_len))
                     } else {
-                        None // Line join - will use full sync
+                        None
                     }
+                } else {
+                    None
                 };
-
-                for _ in 0..count {
-                    let (win, buf) = editor.active_window_and_buf_mut();
-                    editing::delete_char_forward(win, buf);
-                }
-
-                // Notify LSP (only for first char, to avoid redundant notifications)
-                if count == 1 {
+                apply_to_all_cursors(editor, |win, buf| {
+                    for _ in 0..count {
+                        editing::delete_char_forward(win, buf);
+                    }
+                });
+                if has_extra {
+                    if let Some(filename) = editor.active_filename() {
+                        editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                    }
+                } else if count == 1 {
                     editor.lsp_notify_delete_forward(delete_range);
                 }
             }
-
-            // Use on_completion_edit for Insert/Brief mode typing
             if matches!(editor.mode(), Mode::Insert | Mode::Brief) && !is_brief_selecting {
                 editor.on_completion_edit();
             } else {
@@ -1483,70 +1615,65 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
         }
         Action::DeleteCurrentLine => {
+            let has_extra = !editor.active_window().extra_cursors.is_empty();
             let mut deleted_text = String::new();
-            for _ in 0..count {
+            if has_extra {
+                apply_to_all_cursors(editor, |win, buf| {
+                    editing::delete_current_line(win, buf);
+                });
                 let line_text = editor.line_text(editor.active_row());
                 deleted_text.push_str(&line_text);
                 deleted_text.push('\n');
-                let (win, buf) = editor.active_window_and_buf_mut();
-                editing::delete_current_line(win, buf);
+            } else {
+                for _ in 0..count {
+                    let line_text = editor.line_text(editor.active_row());
+                    deleted_text.push_str(&line_text);
+                    deleted_text.push('\n');
+                    let (win, buf) = editor.active_window_and_buf_mut();
+                    editing::delete_current_line(win, buf);
+                }
             }
             editor.yank_to_register(deleted_text, register);
-
-            // Notify LSP of line deletion (full sync is simplest for multi-line ops)
             if let Some(filename) = editor.active_filename() {
                 editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
             }
-
-            // Recalculate column boundary with visual dimensions
             let (win, buf) = editor.active_window_and_buf_mut();
             win.col = win.col.min(editing::line_display_width(buf, win.row));
             editor.comp.on_edit();
         }
         Action::DeleteToEndOfLine => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::delete_to_end_of_line(win, buf);
-
-            // Notify LSP of deletion (full sync for simplicity)
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::delete_to_end_of_line(win, buf);
+            });
             if let Some(filename) = editor.active_filename() {
                 editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
             }
-
             editor.comp.on_edit();
         }
         Action::InsertNewline => {
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::insert_newline(win, buf);
+            });
             let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::insert_newline(win, buf);
             buf.parse_syntax();
-
-            // Notify LSP of newline insertion (full sync - newline changes line structure)
             if let Some(filename) = editor.active_filename() {
                 editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
             }
-
             editor.on_completion_edit();
         }
         Action::InsertTab => {
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::insert_tab(win, buf);
+            });
             let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::insert_tab(win, buf);
             buf.parse_syntax();
-
-            // Notify LSP of tab insertion (incremental - just adds spaces)
-            let path = match editor.active_filename() {
-                Some(f) => std::path::PathBuf::from(f),
-                None => {
-                    editor.comp.on_edit();
-                    return;
-                }
-            };
-            editor.lsp_notify_insert_text("    ");
-
+            if let Some(filename) = editor.active_filename() {
+                editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+            }
             editor.on_completion_edit();
         }
         Action::Undo => {
+            editor.active_window_mut().extra_cursors.clear();
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col); // Capture current cursor
             if let Some(snap) = buf.pop_undo(row, col) {
@@ -1558,9 +1685,9 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
             editor.comp.on_leave_insert();
         }
-
         // Add the Redo action handler
         Action::Redo => {
+            editor.active_window_mut().extra_cursors.clear();
             let (win, buf) = editor.active_window_and_buf_mut();
             let (row, col) = (win.row, win.col); // Capture current cursor
             if let Some(snap) = buf.pop_redo(row, col) {
@@ -1576,16 +1703,19 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.comp.on_leave_insert();
         }
         Action::InsertChar(ch) => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::insert_char(win, buf, ch);
-
-            // Notify LSP of the edit BEFORE triggering completion
-            editor.lsp_notify_insert_edit(ch);
-
+            let has_extra = !editor.active_window().extra_cursors.is_empty();
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::insert_char(win, buf, ch);
+            });
+            if has_extra {
+                if let Some(filename) = editor.active_filename() {
+                    editor.lsp_notify_change_full(std::path::PathBuf::from(filename));
+                }
+            } else {
+                editor.lsp_notify_insert_edit(ch);
+            }
             editor.on_completion_edit();
         }
-
         // ---------------------------------------------------------------
         // Mode transitions
         // ---------------------------------------------------------------
@@ -1593,38 +1723,45 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             editor.enter_insert();
         }
         Action::EnterAppend => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            let step = editing::grapheme_width_at_char(buf, win.row, win.col);
-            let max_width = editing::line_display_width(buf, win.row);
-            win.col = (win.col + step).min(max_width);
+            {
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    let step = editing::grapheme_width_at_char(b, w.row, w.col);
+                    let max_width = editing::line_display_width(b, w.row);
+                    w.col = (w.col + step).min(max_width);
+                });
+            }
             editor.enter_insert();
         }
         Action::EnterInsertLineStart => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            movement::move_line_start(win, buf);
-            let _ = buf;
+            {
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    movement::move_line_start(w, b);
+                });
+            }
             editor.enter_insert();
         }
         Action::EnterInsertLineEnd => {
-            let (win, buf) = editor.active_window_and_buf_mut();
-            movement::move_line_end(win, buf, Mode::Insert);
-            let _ = buf;
+            {
+                apply_movement_to_all_cursors(editor, |w, b| {
+                    movement::move_line_end(w, b, Mode::Insert);
+                });
+            }
             editor.enter_insert();
         }
         Action::InsertNewlineBelow => {
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::insert_newline_below(win, buf);
+            });
             let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::insert_newline_below(win, buf);
             buf.parse_syntax();
-            let _ = buf;
             editor.enter_insert();
         }
         Action::InsertNewlineAbove => {
+            apply_to_all_cursors(editor, |win, buf| {
+                editing::insert_newline_above(win, buf);
+            });
             let (win, buf) = editor.active_window_and_buf_mut();
-            let (row, col) = (win.row, win.col);
-            editing::insert_newline_above(win, buf);
             buf.parse_syntax();
-            let _ = buf;
             editor.enter_insert();
         }
         Action::EnterCommand => {
@@ -1640,7 +1777,6 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             };
             // Save it on the editor for use in command execution
             editor.saved_visual_range = visual_range;
-
             let visual_anchor = if matches!(
                 prev_mode,
                 Mode::Visual | Mode::VisualLine | Mode::VisualBlock
@@ -1649,6 +1785,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             } else {
                 None
             };
+            editor.active_window_mut().extra_cursors.clear();
             editor.enter_command();
             if visual_anchor.is_some() {
                 editor.active_window_mut().visual_anchor = visual_anchor;
@@ -1678,6 +1815,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             }
             editor.change_mode(Mode::Normal);
             editor.clear_status_msg();
+            editor.active_window_mut().extra_cursors.clear();
         }
         Action::FilePicker => {
             let initial = editor
@@ -1695,6 +1833,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
             if editor.mode() != Mode::Search {
                 editor.prev_mode = editor.mode();
             }
+            editor.active_window_mut().extra_cursors.clear();
             editor.set_mode(Mode::Search);
         }
         Action::CancelSearch => {
@@ -2686,6 +2825,7 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 editor.active_window_mut().visual_anchor = None;
                 editor.clear_status_msg();
             }
+            editor.active_window_mut().extra_cursors.clear();
         }
 
         // ---------------------------------------------------------------
