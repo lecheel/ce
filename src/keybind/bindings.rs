@@ -875,10 +875,21 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
         Action::AddCursorDown => {
             let (win, buf) = editor.active_window_and_buf_mut();
             let max_row = buf.len_lines().saturating_sub(1);
+            let tab_size = buf.tab_size.max(1);
             // Respect the count prefix ("4C" => 4 new cursors on the 4
             // lines below, 5 total including the original). Stop instead
             // of stacking a duplicate cursor once we run out of lines —
             // that duplicate was causing double-typed text on the last line.
+            //
+            // Convert the primary cursor's char index to a visual column
+            // so that cursors added on lines below stay visually aligned.
+            // Using the raw char index directly causes the 'C' multicursor
+            // to drift when lines contain tabs (a tab expands to a variable
+            // width depending on the current column).
+            let visual_col = {
+                let line_text = buf.line_text(win.row);
+                crate::ed::editing::visual_col_from_char_idx(&line_text, win.col, tab_size)
+            };
             for _ in 0..count {
                 let r = win.row;
                 let c = win.col;
@@ -887,8 +898,24 @@ pub fn execute_action(editor: &mut Editor, action: Action) {
                 }
                 win.extra_cursors.push((r, c));
                 win.row = r + 1;
-                win.col = c.min(buf.line_char_len(win.row));
+                // Convert visual column back to char index on the new line
+                // so the cursor lands at the same screen column.
+                let new_line = buf.line_text(win.row);
+                let mut col = 0;
+                let mut new_char_idx = new_line.chars().count();
+                for (i, ch) in new_line.chars().enumerate() {
+                    if col >= visual_col {
+                        new_char_idx = i;
+                        break;
+                    }
+                    match ch {
+                        '\t' => col += tab_size - (col % tab_size),
+                        _ => col += 1,
+                    }
+                }
+                win.col = new_char_idx.min(buf.line_char_len(win.row));
             }
+            win.desired_col = visual_col;
             editor.snap_cursor_to_viewport();
         }
         Action::EnterVisual => {
